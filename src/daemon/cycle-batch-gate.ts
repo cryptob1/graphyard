@@ -209,6 +209,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
       return { revertSha: revert.revertSha };
     },
     file,
+    flaky: check => work.find(item => item.stage !== 'done' && item.title === `Flaky check on main: ${check}`)?.key ?? null,
     // The full suite (a package.json change selects every test) and the whole catalog, each its own trial so the catalog's time is its own; then the preview cases, in a repository that holds them.
     diagnose: async commit => {
       const suite = await trialFailures(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs, trusted);
@@ -224,9 +225,13 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
   };
 }
 
-const stopped = new WeakSet<object>();
-/** The loop is stopping: a gate that fails from here on was interrupted, and its record stays as last checkpointed for the next loop (GY-3161). */
-export const noteBatchGateStopping = (state: object) => { stopped.add(state); };
+const stopped = new WeakSet<object>(), gateRuns = new WeakMap<object, AbortController>();
+/**
+ * The loop is stopping: a gate that fails from here on was interrupted, and its record stays as last
+ * checkpointed for the next loop (GY-3161). Its host heavy-job slot is freed now (GY-3449); its
+ * detached run keeps going for the next loop to adopt.
+ */
+export const noteBatchGateStopping = (state: object) => { stopped.add(state); gateRuns.get(state)?.abort(); };
 
 /**
  * One record writer at a time per file: the gate's mid-flight checkpoints and the diagnostics'
@@ -290,6 +295,8 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
   // place of orphaning it. The diagnostics, and a check with named environments, trial in process.
   // Like every trial it is one heavy job of the host (GY-3290); its wait for that slot is a wait, not its own time.
   let heavyWait = false;
+  // GY-3449: the gate flight's lifetime; its end — any outcome, a throw, or the loop stopping — frees the slot its checks hold.
+  const ended = new AbortController();
   const trial: MergeWriterReads['trial'] = async (sha, files, item, base, step, timing, heads, _share, signal, timeout) => {
     const share = Math.max(1, busyTrialSlots(cycle.state)), flight = gated.inFlight, proofs = criterionProofs(item);
     const input = createHash('sha256').update(JSON.stringify([proofs, files])).digest('hex');
@@ -306,7 +313,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       gated.inFlight = { ...gated.inFlight!, run: { commit: sha, input, directory: launched.directory } };
       await mergeGateRecord(file, latest => ({ ...gated, ...diagnosticFields(latest, gated) })).catch(() => undefined);
       return launched.trial(step, timing, signal);
-    });
+    }, ended.signal);
   };
   const ports = batchGatePorts({ ...reading, git, trial }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
   // GY-3444: the gate's bound leaves out the time its checks wait for a trial slot or while the loop holds launches for CPU.
@@ -351,6 +358,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
   // slot, and its trial containers start before queued merge trials (trialStartOrder).
   if (!live.gate) {
     const current = record;
+    gateRuns.set(cycle.state, ended);
     live.gate = (async () => {
       try {
         // A timed-out run starts again at once: runGate cleared its batch, so the retry is cut from
@@ -382,7 +390,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
         await mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) })).catch(() => undefined);
         note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`);
       }
-      finally { live.gate = null; }
+      finally { live.gate = null; ended.abort(); gateRuns.delete(cycle.state); }
     })();
   }
   // Diagnostics start without waiting for a slot — the daily check must not starve — but count as a busy

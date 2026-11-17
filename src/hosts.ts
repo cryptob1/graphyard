@@ -6,9 +6,12 @@
 // that opens a plain shell, root and a docker-group user, then records the host in this machine's hosts
 // file — the one host list. Each loop cycle probes every host — cores, hottest CPU sensor, steal and the
 // trial containers running now — this machine first; a host that does not answer reads away.
+// GY-3440: where port 22 is Tailscale SSH (it ignores authorized_keys and so the shim), prepare adds a
+// second OpenSSH for gy-compute only on port 2222; host add takes USER@HOST:PORT or an ssh-config alias
+// and reports whether the operator's own account logs into that host unattended on port 22.
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { homedir, hostname } from 'node:os';
+import { homedir, hostname, userInfo } from 'node:os';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { configHome } from './install/secrets.js';
 import { cpuSensorNames } from './merge-writer/trial-load.js';
@@ -20,7 +23,9 @@ export interface HostReading { host: string; local?: boolean; away: boolean; rea
 
 /** Machine-wide, beside the machine-share link (team-access.ts): every install's loop on this machine reads the same hosts. */
 export const hostsFile = (home = configHome()) => join(home, 'machine', 'hosts.json');
-export const hostTargetPattern = /^[a-z_][a-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*$/;
+/** USER@HOST, USER@HOST:PORT, or an ssh-config alias. */
+export const hostTargetPattern = /^(?:[a-z_][a-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*(?::\d{1,5})?|[A-Za-z0-9][A-Za-z0-9._-]*)$/;
+export const computePort = 2222;
 export const hostUser = 'gy-compute';
 
 export async function readHosts(file = hostsFile()): Promise<HostRecord[]> {
@@ -38,6 +43,7 @@ export function hostPrepareScript(publicKey: string) {
 # may only run graphyard-host-shim as ${hostUser}: no shell, pty, port or agent forwarding.
 set -eu
 user=${hostUser}
+target="$user@$(hostname)"
 command -v python3 >/dev/null && command -v git >/dev/null || { echo "Install python3 and git, then run this again." >&2; exit 1; }
 id "$user" >/dev/null 2>&1 || useradd --create-home --shell /bin/sh "$user"
 gpasswd -d "$user" docker >/dev/null 2>&1 || true
@@ -85,7 +91,44 @@ fi
 chown -R "$user:$user" "$home/.graphyard"
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
 sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" PATH="$(dirname "$setuptool"):$PATH" "$setuptool" install
-echo "Ready. On the Graphyard machine run: graphyard host add $user@$(hostname)"
+# Tailscale SSH on port 22 ignores authorized_keys, so the shim: give $user its own OpenSSH on port ${computePort}.
+if tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": *true'; then
+  sshd=$(command -v sshd) || { echo "Install the OpenSSH server (sshd), then run this again." >&2; exit 1; }
+  ssh-keygen -A
+  cat > /etc/ssh/sshd_graphyard_config <<GRAPHYARD_SSHD
+Port ${computePort}
+AllowUsers $user
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowTcpForwarding no
+AllowAgentForwarding no
+AllowStreamLocalForwarding no
+X11Forwarding no
+PermitTunnel no
+PermitTTY no
+ForceCommand /usr/local/bin/graphyard-host-shim
+PidFile /run/graphyard-sshd.pid
+GRAPHYARD_SSHD
+  "$sshd" -t -f /etc/ssh/sshd_graphyard_config
+  cat > /etc/systemd/system/graphyard-sshd.service <<GRAPHYARD_UNIT
+[Unit]
+Description=OpenSSH for $user only (Graphyard compute, port ${computePort})
+After=network.target
+[Service]
+ExecStart=$sshd -D -f /etc/ssh/sshd_graphyard_config
+Restart=always
+[Install]
+WantedBy=multi-user.target
+GRAPHYARD_UNIT
+  systemctl daemon-reload
+  systemctl enable --now graphyard-sshd
+  if command -v ufw >/dev/null && ufw status | grep -q 'Status: active'; then ufw allow in on tailscale0 to any port ${computePort} proto tcp; fi
+  target="$target:${computePort}"
+  echo "Port 22 here is Tailscale SSH, which skips the shim. Tailnet check: in your tailnet policy, every ssh rule reaching this machine needs action check, never accept, so no account here logs in unattended. Graphyard reaches $user on port ${computePort}."
+fi
+echo "Ready. On the Graphyard machine run: graphyard host add $target"
 `;
 }
 
@@ -108,7 +151,9 @@ export function parseHostProbe(text: string) {
 }
 
 const lastLine = (text: string) => text.trim().split('\n').filter(Boolean).at(-1) ?? '';
-const ssh = (target: string, verb: string, run: ChildRun) => run('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', target, verb], { timeoutMs: 15_000 });
+/** ssh's arguments for a host target: USER@HOST:PORT becomes -p PORT USER@HOST; USER@HOST and an alias pass as they are. */
+export const sshTarget = (target: string) => { const port = /^(.+@.+):(\d+)$/.exec(target); return port ? ['-p', port[2]!, port[1]!] : [target]; };
+const ssh = (target: string, verb: string, run: ChildRun) => run('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', ...sshTarget(target), verb], { timeoutMs: 15_000 });
 const unreachable = (target: string, error: any) => `${target} is unreachable over SSH: ${lastLine(String(error?.stderr ?? '')) || (error?.timedOut ? 'no answer within 15 seconds' : String(error?.message ?? error))}`;
 
 /** One probe of a host through its shim (null: this machine): its readings, or the plain reason it cannot be read. */
@@ -130,14 +175,25 @@ async function opensPlainShell(target: string, run: ChildRun) {
   catch (error: any) { return error?.status === 255 || error?.timedOut ? unreachable(target, error) : 'no'; }
 }
 
+const targetHost = (target: string) => target.replace(/^.*@/, '').replace(/:\d+$/, '');
+
+/** Read-only: does this machine's own account open a shell on the host's port 22 (Tailscale SSH or a key) with nobody there to approve it? */
+export async function operatorLogin(target: string, run: ChildRun = defaultChildRun, account = userInfo().username) {
+  const host = /^hostname (\S+)$/m.exec(String(await Promise.resolve(run('ssh', ['-G', ...sshTarget(target)], { timeoutMs: 5_000 })).catch(() => '')))?.[1] ?? targetHost(target);
+  const login = `${account}@${host}`;
+  try { await run('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=5', '-p', '22', login, 'true'], { timeoutMs: 15_000 }); return { login, unattended: true }; }
+  catch { return { login, unattended: false }; }
+}
+
 export async function addHost(target: string, options: { file?: string; run?: ChildRun } = {}) {
   const file = options.file ?? hostsFile(), run = options.run ?? defaultChildRun;
-  if (target.length > 300 || !hostTargetPattern.test(target)) throw new Error(`Name the host as USER@HOST, for example ${hostUser}@omarchypc: got ${JSON.stringify(target)}`);
+  if (target.length > 300 || !hostTargetPattern.test(target)) throw new Error(`Name the host as USER@HOST, USER@HOST:PORT or an ssh-config alias, for example ${hostUser}@omarchypc:${computePort}: got ${JSON.stringify(target)}`);
   const hosts = await readHosts(file);
   if (hosts.some(host => host.target === target)) return { added: false, hosts };
+  const host = targetHost(target);
   const refuse = (reason: string) => { throw new Error(`${target} was not added: ${reason}`); };
   const shell = await opensPlainShell(target, run);
-  if (shell === 'yes') refuse(`its SSH key opens a plain shell, so Graphyard could reach everything that user can; run graphyard host prepare and the script it prints there, then add ${hostUser}@${target.split('@')[1]}`);
+  if (shell === 'yes') refuse(`its SSH key opens a plain shell, so Graphyard could reach everything that user can; run graphyard host prepare and the script it prints there, then add ${hostUser}@${host} (${hostUser}@${host}:${computePort} where port 22 is Tailscale SSH)`);
   if (shell !== 'no') refuse(shell);
   const probe = await probeHost(target, run);
   if (!probe.ok) refuse(probe.reason);
@@ -145,7 +201,7 @@ export async function addHost(target: string, options: { file?: string; run?: Ch
   if (probe.ok && probe.groups.includes('docker')) refuse(`${target.split('@')[0]} is in the docker group, which is root on that host; use ${hostUser} with rootless Docker (graphyard host prepare)`);
   const next = [...hosts, { target, addedAt: new Date().toISOString() }];
   await writeHosts(file, next);
-  return { added: true, hosts: next, probe: probe.ok ? probe : null };
+  return { added: true, hosts: next, probe: probe.ok ? probe : null, operator: await operatorLogin(target, run) };
 }
 
 export async function removeHost(target: string, options: { file?: string } = {}) {
