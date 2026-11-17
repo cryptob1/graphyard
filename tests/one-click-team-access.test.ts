@@ -274,6 +274,10 @@ test('unit:test-browser-tests-one-click-team-access-spec-ts-pinned — settling 
   const settle = () => settleHostLoops([a, b].map(entry => ({ url: entry.base, credentialFile: entry.credentialFile })), { machineDir });
   const shown = async (entry: typeof a) => (await entry.call('/api/team-access')).body.shareLink?.url ?? null;
   try {
+    // The spec waits on settled loops with one reload: a retried reload restarts the page's read each attempt.
+    const spec = await readFile(new URL('../browser-tests/one-click-team-access.spec.ts', import.meta.url), 'utf8');
+    assert.match(spec, /settleHostLoops\(installs, /);
+    assert.doesNotMatch(spec, /toPass\(/, 'no retry loop reloads the page');
     // The last loop in turn saves: the first has already run when the machine learns of it.
     for (const [saver, link] of [[b, 'https://login.tailscale.com/admin/invite/saved-on-b'], [a, 'https://login.tailscale.com/admin/invite/saved-on-a']] as const) {
       assert.equal((await saver.call('/api/team-access/share-link', { url: link })).status, 200);
