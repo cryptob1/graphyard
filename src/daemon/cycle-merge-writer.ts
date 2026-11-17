@@ -70,6 +70,8 @@ export interface MergeWriterReads extends MergePorts {
    * its re-land until a loop that can file adopts it.
    */
   createWork?(input: RelandInput, idempotencyKey: string): Promise<{ key?: string } | null>;
+  /** GY-3443: records `proof` as passing on `work`'s candidate head (`POST work/ID/evidence` as the master's operator-agent identity, as `master attest` does); absent, nothing is attested. */
+  attest?(work: Work, proof: string, reason: string, idempotencyKey: string): Promise<unknown>;
   /** GY-3119: the checkout whose .graphyard/main-gate.json the batch gate keeps, and the repository it gates; absent, no batch gate runs. */
   gate?: { root: string; repository: string; /** GY-3296: the app environment lifecycle; absent, the loop's own over the root's state file. */ environments?: ReturnType<typeof import('../app-environments.js').environmentLifecycle>; /** GY-3193: runs the preview cases on the host against the commit; absent, each is reported not covered. */ previews?(commit: string): Promise<PreviewCaseRun[]>; /** GY-3444: the machine's trial slot directory the gate reads its waits from; absent, the launcher's own. */ slots?: string };
   /**
