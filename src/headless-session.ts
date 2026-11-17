@@ -206,8 +206,9 @@ export type HeadlessAccountLaunch = Pick<HeadlessSession<unknown>, 'kind' | 'acc
  * is false for a worker, which reaches no keyring at all (GY-1523).
  */
 async function prepareHeadlessRun(on: HeadlessAccountLaunch, prompt: string, directory: string, coordinatorRoot: string | undefined, ownGitHubCredential: boolean, cores?: number) {
-  // GY-3401: the session's share of the host's test parallelism, recomputed at every launch.
-  on = { ...on, environment: { ...on.environment, VITEST_MAX_WORKERS: String(sessionTestBudget(cores)) } };
+  // GY-3401: the session's share of the host's test parallelism, recomputed at every launch; GY-3436: it caps Playwright's browsers too.
+  const budget = String(sessionTestBudget(cores));
+  on = { ...on, environment: { ...on.environment, VITEST_MAX_WORKERS: budget, PLAYWRIGHT_WORKERS: budget } };
   headlessArgs(on.kind, on.args, prompt, on.contract);
   assertLaunchable(on.kind, on.contract ? { ...on.contract, args: on.contract.headlessArgs ?? on.contract.args } : null);
   const trust = await launchRecipe(on.kind)?.trust?.(directory, on.environment, on.args);
