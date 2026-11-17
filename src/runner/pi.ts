@@ -196,6 +196,10 @@ export function detachedLaunch(directory: string, id: string, command: string, a
   return unit ? { file: 'systemd-run', args: ['--user', '--scope', '--quiet', '--collect', `--unit=${unit}`, ...scopeProperties, '--', ...shell], unit } : { file: shell[0], args: shell.slice(1), unit };
 }
 
+/** GY-3438: an agent session's launch — a worker, reviewer or producer — whose scope carries the session's CPU and memory share. */
+export const sessionLaunch = (directory: string, id: string, command: string, args: string[], containment: RunContainment, confinement: readonly string[] = []) =>
+  detachedLaunch(directory, id, command, args, containment, confinement, undefined, containment === 'systemd' ? sessionScopeProperties() : []);
+
 /** A process's start time (/proc/PID/stat), which tells it from a later process given the same pid. */
 export function processIdentity(pid: number): string | null {
   try {
@@ -241,8 +245,10 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
         const containment = scratch ? 'setsid' : configured.containment ?? runContainment();
         const environment = runEnvironment(process.env, { ...configured.environment, ...options.env });
         const confinement = configured.confine?.(options.cwd, environment) ?? [];
-        const launch = detachedLaunch(directory, id, command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })], containment, confinement,
-          scratch ? (options.timeoutMs + grace) / 1000 + scratchBoundMarginSeconds : undefined, containment === 'systemd' ? sessionScopeProperties() : []);
+        const argv = [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })];
+        // A scratch run (triage, diagnosis) is no agent session: it bounds itself and takes no share.
+        const launch = scratch ? detachedLaunch(directory, id, command, argv, containment, confinement, (options.timeoutMs + grace) / 1000 + scratchBoundMarginSeconds)
+          : sessionLaunch(directory, id, command, argv, containment, confinement);
         // Detached: the run leads its own session and process group, holds no pipe to this process
         // (stdin is closed, so nothing can wait on a person), and is not waited on by it.
         child = (configured.spawn ?? spawn)(launch.file, launch.args, { cwd: options.cwd, env: environment, stdio: ['ignore', 'ignore', 'ignore'], detached: true });

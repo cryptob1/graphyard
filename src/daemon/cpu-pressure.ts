@@ -118,7 +118,7 @@ export async function cpuPressureStep(cycle: { state: DaemonState; effects: Daem
 export function sessionUsageStep(cycle: { state: DaemonState; effects: DaemonEffects; now: () => number; log: (line: string) => void }) {
   const { state, effects, now, log } = cycle;
   if (!effects.sessionScopes) return;
-  const at = now(), raised = new Set(overloaded(state.sessions, at).map(session => session.unit));
+  const at = now(), raised = new Set(state.sessions.filter(session => overloaded([session], Date.parse(session.at)).length).map(session => session.unit));
   state.sessions = readSessionUsage(state.sessions, at, effects.sessionScopes(), effects.sessionName);
   for (const session of overloaded(state.sessions, at)) if (!raised.has(session.unit)) log(`[graphyard-master] cycle ${state.cycle}: overload: ${overloadAlarm(session, at)}`);
 }

@@ -1,0 +1,14 @@
+{
+  "id": "session-usage-shown",
+  "title": "Master status and the Workers page show each session's CPU and memory against its cap, and alarm on a session stuck at its cap",
+  "description": "The loop reads two live session scopes from their cgroup counters each cycle: one burns its whole 2-core quota, one a tenth of a core. Master status (sessionUsage) and the Workers page's Session caps table list both with CPU and memory use against their caps. After five minutes at its cap the busy session raises the overload alarm naming it: one journal line, an attention line in master status and an alert on the Workers page; the quiet session raises none.",
+  "tags": ["capacity", "workers"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "each session's use and caps are shown and a session at its cap for 5 minutes raises the overload alarm",
+    "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:session-usage-shown tests/session-usage-shown.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

@@ -6,6 +6,7 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 
 - Docker and Compose: on an AppArmor host up loads the `graphyard-trial` profile with sudo.
 - Docker and Compose are needed even for `--local`; merge trials run in them.
+- Per-session caps: each worker, reviewer and producer session gets a CPU and memory cap, the host's cores divided by the live sessions (never under two cores), memory in proportion. `master status` → `sessionUsage` and Workers → Session caps show each session's use against its caps; a session at its cap for five minutes raises the overload alarm naming it.
 
 ## More hosts
 
