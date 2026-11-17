@@ -1,7 +1,7 @@
 {
   "id": "dispatch-waits-on-cpu-temperature",
   "title": "Dispatch waits while the CPU is too hot, and master status shows the temperature",
-  "description": "The loop reads the hottest CPU sensor the trial guard reads: from that guard's limit minus 5C (96C here) no worker, reviewer or trial starts, one master status line names the temperature, a session already running is untouched, and at 80C the next cycle launches again. Where no CPU sensor is readable the check is skipped. Master status carries the hottest sensor, and the Workers page shows it beside CPU pressure at 1280 px and 390 px.",
+  "description": "The loop reads the hottest CPU sensor the trial guard reads: at that guard's own heat limit (GY-3416: min(85C, crit-3), so 96C here, well over it) no worker, reviewer or trial starts, one master status line names the temperature, a session already running is untouched, and below the halving limit (79C) the next cycle launches again. Where no CPU sensor is readable the check is skipped. Master status carries the hottest sensor, and the Workers page shows it beside CPU pressure at 1280 px and 390 px.",
   "tags": ["dispatch", "dashboard"],
   "target": "any",
   "required": false,
