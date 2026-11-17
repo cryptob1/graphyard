@@ -17,7 +17,8 @@ import { temporaryDirectory } from '../tests/helpers/temp-dirs';
 // panes — so the panel answers from the loop's own report, not from a fixture the page invented.
 
 test('e2e:setup-where-things-run — the Setup page\'s Where things run panel names this install\'s units, containers, port, URL, directories and master pane', async ({ page, context, baseURL }) => {
-  test.setTimeout(90_000);
+  // GY-3436 trial: on a loaded trial host the database, sign-in and twelve polled names outlast 90 s.
+  test.setTimeout(180_000);
   const store = await withDatabase('setup_where_things_run');
   await store.init();
   const engine = new Engine(store, 120, 'fixture/shop');
@@ -76,6 +77,8 @@ test('e2e:setup-where-things-run — the Setup page\'s Where things run panel na
     for (const part of ['graphyard-master-OWNER-NAME.service', 'graphyard-OWNER-NAME-server-1', '127.0.0.1:4310']) await expect(diagram).toContainText(part);
     await expect(page.locator('.guide')).toContainText('Where things run');
   } finally {
-    await new Promise<void>(resolve => http.close(() => resolve()));
+    // The page still polls through the proxy's keep-alive connection: close() waits on a poll in
+    // flight and the next poll reuses its socket, so it never returns unless the connections drop (GY-3358).
+    await new Promise<void>(resolve => { http.close(() => resolve()); http.closeAllConnections(); });
   }
 });

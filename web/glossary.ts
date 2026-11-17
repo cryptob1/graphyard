@@ -19,7 +19,7 @@ export const glossary = {
   producer: 'An agent that supplies independent proof of a change.',
   master: 'The agent coordinating work and resolving blockers. Independent reviewers approve changes.',
   'who decides': 'Agents and the master decide everything except three things: goals and priorities, money and accounts, and credentials for people. Those the owner answers themselves, signed in, from the item link the master gives them.',
-  blocker: 'A worker’s reason it cannot continue. The master is notified to resolve it.',
+  blocker: 'A worker’s reason it cannot continue. The master clears it; the Master page lists the ones waiting.',
   'gates removed this week': 'Lessons the master turned into code — a lint rule, type or test — in the last seven days, so agents no longer have to be told them.',
   'reverts this week': 'Merged changes the check on main took back out in the last seven days because they broke something.',
   'bootstrap obligation': 'A proof that was put off when Graphyard was first set up. The next change to the same files must provide it.',

@@ -1,0 +1,15 @@
+{
+  "id": "master-drain-from-session",
+  "title": "The master drains and resumes heavy work from its own confined session",
+  "description": "From a confined master session, graphyard master drain REASON writes the drain into the host-wide heavy-jobs folder, where another install's session sees it, and master resume lifts it; worker sessions read the drain but cannot write it.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "confined master drains host-wide and resumes",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/master-drain-writable.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

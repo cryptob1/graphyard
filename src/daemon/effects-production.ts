@@ -19,7 +19,7 @@ import { runDispatchTick } from '../dispatch/tick.js';
 import { launchBoundMs } from '../master/launch-bound.js';
 import { masterProfile, masterSessionEffects } from '../master/master-session.js';
 import { type MasterConfig } from '../master/profiles.js';
-import { agentToken } from '../master/autonomy.js';
+import { agentToken, intentInput } from '../master/autonomy.js';
 import { listHerdrAgents, closeHerdrPane, observeHerdrAgents } from '../master/herdr.js';
 import { readSessionScreen, preservePartialWork } from '../master/launch.js';
 import { checkoutTrustRefusals } from '../harness.js';
@@ -288,7 +288,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return { ...reads,
         ensureTrialImage: () => ensureTrialImage(),
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
-        ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
+        ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey),
+          attest: (work: Work, proof: string, reason: string, idempotencyKey: string) => asOperatorAgent(`work/${work.id}/evidence`, intentInput('attest', work, { proof, reason }), idempotencyKey) } : {}),
         gate: { root, repository: config.repository, previews: (commit: string) => runServedPreviewCases({ root, commit }) },
       };
     },

@@ -9,12 +9,12 @@ import { homedir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, writeFailure, type MasterConfig, type MasterRun } from '../src/master.js';
+import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, writeFailure, type MasterRun } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
-import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory, withVerificationPath } from '../src/master/verification-slots.js';
+import { acquireVerificationSlot, heavyCommand, heldSlots, hostHeavyJobsDirectory, verificationBin, verificationEnvironment, withVerificationPath } from '../src/master/verification-slots.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
 import { grantWorkerPaths, verifyWorkerSandbox } from '../src/worker-sandbox.js';
@@ -111,7 +111,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.ok(existsSync(produced.checkout));
     assert.equal((await readProducerLedger(root)).producers[0].checkout, produced.checkout, 'the session record owns the checkout');
     const produceStart = launchOf(produceCalls).args;
-    assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', join(managed, '.verification-slots')], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
+    assert.deepEqual(produceStart.slice(produceStart.indexOf('--add-dir'), -1), ['--add-dir', produced.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', hostHeavyJobsDirectory()], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
     assert.equal(launchOf(produceCalls).stem, join(produced.checkout, `.graphyard/launch/${produced.agentName}`), 'the request file lives in the session\'s own checkout');
     const producerText = promptOf(produceCalls);
     assert.ok(producerText.includes(`git worktree add --detach ${join(produced.checkout, 'checkout')} ${H}`));
@@ -125,7 +125,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.equal(dirname(reviewed.checkout), managed);
     assert.match(reviewed.checkout, /\/graphyard-review-gy-89-aaaaaaa-[0-9a-f]{8}$/);
     assert.equal((await readReviewLedger(root)).reviews[0].checkout, reviewed.checkout);
-    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), reviewStart.indexOf('--skip-git-repo-check')), ['--add-dir', reviewed.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', join(managed, '.verification-slots')], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
+    assert.deepEqual(reviewStart.slice(reviewStart.indexOf('--add-dir'), reviewStart.indexOf('--skip-git-repo-check')), ['--add-dir', reviewed.checkout, '--add-dir', await sharedGitDirectory(root) ?? '', '--add-dir', join(await sharedGitDirectory(root) ?? '', 'objects'), '--add-dir', join(await sharedGitDirectory(root) ?? '', 'worktrees'), '--add-dir', hostHeavyJobsDirectory()], 'the common Git directory (GY-2977: packed-refs lock) and the narrow paths beside it');
     assert.ok(reviewStart.at(-1)!.includes(`git worktree add --detach ${join(reviewed.checkout, 'checkout')} ${H}`));
     const plan = sessionHarnessPlan({ role: 'reviewer', kind: 'claude', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', credentialHome: scratch, credentialDirectories: [], pr: 88, checkout: join(reviewed.checkout, 'checkout') });
     assert.ok(plan.allow.some(entry => entry.rule === `Bash(git worktree add --detach ${join(reviewed.checkout, 'checkout')}:*)`), 'a reviewer may add a worktree at its allocated path and nowhere else');
@@ -269,7 +269,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     const refused = await launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { headless: async () => { throw new Error('model spawn failed'); }, run: herdr(), registerLaunch, filesystem: durable, probe: fleet('reviewer') });
     await failedReview(root, refused.review);
 
-    assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'every resolved or failed launch is gone from the root; the host verification lock directory stays');
+    assert.deepEqual(await readdir(managed).catch(() => []), [], 'every resolved or failed launch is gone from the root');
 
     // A pending session keeps its checkout, and only a Graphyard session directory is ever removed.
     const live = await produce('GY-111');
@@ -290,8 +290,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     gone(live.checkout);
     const last = await allocateSessionCheckout(managed, 'proof', 'GY-115', H, randomUUID());
     await removeSessionCheckout(root, managed, last.directory);
-    assert.deepEqual(await readdir(managed), ['.verification-slots'], 'an installation with no session leaves nothing behind but the host verification lock directory (GY-612)');
-    assert.deepEqual(await readdir(join(managed, '.verification-slots')), [], 'and that holds no slot');
+    assert.deepEqual(await readdir(managed).catch(() => []), [], 'an installation with no session leaves nothing behind: the host lock directory lives outside the root (GY-3290)');
   } finally { await cleanup(); }
 });
 
@@ -423,7 +422,7 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
     const failed = await failedReview(root, refused.review);
     assert.match(failed.resolution!, /No space left on device/);
 
-    assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'no checkout is left behind, only the host verification lock directory');
+    assert.deepEqual(await readdir(managed).catch(() => []), [], 'no checkout is left behind');
   } finally { await cleanup(); }
 
   // And the loop records it that way: an action that failed for want of room carries its own
@@ -453,58 +452,39 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
  * unit:host-verification-slots bounds heavy verification runs per host.
  */
 
-const GiB = 2 ** 30;
 
 // ---- AC-1 --------------------------------------------------------------------------------------
 
 test('unit:host-verification-slots — heavy verification runs started by a session take a host-wide slot: more runs than slots never exceed the bound at once, the rest wait saying on what, and all complete', async () => {
   const scratch = await temporaryDirectory('slots');
   try {
-    // The bound: max(2, floor(total GB / 8)), overridable per host.
-    assert.equal(defaultVerificationSlots(62 * GiB), 7);
-    assert.equal(defaultVerificationSlots(8 * GiB), 2, 'never fewer than two');
     assert.equal(heavyCommand('tsc', ['--noEmit']), true);
     assert.equal(heavyCommand('npx', ['tsc', '--noEmit']), true);
     assert.equal(heavyCommand('npx', ['vite', 'build']), false);
     assert.equal(heavyCommand('tsc', ['--version']), false);
 
-    // The session harness's environment: a lock directory under the managed worktree root, the bound,
-    // and the wrapper directory first on PATH. A fake `tsc` stands in for the real one after it.
+    // The session harness's environment: the host's lock directory (two jobs at once unless its limit file
+    // says otherwise), the project, and the wrapper directory first on PATH. A fake `tsc` stands in for the real one after it.
     const managedRoot = join(scratch, 'managed'), fakeBin = join(scratch, 'fake-bin'), log = join(scratch, 'runs.log');
     await mkdir(fakeBin, { recursive: true });
     // It holds its slot until the test opens the gate, so how many runs wait never depends on how fast five wrappers start.
     await writeFile(join(fakeBin, 'tsc'), `#!/bin/sh\necho "start $$" >> "$RUN_LOG"\nwhile [ ! -e "$RUN_GATE" ]; do sleep 0.05; done\necho "end $$" >> "$RUN_LOG"\n`);
     await chmod(join(fakeBin, 'tsc'), 0o755);
-    const environment = verificationEnvironment(managedRoot, { PATH: [fakeBin, process.env.PATH].join(delimiter), GRAPHYARD_VERIFICATION_SLOTS: '2' });
-    const directory = verificationSlotsDirectory(managedRoot);
+    const environment = verificationEnvironment('owner/project', { PATH: [fakeBin, process.env.PATH].join(delimiter), GRAPHYARD_DATA_HOME: managedRoot });
+    const directory = hostHeavyJobsDirectory({ GRAPHYARD_DATA_HOME: managedRoot });
     assert.equal(environment.GRAPHYARD_VERIFICATION_SLOTS_DIR, directory);
-    assert.equal(environment.GRAPHYARD_VERIFICATION_SLOTS, '2');
+    assert.equal(environment.GRAPHYARD_HEAVY_JOB_PROJECT, 'owner/project');
     assert.equal(environment.PATH.split(delimiter)[0], verificationBin);
     assert.ok(existsSync(join(verificationBin, 'tsc')) && existsSync(join(verificationBin, 'npx')));
-    assert.ok(!existsSync(managedRoot), 'nothing is written under the managed root at launch');
+    assert.ok(!existsSync(managedRoot), 'nothing is written until a run takes a slot');
 
     // Five runs, two slots: `tsc --noEmit` as a session types it, through the wrapper on its PATH.
-    const runs = 5, gate = join(scratch, 'gate'), stderrs: string[] = Array(runs).fill('');
-    const waitPattern = /waits for a host verification slot: all 2 under .+ are held by tsc --noEmit \(pid \d+/;
-    const finished = Promise.all(Array.from({ length: runs }, (_, index) => new Promise<{ code: number | null; stderr: string }>(done => {
-      const child = spawn('tsc', ['--noEmit'], { env: { ...process.env, ...environment, RUN_LOG: log, RUN_GATE: gate }, stdio: ['ignore', 'ignore', 'pipe'] });
-      child.stderr.on('data', chunk => { stderrs[index] += chunk; });
-      child.on('close', code => done({ code, stderr: stderrs[index] }));
-    })));
-    // Two runs hold the slots and the other three wait, saying so; only then do the holders finish.
-    const deadline = Date.now() + 30_000;
-    while (stderrs.filter(stderr => waitPattern.test(stderr)).length < runs - 2 && Date.now() < deadline) await new Promise(done => setTimeout(done, 50));
-    const heldWhileWaiting = heldSlots(directory).length;
-    await writeFile(gate, '');
-    const outcomes = await finished;
+    const runs = 5, { heldWhileWaiting, outcomes, events, waitPattern } = await fiveRunsTwoSlots(scratch, environment, log);
     assert.equal(heldWhileWaiting, 2, 'the bound is held while the others wait');
     assert.deepEqual(outcomes.map(outcome => outcome.code), Array(runs).fill(0), 'every run completes');
-    const events = (await readFile(log, 'utf8')).trim().split('\n').map(line => line.split(' ')[0]);
-    let running = 0, peak = 0;
-    for (const event of events) { running += event === 'start' ? 1 : -1; peak = Math.max(peak, running); }
     assert.equal(events.filter(event => event === 'start').length, runs);
     assert.equal(events.filter(event => event === 'end').length, runs);
-    assert.equal(peak, 2, 'no more than the bound ran at once, and the bound was used');
+    assert.equal(peakOf(events), 2, 'no more than the bound ran at once, and the bound was used');
     const waited = outcomes.filter(outcome => waitPattern.test(outcome.stderr));
     assert.equal(waited.length, runs - 2, 'each run that waited said it waits, on what, and who holds the slots');
     assert.deepEqual(heldSlots(directory), [], 'every slot is given back');
@@ -517,16 +497,63 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
     assert.equal(heldSlots(directory)[0].owner?.pid, process.pid);
     taken.release();
 
-    // In one process too: more acquisitions than slots, never more than the bound held at once.
+    // In one process too: more acquisitions than slots, never more than the bound held at once. A
+    // holder keeps its slot until both slots were held together and both waiters said they wait, so
+    // the overlap and the waiting are observed rather than left to a sleep a slow host outlasts (GY-3354).
     let held = 0, most = 0; const lines: string[] = [];
     await Promise.all(Array.from({ length: 4 }, async (_, index) => {
       const slot = await acquireVerificationSlot({ directory, slots: 2, label: `run ${index}`, pollMs: 5, onWait: line => lines.push(line) });
       held++; most = Math.max(most, held);
-      await new Promise(done => setTimeout(done, 30));
+      for (const deadline = Date.now() + 20_000; (most < 2 || lines.filter(line => line.includes('waits for')).length < 2) && Date.now() < deadline;) await new Promise(done => setTimeout(done, 5));
       held--; slot.release();
     }));
     assert.equal(most, 2);
-    assert.ok(lines.some(line => line.includes('waits for a host verification slot')));
+    assert.ok(lines.some(line => line.includes('waits for a host heavy-job slot')));
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+});
+
+/**
+ * Five `tsc --noEmit` runs through the session wrapper, two slots. The fake `tsc` holds its slot
+ * until the gate opens, and the gate opens only once three runs say they wait and both holders'
+ * runs have started: a held slot is not yet a started run, and a gate opened between the two let
+ * the first holder finish before the second began (GY-3354).
+ */
+async function fiveRunsTwoSlots(scratch: string, environment: Record<string, string>, log: string) {
+  const runs = 5, gate = join(scratch, 'gate'), stderrs: string[] = Array(runs).fill('');
+  const waitPattern = /waits for a host heavy-job slot: every Graphyard project on this host shares 2 at once, held by tsc --noEmit \(owner\/project\) \[pid \d+/;
+  const finished = Promise.all(Array.from({ length: runs }, (_, index) => new Promise<{ code: number | null; stderr: string }>(done => {
+    const child = spawn('tsc', ['--noEmit'], { env: { ...process.env, ...environment, RUN_LOG: log, RUN_GATE: gate }, stdio: ['ignore', 'ignore', 'pipe'] });
+    child.stderr.on('data', chunk => { stderrs[index] += chunk; });
+    child.on('close', code => done({ code, stderr: stderrs[index] }));
+  })));
+  const events = async () => (await readFile(log, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(line => line.split(' ')[0]);
+  const deadline = Date.now() + 30_000;
+  while ((stderrs.filter(stderr => waitPattern.test(stderr)).length < runs - 2 || (await events()).length < 2) && Date.now() < deadline) await new Promise(done => setTimeout(done, 50));
+  const heldWhileWaiting = heldSlots(environment.GRAPHYARD_VERIFICATION_SLOTS_DIR).length;
+  await writeFile(gate, '');
+  return { heldWhileWaiting, outcomes: await finished, events: await events(), waitPattern };
+}
+
+function peakOf(events: string[]) {
+  let running = 0, peak = 0;
+  for (const event of events) { running += event === 'start' ? 1 : -1; peak = Math.max(peak, running); }
+  return peak;
+}
+
+test('unit:managed-worktree-root-pinned — a holder whose run starts late still runs alongside the other: the five-run gate waits for both holders to start (GY-3354)', async () => {
+  const scratch = await temporaryDirectory('slots-straggler');
+  try {
+    // The second holder's run starts a second after it took its slot, as a starved host delays it.
+    // Opened on the waiters' lines alone, the gate let the first holder finish before it began.
+    const fakeBin = join(scratch, 'fake-bin'), log = join(scratch, 'runs.log');
+    await mkdir(fakeBin, { recursive: true });
+    await writeFile(join(fakeBin, 'tsc'), `#!/bin/sh\nif mkdir "$RUN_LOG.1" 2>/dev/null; then :; elif mkdir "$RUN_LOG.2" 2>/dev/null; then sleep 1; fi\necho "start $$" >> "$RUN_LOG"\nwhile [ ! -e "$RUN_GATE" ]; do sleep 0.05; done\necho "end $$" >> "$RUN_LOG"\n`);
+    await chmod(join(fakeBin, 'tsc'), 0o755);
+    const environment = verificationEnvironment('owner/project', { PATH: [fakeBin, process.env.PATH].join(delimiter), GRAPHYARD_DATA_HOME: join(scratch, 'managed') });
+    const { heldWhileWaiting, outcomes, events } = await fiveRunsTwoSlots(scratch, environment, log);
+    assert.equal(heldWhileWaiting, 2);
+    assert.deepEqual(outcomes.map(outcome => outcome.code), Array(5).fill(0), 'every run completes');
+    assert.equal(peakOf(events), 2, 'both holders ran at once: the bound was used');
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
 
@@ -535,13 +562,11 @@ test('unit:host-verification-slots — a sandboxed session is granted the lock d
   try {
     // Codex under workspace-write refuses `mkdir slot-N` outside its grants, and the run would go
     // ahead unbounded: every session role grants the lock directory, created before launch.
-    const managedRoot = join(scratch, 'managed'), directory = verificationSlotsDirectory(managedRoot), worktree = join(scratch, 'worktree');
-    const settings = { repository: 'owner/project', run: { worktreeRoot: managedRoot } } as unknown as MasterConfig;
-    assert.deepEqual(sessionSlotsGrant(scratch, settings), [], 'a launch never creates the managed root itself');
-    await mkdir(managedRoot);
-    const grant = sessionSlotsGrant(scratch, settings);
-    assert.deepEqual(grant, [directory]);
-    assert.deepEqual(sessionSlotsGrant(scratch, settings), [directory], 'an existing lock directory is granted again');
+    const worktree = join(scratch, 'worktree'), directory = join(scratch, 'heavy-jobs');
+    process.env.GRAPHYARD_VERIFICATION_SLOTS_DIR = directory;
+    const grant = sessionSlotsGrant();
+    delete process.env.GRAPHYARD_VERIFICATION_SLOTS_DIR;
+    assert.deepEqual(grant, [directory], 'the host lock directory is the only path the budget grants');
     assert.ok(existsSync(directory), 'the lock directory exists before the sandbox is asked to grant it');
 
     // Reviewer and producer: the reach accountLaunch adds to the Codex sandbox.
@@ -557,7 +582,7 @@ test('unit:host-verification-slots — a sandboxed session is granted the lock d
     assert.ok(probed[0].includes(directory), 'and writes into it');
 
     // An account environment's own PATH never drops the wrappers.
-    const harness = verificationEnvironment(managedRoot, { PATH: '/usr/bin' });
+    const harness = verificationEnvironment('owner/project', { PATH: '/usr/bin' });
     const tab = withVerificationPath(harness, { PATH: '/account/bin:/usr/bin', OTHER: 'x' });
     assert.deepEqual(tab.PATH.split(delimiter), [verificationBin, '/account/bin', '/usr/bin']);
     assert.equal(tab.OTHER, 'x');
@@ -567,7 +592,8 @@ test('unit:host-verification-slots — a sandboxed session is granted the lock d
 });
 
 async function failedReview(root: string, id: string) {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  // Settlement runs in the background after the launch returns; a loaded host can take seconds.
+  for (const deadline = Date.now() + 30_000; Date.now() < deadline;) {
     const record = (await readReviewLedger(root)).reviews.find(entry => entry.id === id)!;
     if (record.state === 'failed') return record;
     await new Promise(resolve => setTimeout(resolve, 10));
