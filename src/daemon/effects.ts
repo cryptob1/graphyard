@@ -107,6 +107,8 @@ export interface DaemonEffects {
   /** GY-3438: every live agent session's scope with its cgroup counters, and the session a scope holds where this process knows it. */
   sessionScopes?: () => import('../session-share.js').SessionScope[];
   sessionName?: (unit: string) => string | undefined;
+  /** The host's cores the session share divides; the host's own by default. */
+  cores?: () => number;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   /** Stops what still runs naming a removed worktree (GY-3185), answering what was stopped. */

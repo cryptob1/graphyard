@@ -28,8 +28,8 @@ export type LoopSupervision = 'supervised' | 'autonomous';
 export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string; cpu?: LoopCpu; hosts?: LoopHost[]; sessions?: LoopSession[] }
 /** The host's CPU as the loop last read it (GY-3348): 'some avg60' from /proc/pressure/cpu, the steal percent from /proc/stat and the hottest sensor (GY-3373), with GY-3416's launches-waiting word. */
 export interface LoopCpu { avg60: number | null; steal: number | null; celsius?: number | null; testBudget?: number | null; trialCap?: { now: number; full: number } | null; waiting?: boolean | null }
-/** One live agent session as the loop last read its cgroup (GY-3438): its use, its caps, and since when it has sat at its cap. */
-export interface LoopSession { session: string; cpu: number | null; cpuCap: number; memory: number; memoryCap: number | null; atCapSince: string | null }
+/** One live agent session as the loop last read its cgroup (GY-3438): its use, its fair share, and since when it has used far more than its share of a saturated machine. */
+export interface LoopSession { session: string; cpu: number | null; cpuShare: number; memory: number; memoryShare: number; overSince: string | null }
 /** One host as the loop last read it (GY-3407): this machine (`local`) or an added one; `away` while it does not answer. */
 export interface LoopHost { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null }
 /**
@@ -230,13 +230,13 @@ export function loopHosts(header: string | string[] | undefined): LoopHost[] | n
 }
 
 /**
- * GY-3438: the header naming every live agent session's use against its CPU and memory caps, as the
- * loop last read each scope's cgroup, URI-encoded JSON, or `off` with none. /api/status serves the
- * latest as `sessions` for the Workers page.
+ * GY-3438: the header naming every live agent session's use beside its fair share, as the loop last
+ * read each scope's cgroup, URI-encoded JSON, or `off` with none. /api/status serves the latest as
+ * `sessions` for the Workers page.
  */
 export const loopSessionsHeader = 'X-Graphyard-Loop-Sessions';
-export const encodeLoopSessions = (sessions: readonly { unit: string; name?: string; cpu: number | null; cpuCap: number; memory: number; memoryCap: number | null; atCapSince: string | null }[]) =>
-  encodeURIComponent(JSON.stringify(sessions.slice(0, 50).map(({ unit, name, cpu, cpuCap, memory, memoryCap, atCapSince }) => ({ session: (name ?? unit).slice(0, 120), cpu: cpu === null ? null : Number(cpu.toFixed(2)), cpuCap: Number(cpuCap.toFixed(2)), memory, memoryCap, atCapSince }))));
+export const encodeLoopSessions = (sessions: readonly { unit: string; name?: string; cpu: number | null; cpuShare: number; memory: number; memoryShare: number; overSince: string | null }[]) =>
+  encodeURIComponent(JSON.stringify(sessions.slice(0, 50).map(({ unit, name, cpu, cpuShare, memory, memoryShare, overSince }) => ({ session: (name ?? unit).slice(0, 120), cpu: cpu === null ? null : Number(cpu.toFixed(2)), cpuShare: Number(cpuShare.toFixed(2)), memory, memoryShare, overSince }))));
 /** The sessions a loop read names, or null when it names none or they do not parse. */
 export function loopSessions(header: string | string[] | undefined): LoopSession[] | null {
   const value = Array.isArray(header) ? header[0] : header;
@@ -245,7 +245,8 @@ export function loopSessions(header: string | string[] | undefined): LoopSession
     const parsed = JSON.parse(decodeURIComponent(value)) as unknown;
     if (!Array.isArray(parsed)) return null;
     const figure = (raw: unknown) => typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : null;
-    return parsed.filter(entry => typeof entry?.session === 'string' && figure(entry.cpuCap) !== null).slice(0, 50)
-      .map(entry => ({ session: String(entry.session).slice(0, 120), cpu: figure(entry.cpu), cpuCap: entry.cpuCap, memory: figure(entry.memory) ?? 0, memoryCap: figure(entry.memoryCap), atCapSince: typeof entry.atCapSince === 'string' && Number.isFinite(Date.parse(entry.atCapSince)) ? entry.atCapSince : null }));
+    return parsed.filter(entry => typeof entry?.session === 'string').slice(0, 50)
+      .map(entry => ({ session: String(entry.session).slice(0, 120), cpu: figure(entry.cpu), cpuShare: figure(entry.cpuShare) ?? 0, memory: figure(entry.memory) ?? 0, memoryShare: figure(entry.memoryShare) ?? 0,
+        overSince: typeof entry.overSince === 'string' && Number.isFinite(Date.parse(entry.overSince)) ? entry.overSince : null }));
   } catch { return null; }
 }

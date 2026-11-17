@@ -203,23 +203,24 @@ function Hosts({ hosts }: { hosts: HostRow[] }) {
   </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Added hosts are watched, not given work yet: trials and previews run on this machine.</p> : null}</section>;
 }
 
-type SessionUsageRow = { session: string; cpu: number | null; cpuCap: number; memory: number; memoryCap: number | null; atCapSince: string | null };
+type SessionUsageRow = { session: string; cpu: number | null; cpuShare: number; memory: number; memoryShare: number; overSince: string | null };
 /**
- * GY-3438: every live agent session's CPU and memory use against its caps — the host's cores shared
- * among the live sessions, never under two each — as the loop last read its cgroup. A session at
- * its cap for five minutes raises the overload alarm above the table, naming it.
+ * GY-3438: every live agent session's CPU and memory use beside its fair share — the host's cores
+ * divided by the live sessions, never under two each — as the loop last read its cgroup. A session
+ * using far more than its share of a saturated machine for five minutes raises the overload alarm
+ * above the table, naming it; one session alone on an idle machine may use it all.
  */
 export function SessionUsage({ sessions, now }: { sessions: SessionUsageRow[]; now: number }) {
   if (!sessions.length) return null;
   const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(1)} GiB`;
-  return <section className="hosts-section"><h2>Session caps</h2>
+  return <section className="hosts-section"><h2>Session usage</h2>
     {overloaded(sessions, now).map(session => <p key={session.session} className="notice danger" role="alert" data-overload={session.session}>Overload: {overloadAlarm(session, now)}</p>)}
-    <table className="sessions-table hosts" aria-label="Session caps" data-session-usage>
+    <table className="sessions-table hosts" aria-label="Session usage" data-session-usage>
       <thead><tr><th scope="col">Session</th><th scope="col">CPU</th><th scope="col">Memory</th></tr></thead>
-      <tbody>{sessions.map(session => <tr key={session.session} data-session-usage-row={session.session} data-at-cap={session.atCapSince ? true : undefined}>
+      <tbody>{sessions.map(session => <tr key={session.session} data-session-usage-row={session.session}>
         <th scope="row" data-label="Session">{session.session}</th>
-        <td data-label="CPU">{session.cpu === null ? '—' : session.cpu.toFixed(1)} of {Number(session.cpuCap.toFixed(1))} cores</td>
-        <td data-label="Memory">{gib(session.memory)} of {session.memoryCap === null ? 'no cap' : gib(session.memoryCap)}</td>
+        <td data-label="CPU">{session.cpu === null ? '—' : session.cpu.toFixed(1)} cores <span className="muted">share {Number(session.cpuShare.toFixed(1))}</span></td>
+        <td data-label="Memory">{gib(session.memory)} <span className="muted">share {gib(session.memoryShare)}</span></td>
       </tr>)}</tbody>
     </table></section>;
 }

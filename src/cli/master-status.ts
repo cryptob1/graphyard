@@ -199,8 +199,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // GY-3383: the gate record once — a held batch gate is one attention line naming the hold and its reason.
   const gateRecord = readGateRecord(gateRecordPath(root));
   const heldGateAttention = gateHoldAttention(gateRecord, now);
-  // GY-3438: a session at its CPU or memory cap for five minutes raises the overload alarm, naming it.
-  const overloadAttention = overloaded(state?.sessions ?? [], now).map(session => ({ subject: session.name ?? session.unit, text: `Overload: ${overloadAlarm(session, now)}`, next: 'The session is slowed to its cap, not stopped; see what it runs on the Workers page' }));
+  // GY-3438: a session using far more than its share of a saturated machine for five minutes raises the overload alarm, naming it.
+  const overloadAttention = overloaded(state?.sessions ?? [], now).map(session => ({ subject: session.name ?? session.unit, text: `Overload: ${overloadAlarm(session, now)}`, next: 'The session is only held to its share, not stopped; see what it runs on the Workers page' }));
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
@@ -227,8 +227,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal, celsius: state.cpuPressure.celsius,
         waiting: cpuWaiting(state), testBudget: state.cpuPressure.testBudget, trialCap: state.cpuPressure.trialCap }
       : null,
-    // GY-3438: every live agent session with its CPU and memory use against its caps, as the loop last read its cgroup.
-    sessionUsage: (state?.sessions ?? []).map(session => ({ session: session.name ?? session.unit, use: sessionFigures(session), atCapSince: session.atCapSince })),
+    // GY-3438: every live agent session with its CPU and memory use beside its fair share, as the loop last read its cgroup.
+    sessionUsage: (state?.sessions ?? []).map(session => ({ session: session.name ?? session.unit, use: sessionFigures(session), overSince: session.overSince })),
     // GY-3190: the latest daily report of what the loop's sweeps stopped or removed, and the disk Graphyard's leftovers hold.
     leftovers: state?.leftovers.report ?? null,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },

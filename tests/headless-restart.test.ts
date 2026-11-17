@@ -265,7 +265,7 @@ test('unit:restart-leaves-runs a confined run keeps its scope and its shell outs
     assert.equal(command, 'systemd-run', 'the transient scope is the outermost command, reachable to the user manager');
     const separator = args.indexOf('--');
     assert.deepEqual(args.slice(0, 5), ['--user', '--scope', '--quiet', '--collect', `--unit=graphyard-run-${run.id}.scope`]);
-    assert.match(args.slice(5, separator).join(' '), /^-p CPUQuota=\d+% -p MemoryMax=\d+$/, 'GY-3438: the scope carries the session share');
+    assert.match(args.slice(5, separator).join(' '), /^-p CPUWeight=100 -p IOWeight=100 -p MemoryHigh=\d+$/, 'GY-3438: the scope carries the session share');
     assert.deepEqual(args.slice(separator + 1, separator + 3), ['/bin/sh', '-c'], 'the run\'s shell follows the scope, outside the confinement');
     const script = args[separator + 3];
     assert.match(script, /'bwrap' '--unshare-pid' .*'--ro-bind' '[^']*coordinator' .*'--' '\/usr\/bin\/python3' '-I' '-S' '-c' .*'--' "\$0" "\$@"/s, 'the mount and socket confinement wrap Pi alone, the coordinator read-only');

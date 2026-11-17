@@ -110,15 +110,15 @@ export async function cpuPressureStep(cycle: { state: DaemonState; effects: Daem
 }
 
 /**
- * GY-3438: every live agent session's use against its caps, read from its scope's cgroup each cycle
- * for master status and the Workers page. A session that has sat at its cap for five minutes is one
- * journal line naming it, logged as its alarm begins; the alarm stands in master status and on the
- * Workers page while it lasts.
+ * GY-3438: every live agent session's use beside its fair share, read from its scope's cgroup each
+ * cycle for master status and the Workers page. A session that has used far more than its share of
+ * a saturated machine for five minutes is one journal line naming it, logged as its alarm begins;
+ * the alarm stands in master status and on the Workers page while it lasts.
  */
 export function sessionUsageStep(cycle: { state: DaemonState; effects: DaemonEffects; now: () => number; log: (line: string) => void }) {
   const { state, effects, now, log } = cycle;
   if (!effects.sessionScopes) return;
   const at = now(), raised = new Set(state.sessions.filter(session => overloaded([session], Date.parse(session.at)).length).map(session => session.unit));
-  state.sessions = readSessionUsage(state.sessions, at, effects.sessionScopes(), effects.sessionName);
+  state.sessions = readSessionUsage(state.sessions, at, effects.sessionScopes(), state.cpuPressure?.avg60 ?? null, effects.sessionName, effects.cores?.());
   for (const session of overloaded(state.sessions, at)) if (!raised.has(session.unit)) log(`[graphyard-master] cycle ${state.cycle}: overload: ${overloadAlarm(session, at)}`);
 }
