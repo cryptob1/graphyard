@@ -6,6 +6,7 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 
 - Docker and Compose: on an AppArmor host up loads the `graphyard-trial` profile with sudo.
 - Docker and Compose are needed even for `--local`; merge trials run in them.
+- Fair sharing: each worker, reviewer and producer session gets the same CPU and disk weight and a memory share (memory in proportion to the host's cores divided by the live sessions, never under two cores). A lone session may use the whole machine; on a full machine each gets about the same CPU. The loop, the master, the server and the database weigh more, so they answer under load. `master status` → `sessionUsage` and Workers → Session usage show each session's use beside its share; the overload alarm names a session only when the machine is saturated and it has used over twice its share for five minutes.
 
 ## More hosts
 
