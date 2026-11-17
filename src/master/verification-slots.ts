@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
  * of one user on one host now shares one budget: a heavy job — a session's test, type-check or
  * build command, a host-run worker verification, a merge, gate or diagnostic trial, a preview build,
  * a deploy build — takes one slot first, and at most `limit` (two unless the host says otherwise)
- * run at once.
+ * ordinary jobs run at once, plus one reserved gate/deploy job shared across all installs.
  *
  * A slot is a directory `slot-N` renamed (atomically) into the host's lock directory
  * (`hostHeavyJobsDirectory`, outside every repository), holding its owner's kernel-locked file. A
@@ -105,7 +105,7 @@ export function resumeHeavyDrain(directory: string): HeavyDrain | null {
   rmSync(heavyDrainFile(directory), { force: true });
   return drain;
 }
-export const heavyDrainLine = (drain: HeavyDrain) => `Heavy work is drained since ${drain.at} by ${drain.requestedBy}: ${drain.reason}. Running jobs finish and the batch gate goes on; new merge trials, declared checks, worker verification and session suites wait until graphyard master resume.`;
+export const heavyDrainLine = (drain: HeavyDrain) => `Heavy work is drained since ${drain.at} by ${drain.requestedBy}: ${drain.reason}. Running jobs finish and batch gates and deploys go on; new merge trials, declared checks, worker verification and session suites wait until graphyard master resume.`;
 
 // flock locks the inherited open file description; this process retains its fd after
 // the short-lived utility exits. The kernel releases it on death, across PID namespaces.

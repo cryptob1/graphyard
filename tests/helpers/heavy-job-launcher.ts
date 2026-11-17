@@ -6,7 +6,7 @@
 import { appendFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { mergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
+import { heavyTrial, mergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
 import { joinHostHeavyBudget, withHeavyJob } from '../../src/master/verification-slots.js';
 import { pinKnownGood } from '../../src/master/known-good.js';
 import { openPreview } from '../../src/merge-writer/preview.js';
@@ -30,7 +30,10 @@ joinHostHeavyBudget(project);
 if (mode === 'trial' || mode === 'gate') {
   // The loop's own trial port: a merge's trial, and the batch gate's (its own item key).
   const reads = mergeWriterReads({ baseBranch: 'main', run: {}, repository: project } as any, root, defaultChildRun, { base: scratch, record: async () => {}, trial });
-  await reads.trial(head, [], { key: mode === 'gate' ? gateTrialKey : id, criteria: [] }, undefined, step => console.error(`step: ${step}`));
+  const check = () => reads.trial(head, [], { key: mode === 'gate' ? gateTrialKey : id, criteria: [] }, undefined, step => console.error(`step: ${step}`));
+  // The batch gate wraps its trial port in the reserved heavy job, including for other repositories.
+  if (mode === 'gate') await heavyTrial(gateTrialKey, undefined, undefined, check, undefined, true);
+  else await check();
 } else if (mode === 'check') {
   await runWorkerCheck({ root, base: scratch, baseBranch: 'main', key: id, head, check: 'test', trial });
 } else if (mode === 'preview') {
