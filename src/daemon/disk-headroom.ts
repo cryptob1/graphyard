@@ -122,9 +122,10 @@ export async function reclaimGraphyardLeftovers(run: ChildRun, roots: { temporar
   try {
     // The image built here and the published one an install pulled (GY-3214) each have their own repository;
     // a repository's extended trial images (GY-3275) are cache, rebuilt from their Dockerfile's digest when
-    // pruned, so below the floor every one not in use goes (never forced: Docker keeps an image a container uses).
+    // pruned, and so are the warm images remote shard hosts are sent (GY-3412), so below the floor every one not
+    // in use goes (never forced: Docker keeps an image a container uses).
     const current = trialImage();
-    for (const repository of new Set([trialContainerImage.split(':')[0]!, current.slice(0, current.lastIndexOf(':')), repositoryTrialImageRepository])) {
+    for (const repository of new Set([trialContainerImage.split(':')[0]!, current.slice(0, current.lastIndexOf(':')), repositoryTrialImageRepository, 'graphyard-warm'])) {
       for (const image of await docker(['images', repository, '--format', '{{.Repository}}:{{.Tag}}'])) {
         if (image === current || !image.startsWith(`${repository}:`) || image.endsWith(':<none>')) continue;
         try { await docker(['image', 'rm', image]); removed.push(`image ${image}`); } catch { /* in use, or already gone */ }

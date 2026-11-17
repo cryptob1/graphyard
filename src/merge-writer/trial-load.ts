@@ -17,7 +17,7 @@ export const trialShardLanes = (cores: number) => Math.max(2, Math.floor(cores))
 export const trialSlotCount = (cores: number, requested: number, affordableFiles: number | null = null) =>
   Math.max(1, Math.min(requested, Math.floor(cores / 2), affordableFiles === null ? Infinity : Math.floor(affordableFiles / 2)));
 /** The trials that can each hold a serve and a session container at once: a smaller cap would leave them all waiting on each other. */
-const minimumTrialContainers = 6;
+export const minimumTrialContainers = 6;
 /** Scale the normal cap by CPU not stolen, leaving room for a serve/session pair. */
 export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, Math.floor(cores / 2)) * usable / cores));
 /** The hwmon sensor names that read a CPU, for the trial guard here and the loop's launch guard (GY-3373). */

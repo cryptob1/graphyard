@@ -1,8 +1,8 @@
-// Concern: GY-3407 — the hosts Graphyard watches; work runs only on this machine for now. A host lends
+// Concern: GY-3407 — the hosts Graphyard watches; merge trials send them test shards (GY-3412). A host lends
 // compute and nothing else: `graphyard host prepare` prints a one-time sudo script that creates the
 // unprivileged gy-compute user (not in the docker group) with linger and rootless Docker, and lets this
 // machine's key run only graphyard-host-shim (restrict,command=…: no shell, pty or forwarding). The shim
-// answers fixed verbs; today only `probe`, which only reads. `graphyard host add USER@HOST` refuses a key
+// answers fixed verbs (src/host-shim.ts). `graphyard host add USER@HOST` refuses a key
 // that opens a plain shell, root and a docker-group user, then records the host in this machine's hosts
 // file — the one host list. Each loop cycle probes every host — cores, hottest CPU sensor, steal and the
 // trial containers running now — this machine first; a host that does not answer reads away.
@@ -16,6 +16,7 @@ import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { configHome } from './install/secrets.js';
 import { cpuSensorNames } from './merge-writer/trial-load.js';
 import { cpuStatTotals, stealPercent } from './daemon/cpu-pressure.js';
+import { hostProbeScript, hostShimScript } from './host-shim.js';
 
 export interface HostRecord { target: string; addedAt: string }
 export interface HostReading { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null; stat?: { total: number; steal: number } | null }
@@ -34,29 +35,6 @@ export async function readHosts(file = hostsFile()): Promise<HostRecord[]> {
 }
 const writeHosts = async (file: string, hosts: HostRecord[]) => { await mkdir(dirname(file), { recursive: true }); await writeFile(file, JSON.stringify(hosts, null, 2) + '\n'); };
 
-/** Read-only: Docker's answer, cores, the /proc/stat cpu line, CPU sensors and the trial containers running now. */
-export const hostProbeScript = [
-  'docker info --format "{{.ID}}" >/dev/null 2>&1 || { echo graphyard-no-docker; exit 0; }',
-  'echo "cores $(nproc)"',
-  'head -n 1 /proc/stat',
-  'for d in /sys/class/hwmon/hwmon*; do n=$(cat "$d/name" 2>/dev/null); for t in "$d"/temp*_input; do [ -r "$t" ] && echo "temp $n $(cat "$t")"; done; done',
-  'echo "runs $(docker ps -q --filter name=^graphyard-trial- | wc -l)"',
-].join('\n');
-
-/** The only command this machine's key may run on a host: fixed verbs, the user's rootless Docker, anything else refused. */
-export const hostShimScript = `#!/bin/sh
-# graphyard-host-shim: the only command Graphyard's SSH key may run here (graphyard host prepare).
-export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
-case "$SSH_ORIGINAL_COMMAND" in
-  probe)
-    echo "user $(id -u) $(id -Gn)"
-${hostProbeScript.split('\n').map(line => `    ${line}`).join('\n')}
-    ;;
-  *) echo "graphyard-host-shim refuses: $SSH_ORIGINAL_COMMAND" >&2; exit 1 ;;
-esac
-`;
-
 /** The one-time script `host prepare` prints, for the host's owner to run with sudo. */
 export function hostPrepareScript(publicKey: string) {
   return `#!/bin/sh
@@ -66,6 +44,7 @@ export function hostPrepareScript(publicKey: string) {
 set -eu
 user=${hostUser}
 target="$user@$(hostname)"
+command -v python3 >/dev/null && command -v git >/dev/null || { echo "Install python3 and git, then run this again." >&2; exit 1; }
 id "$user" >/dev/null 2>&1 || useradd --create-home --shell /bin/sh "$user"
 gpasswd -d "$user" docker >/dev/null 2>&1 || true
 grep -q "^$user:" /etc/subuid || usermod --add-subuids 300000-365535 --add-subgids 300000-365535 "$user"
@@ -136,7 +115,7 @@ export function parseHostProbe(text: string) {
   const number = (pattern: RegExp) => { const value = Number(pattern.exec(text)?.[1]); return Number.isFinite(value) ? value : null; };
   const temps = [...text.matchAll(/^temp (\S+) (\d+)$/gm)].filter(match => cpuSensorNames.includes(match[1]!)).map(match => Math.floor(Number(match[2]) / 1000));
   const user = /^user (\d+) ?(.*)$/m.exec(text);
-  return { cores: number(/^cores (\d+)$/m), runs: number(/^runs\s+(\d+)$/m), celsius: temps.length ? Math.max(...temps) : null, stat: cpuStatTotals(text),
+  return { cores: number(/^cores (\d+)$/m), load: number(/^load ([\d.]+)$/m), runs: number(/^runs\s+(\d+)$/m), celsius: temps.length ? Math.max(...temps) : null, stat: cpuStatTotals(text),
     uid: user ? Number(user[1]) : null, groups: user ? user[2]!.split(/\s+/).filter(Boolean) : [] };
 }
 

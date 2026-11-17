@@ -150,19 +150,20 @@ test(`${proof} — with crit-105C sensors the limit is 85C: at 96C (the hottest 
   assert.deepEqual(dispatched, [], 'a CPU at the 85C limit still launches no worker');
   assert.deepEqual(ticks, ['launches waiting: CPU 96C', 'launches waiting: CPU 85C'], 'launches wait at the limit itself');
 
-  // 81C: launches return, and the trial cap stays halved until the reading drops under 80C.
+  // 81C: reviews and trials return (GY-3437: implementation still waits), and the trial cap stays halved until the reading drops under 80C.
   await heat(sensors, 81, 80);
   await cycle();
-  assert.deepEqual(dispatched, [readyItem.key], 'the ready item launches the first cycle at 81C');
-  assert.deepEqual(ticks.at(-1), undefined, 'no waiting line stands below the limit');
+  assert.deepEqual(dispatched, [], 'at 81C no implementation session starts yet');
+  assert.deepEqual(ticks.at(-1), undefined, 'no waiting line holds reviews below the limit');
   assert.deepEqual(state.cpuPressure?.trialCap, { now: 2, full: 4 }, 'at 81C the trial cap is half');
   report = await status(config, state);
-  assert.equal(report.cpuPressure?.waiting, null);
+  assert.equal(report.cpuPressure?.waiting, 'implementation launches waiting: CPU 81C; reviews and trials go on');
 
-  // Below it sustained: two cycles at 79C give the full cap back, and the launches keep going.
+  // Below it sustained: two cycles at 79C give the full cap back, and the ready item launches.
   await heat(sensors, 79, 78);
   await cycle();
   await cycle();
+  assert.deepEqual(dispatched, [readyItem.key], 'the ready item launches once the reading holds below 80C');
   assert.deepEqual(state.cpuPressure?.trialCap, { now: 4, full: 4 }, 'the full cap returns once the reading holds below the limit');
   assert.deepEqual(ticks.slice(-2), [undefined, undefined], 'nothing holds the launches');
   report = await status(config, state);

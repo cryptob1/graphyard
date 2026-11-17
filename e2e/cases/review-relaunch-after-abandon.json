@@ -1,0 +1,16 @@
+{
+  "id": "review-relaunch-after-abandon",
+  "title": "master review relaunches a review the loop abandoned and gets the item a verdict",
+  "description": "GY-3428: an item whose review request spent four failed reviewer sessions on one runtime is abandoned by the loop; master review from the confined master asks for the review afresh, and the next loop cycle launches a reviewer on another eligible account, whose verdict the control plane records.",
+  "tags": ["dispatch", "review"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "master review gets the abandoned item a verdict from another eligible reviewer",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/review-relaunch-after-abandon.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

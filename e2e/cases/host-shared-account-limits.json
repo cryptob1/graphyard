@@ -1,0 +1,11 @@
+{
+  "id": "host-shared-account-limits",
+  "title": "Two Graphyard installs on one host share each agent account's concurrency and quota holds",
+  "description": "Two temporary installs on one host whose registries name the same login home with a per-account limit of 1: while the first install holds a live session on the account, the second's selection passes it over and its registry names the other install as the holder; when the session ends — released by the registry session's end, or by killing the launcher process, which the kernel's lock drop clears at once — the second install selects it. An account one install marks exhausted until a time is ineligible in the other until that time. An install alone on the host is unaffected.",
+  "tags": ["capacity"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "host-shared account limits regression", "run": "node --import tsx tests/helpers/run-tests.ts tests/host-shared-account-limits.test.ts", "timeoutSeconds": 600 }
+  ]
+}
