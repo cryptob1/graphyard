@@ -118,7 +118,7 @@ test('integration:not-reproduced-wording — a trial whose proof passes on head 
   const fixed = await repository(true, true);
   const reasons: string[] = [];
   for (let attempt = 0; attempt < 2; attempt++) {
-    const refused = await merge(fixed, 'feature', [proof, e2eProof]);
+    const refused = await merge(fixed, 'bug', [proof, e2eProof]);
     assert.equal(refused.outcome.outcome, 'refused', JSON.stringify(refused.outcome));
     reasons.push((refused.outcome as { reason: string }).reason);
   }
