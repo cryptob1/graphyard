@@ -223,15 +223,16 @@ export const killedRun = (result: RunRecord['result'] | null | undefined) => !!r
 /** Whether a process is alive: signal 0 probes it, and a probe refused for permission means it exists. */
 export const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
 /**
- * GY-3428. A session that failed within this bound of its launch never got its runtime going — the
- * runtime could not start, its sandbox refused to start, or it exited at once on its provider's
- * quota — and judged nothing. Such a failure is the runtime's, not the request's: it neither counts
- * toward `sessionRetryLimit` nor widens the wait, so a runtime broken for everyone cannot spend a
- * request's attempts; `requestAttemptLimit` still bounds every session the request has.
+ * GY-3428. A session that failed because its runtime could not start judged nothing: the runtime
+ * could not be spawned or rejected its own command line, its sandbox would not start, or it
+ * exited at once on its provider's quota. Such a failure is the runtime's, not the request's: it
+ * neither counts toward `sessionRetryLimit` nor widens the wait, so a runtime broken for everyone
+ * cannot spend a request's attempts; `requestAttemptLimit` still bounds every session the request
+ * has. Read from the failure the session recorded, never from a session's quoted last words.
  */
-export const runtimeStartBoundMs = 60_000;
-export const runtimeStartFailure = (record: { state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }) =>
-  retriedStates.includes(record.state) && !neverStarted(record) && !lostRun(record) && !!record.closedAt && Date.parse(record.closedAt) - Date.parse(record.requestedAt) < runtimeStartBoundMs;
+const runtimeStartFault = /could not (?:be )?start|never confirmed its runtime started|refused before it started|failed before it started|launch refused|exited (?:at launch|within seconds of its launch)|\bbwrap\b|unknown (?:option|flag|argument)|usage limit|session limit|rate limit|quota/i;
+export const runtimeStartFailure = (record: { state: string; resolution?: string | null }) =>
+  record.state === 'failed' && !neverStarted(record) && !lostRun(record) && runtimeStartFault.test((record.resolution ?? '').split(' Its last words:')[0]!);
 export function sessionRetry(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], requestId: string, now: number) {
   const launched = records.filter(record => record.requestId === requestId);
   const last = launched.at(-1);

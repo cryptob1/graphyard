@@ -44,7 +44,7 @@ test('integration:review-abandon-recovery — sessions whose runtime could not s
   const retry = sessionRetry(failures, 'r', at + 4 * 600_000);
   assert.deepEqual([retry.exhausted, retry.launch, retry.started], [false, true, 0], JSON.stringify(retry));
   // A session that ran and then failed still counts: four of them spend the request.
-  const ran = failures.map(record => ({ ...record, closedAt: new Date(Date.parse(record.requestedAt) + 5 * 60_000).toISOString() }));
+  const ran = failures.map(record => ({ ...record, resolution: 'the reviewer session finished (headless opencode: opencode exited with code 1: the session crashed mid-review) without posting a verdict' }));
   assert.equal(sessionRetry(ran, 'r', at + 4 * 600_000).exhausted, true);
 
   // Through the loop: four runtime start failures leave the request launching, never abandoned.
