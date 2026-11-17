@@ -267,7 +267,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // Whether the request already has its session, waits to relaunch one that ended, or may launch now.
   // GY-3348: while `held` names a host condition (the CPU saturated), a request that would launch records that one wait instead — reconciliation and settling go on, only the launch waits.
   const launchDue = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, records: DispatchedSession[]) => {
-    const retry = sessionRetry(records, request.id, now());
+    const retry = sessionRetry(records, request.id, now(), kind === 'review');
     const role = kind === 'review' ? 'reviewer' : 'producer';
     if (retry.settled) {
       if (!retry.last || retry.last.state === 'pending') { tick.skipped++; return false; }
@@ -291,7 +291,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       }
       return true;
     }
-    if (retry.launch) return true;
+    // A request abandoned before is launched again (GY-3428: its runtime failures no longer count), so its attention is withdrawn.
+    if (retry.launch) { delete cursor.abandoned[request.id]; return true; }
     const last = `${role} session attempt ${retry.attempts} ${retry.last!.state}: ${retry.last!.resolution ?? 'no reason recorded'}`;
     if (retry.exhausted) {
       if (runtimeRelaunch(kind, item, request, records)) return true;

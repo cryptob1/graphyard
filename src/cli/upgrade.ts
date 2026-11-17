@@ -24,6 +24,7 @@ import { migrateHerdr } from '../herdr-migration.js';
 import { loadMasterConfig } from '../master.js';
 import { cliReleasePath, activeCliRoot, prepareCliRelease, publishCliRelease } from '../install/cli-release.js';
 import { knownGoodState, pinKnownGood } from '../master/known-good.js';
+import { joinHostHeavyBudget, withHeavyJob } from '../master/verification-slots.js';
 
 export type UpgradeStepId = 'checkout' | 'npm-ci' | 'backup' | 'redeploy' | 'restart' | 'refresh' | 'health';
 export interface UpgradeStep { id: UpgradeStepId; title: string; command: string }
@@ -380,8 +381,9 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
       return shown === null ? null : servedApplication(shown);
     },
     checkout: async commit => { await ensureCheckout(); await git('checkout', '--detach', '--quiet', commit); },
-    install: () => installIn(checkout),
-    build: buildIn(checkout),
+    // GY-3290: the served application's install and build are heavy jobs of the host budget; the running serve holds no slot.
+    install: () => withHeavyJob('serve install', () => installIn(checkout)),
+    build: application => withHeavyJob('serve build', () => buildIn(checkout)(application)),
     restart: async (application, port) => {
       await stopTrackedServe(readServeRecord(serveRecordPath(input.root)) ?? {});
       return start(checkout, application, port);
@@ -397,7 +399,7 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
         await rootGit('worktree', 'add', '--detach', '--quiet', baselineCheckout, commit);
       }
       await installIn(baselineCheckout);
-      await buildIn(baselineCheckout)(application);
+      await withHeavyJob('serve baseline build', () => buildIn(baselineCheckout)(application));
       await stopTrackedServe(readServeRecord(serveRecordPath(input.root))?.baseline ?? {});
       return start(baselineCheckout, application, port);
     },
@@ -492,7 +494,7 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
     // another repository adopts, at least once a day, without a command or a new setting.
     verifiedUpstream: () => oneFetchAtATime(() => fetchVerifiedRef(gitIn)),
     build: async commit => {
-      await prepareCliRelease(directory, cliRoot, commit, input.run);
+      await withHeavyJob(`deploy build ${commit.slice(0, 12)}`, () => prepareCliRelease(directory, cliRoot, commit, input.run));
     },
     restart: async commit => {
       const inputs = inputsFor(commit);
@@ -567,6 +569,7 @@ export const upgradeCommands = defineCommands([{
       // GY-2942: the unit names the install's own checkout; one without it deploys from the launcher's.
       const checkoutIndex = flags.indexOf('--checkout'), cliRoot = checkoutIndex >= 0 ? resolve(flags[checkoutIndex + 1] ?? '') : installationRoot;
       if (cliRoot !== installationRoot) await ensureDeployCheckout(cliRoot, installationRoot, defaultChildRun);
+      joinHostHeavyBudget(master.repository);
       const ports = await watchPorts({ cliRoot, repoRoot, repository: master.repository, url: master.url, run: defaultChildRun, herdrInstance: !!master.herdrInstance });
       if (typeof ports === 'string') throw new Error(ports);
       const stopping = new AbortController();

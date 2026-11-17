@@ -11,14 +11,14 @@ import { fetchRefusalKey } from '../daemon/cycle-batch-gate.js';
 import { implementationWaiting } from '../daemon/cpu-pressure.js';
 import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
-import { heavyDrainLine, readHeavyDrain, verificationSlotsDirectory } from '../master/verification-slots.js';
-import { worktreeRoot } from '../install/worktree-root.js';
+import { heavyDrainLine, heavyJobsDirectory, readHeavyDrain } from '../master/verification-slots.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary, trialImageKey } from '../daemon/cycle-merge-writer.js';
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
 import { gateRecordPath, gateHoldAttention, gateSummary, readGateRecord } from '../batch-gate.js';
 import { thisWeekReport } from '../project-memory.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
+import { readRemoteShardRuns, remoteShardSummary } from '../merge-writer/remote-shards.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage, waitingReason } from '../model/plain-stage.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
@@ -73,8 +73,6 @@ export async function npmPublishedVersion(run: ChildRun): Promise<string> {
 }
 
 /** The `master status` page. `run` reads main's tip from the checkout's remote-tracking ref; the deploy unit fetches it. */
-/** GY-3304: the drain record the loop and every session's heavy run read, beside the host's verification slots. */
-export const heavyDrainDirectory = (root: string, master: Pick<MasterConfig, 'repository' | 'run'>) => verificationSlotsDirectory(worktreeRoot(root, master));
 
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, run: ChildRun = defaultChildRun) {
   // An unreachable control plane (GY-2966) is reported, not thrown: since when, the server's last exit and the free disk space, as the loop recorded them.
@@ -172,7 +170,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   });
   // GY-3299: worker-pool growth the loop could not do, with the cause and the capacity it leaves, until growth succeeds.
   // GY-3304: a drain stands until master resume; it names why and who asked.
-  const drain = readHeavyDrain(heavyDrainDirectory(root, master));
+  const drain = readHeavyDrain(heavyJobsDirectory());
   const drained = drain ? [{ subject: 'heavy work', text: heavyDrainLine(drain), next: 'graphyard master resume once the quiet window is over' }] : [];
   const growth = state?.actions[workerGrowthKey]?.state === 'failed' ? [{ subject: 'worker pool', text: state.actions[workerGrowthKey]!.detail, next: 'Fix the cause named; the next loop cycle adds the missing worker profiles and clears this' }] : [];
   // GY-3328: the trial host lacks the trial image and could not provision it, until a trial runs again.
@@ -238,6 +236,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       // GY-2990: a revert that failed its own trial is held here, with the serve and reason that held it.
       serveRevert: serveRevert?.held ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
+    // GY-3412: test shards run on other hosts over the last 20 trials — the share run remotely, trial
+    // wall time, waits while a host idled, this machine's peak CPU temperature and each host's reading.
+    remoteShards: remoteShardSummary(readRemoteShardRuns(root)),
     // GY-3119: the batch gate on main — the verified commit that serves, the gate in flight with its current step, the last run's outcome with its reason or failing check (GY-3141), a held batch and the revert rate over the last 20 merges.
     batchGate: gateSummary(gateRecord),
     // GY-3399: the week's reverts beside the week's gates removed (lessons turned into code), with their items.
