@@ -19,7 +19,7 @@ import { generate } from './generator.js';
 import { configSchema, validateReceipt, reviewedDeliveries, overlappingWorkers, comparison, usageSchema, type RunConfig, type Receipt } from './receipt-schema.js';
 import { components, workDescription } from './work.js';
 import { listRunDirectories, runsDirectory } from '../../src/runner/registry.js';
-import { trackedDocuments, lifecycleCounts, failureStack, receiptSession } from './snapshot.js';
+import { trackedDocuments, lifecycleCounts, failureStack, receiptSession, serialReads } from './snapshot.js';
 import { sourceCapacity } from './capacity.js';
 import { routeAccounts } from './routing.js';
 import { codeRoot, benchmarkRoot, isolatedRepository, startPlane, credential, operator } from './isolation.js';
@@ -68,7 +68,7 @@ export async function createItems(context:RunContext) {
     const criterion=component.id==='single'?'Complete all eight component requirements in the full description and CONTRACT.md: exact arithmetic, square-free multiplicities, certified isolation, CLI, HTTP batch API, browser UI and integration tests.':component.brief;
     const item=await context.plane.call('work',context.operator,{
       reason:`Run ${context.config.id}: create ${component.id} for the ${context.config.mode} frozen-v1 certified real-root workbench rebuild, seed ${context.config.seed}.`,
-      type:'chore',title:component.title,description:component.id==='single'?`${component.brief}\nOne implementation agent only; do not delegate.`:workDescription(component.id),
+      type:'chore',title:component.title,why:'The benchmark measures how well the factory delivers real work.',simplest:'One component of the frozen workbench, built to its contract.',description:component.id==='single'?`${component.brief}\nOne implementation agent only; do not delegate.`:workDescription(component.id),
       criteria:[{id:'AC-1',text:`${criterion} Files: ${component.files.join(', ')}. Preserve CONTRACT.md.`,proofs:['unit:workbench-contract','e2e:workbench',...(final?['manual:certified-artifact']:[])]}],
       dependencies:component.depends.map(id=>ids.get(id)),producerProofs:final?['manual:certified-artifact']:[],policy:{checks:['test'],review:true},
     });
@@ -144,8 +144,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     receipt.failures.push({at:new Date().toISOString(),component:'starter-baseline',head:receipt.startingCommit,reason:baseline[0].reason});
     enforce();plane=await startPlane(install,repository.root,[admin,coordinator,producer,...workers,...producers],graphyardCommit);
     const operatorToken=await operator(plane,admin.token);await atomicPrivateText(join(install,'operator.token'),operatorToken);
-    let reading:Promise<any[]>|undefined;
-    const readSnapshot=()=>reading??=(async()=>{
+    const readSnapshot=serialReads(async()=>{
       const items=await trackedDocuments(await plane!.call('work',coordinator.token),receipt.work,path=>plane!.call(path,coordinator.token));
       let gateFailure:string|undefined;
       for(const w of receipt.work) {
@@ -177,7 +176,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       await checkpoint();
       if(!stopping) {if(gateFailure) throw new Error(gateFailure);enforce();}
       return items;
-    })().finally(()=>{reading=undefined;});
+    });
     const snapshot=async(checkSource=false)=>{
       if(source && checkSource && !stopping) {
         const status=await sourceCall(source,'status'),registry=await sourceCall(source,'agent-registry/document');

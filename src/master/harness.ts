@@ -1,5 +1,6 @@
 export { humanOnlyDecisions } from '../model/human-request.js';
 // Concern: session and worker harness permissions, and starting the master session.
+import { itemLeadBrief } from '../review-prompt.js';
 import { lstat, mkdir } from 'node:fs/promises';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -12,7 +13,7 @@ import { foreignUnitText, initialiseUnitsCommand, userUnitDirectory, installUnit
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, promotionCommand, runtimeLoginHomes, workerConfinementRefusal } from './profiles.js';
-import { masterCredentialMask } from './confinement.js';
+import { masterCredentialMask, preparePeerExchange } from './confinement.js';
 import { loadMasterConfig } from './config.js';
 import { atomicPrivateText } from '../private-file.js';
 import { readProjectMemory } from '../project-memory.js';
@@ -23,7 +24,7 @@ import { type HerdrAgent, herdrSessionPaths, stopCreatedHerdrTab } from './herdr
 import type { PreparedWorker } from './dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { graphyardRepository } from '../scenarios.js';
-import { verificationEnvironment, verificationSlotsDirectory } from './verification-slots.js';
+import { hostHeavyJobsDirectory, slotsDirectoryVariable, verificationEnvironment } from './verification-slots.js';
 
 /**
  * The master's harness rules cover everything the master owns, not only the coordination loop:
@@ -194,29 +195,27 @@ async function repositoryCarriesClaudeSettings(root: string) {
  * out the repository's AGENTS.md, so such a session carries the launch authorization written there
  * (repository-setup.ts launchAuthorization) as its role text, loaded from the session's role file.
  */
-/** A session's verification slot variables (GY-612), or none when the managed worktree root cannot be written: master status reports that root. */
-export function sessionVerificationEnvironment(root: string, config: Pick<MasterConfig, 'repository' | 'run'>): Record<string, string> {
-  try { return verificationEnvironment(worktreeRoot(root, config)); } catch { return {}; }
+/** A session's host heavy-job variables (GY-612, GY-3290): the lock directory every project on this host shares, its project, and the wrappers first on PATH. */
+export function sessionVerificationEnvironment(config: Pick<MasterConfig, 'repository'>): Record<string, string> {
+  return verificationEnvironment(config.repository);
 }
 /**
- * The lock directory every session must be able to write to take a slot, created now so a sandboxed
- * runtime (Codex under workspace-write) can be granted it with `--add-dir`: without the grant its
- * `mkdir slot-N` is refused and the run goes ahead unbounded. None when the root cannot be written.
+ * The host's lock directory, which every session must be able to write to take a slot, created now
+ * so a sandboxed runtime (Codex under workspace-write) can be granted it with `--add-dir`: without
+ * the grant its `mkdir slot-N` is refused and the run goes ahead unbounded. It is the only path the
+ * budget adds to a session's writable roots. None when it cannot be created.
  */
-export function sessionSlotsGrant(root: string, config: Pick<MasterConfig, 'repository' | 'run'>): string[] {
-  // Only under a managed root that exists: setup creates and verifies it, and a launch never makes one.
-  let directory: string;
-  try { directory = verificationSlotsDirectory(worktreeRoot(root, config)); } catch { return []; }
-  try { mkdirSync(directory); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return []; }
+export function sessionSlotsGrant(): string[] {
+  const directory = process.env[slotsDirectoryVariable] ?? hostHeavyJobsDirectory();
+  try { mkdirSync(directory, { recursive: true }); } catch { return []; }
   return [directory];
 }
 export async function prepareSessionHarness(root: string, config: MasterConfig, input: Omit<SessionHarnessInput, 'cliPath' | 'repository' | 'baseBranch' | 'credentialHome' | 'credentialDirectories'> & { profile: string; credentialFiles?: string[] }) {
   const plan = sessionHarnessPlan({ ...input, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome: dirname(dirname(config.credentialFile)),
     credentialDirectories: [dirname(config.credentialFile), ...(input.credentialFiles ?? []).map(file => dirname(file))] });
-  // Every session's heavy verification runs share the host's slots (GY-612): its tab carries the
-  // lock directory under the managed worktree root, the bound, and the wrappers first on its PATH.
-  // A root that cannot be written leaves the session unbounded rather than unlaunched.
-  const environment = sessionVerificationEnvironment(root, config);
+  // Every session's heavy jobs share the host's budget (GY-612, GY-3290): its tab carries the host's
+  // lock directory, its project and the wrappers first on its PATH.
+  const environment = sessionVerificationEnvironment(config);
   if (input.kind !== 'claude' || !await repositoryCarriesClaudeSettings(root)) return { plan, file: null, args: [] as string[], role: null as string | null, environment };
   const file = sessionHarnessFile(root, input.role, input.profile);
   await mkdir(dirname(file), { recursive: true, mode: 0o700 });
@@ -241,7 +240,7 @@ export function masterPrompt(config: MasterConfig): string {
   // and the users before acting, keeps the product brief, ranks work by its success signals and
   // re-checks those signals after each deploy; the owner's stated mission and priorities override that ranking.
   const founder = `You are the dedicated Graphyard master agent for ${config.repository}, responsible for the product succeeding: learn the problem and users first (repository, docs, the running app, owner messages, item history), write and revise the product brief, turn it into goals and work items ranked by impact on its success signals, re-check them after each deploy, and record lessons; the owner's stated mission and priorities override that ranking.`;
-  const prompt = `${founder}${config.forPerson ? ` Work only items whose human owner is ${config.forPerson}.` : ' Skip owned items.'} Never implement, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, node ${config.cliPath} guide master and master status. Leave dispatch, review, proofs and merge to node ${config.cliPath} master run; workers claim for themselves. Draw the emblem when master emblem reports set: false. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. ${config.repository.toLowerCase() === graphyardRepository ? '' : `${upstreamRule(config.repository)} `}${supervised ? supervisedInstruction : `Every decision is yours to apply at once with your own identity: node ${config.cliPath} master create, release, unblock, requirements, rework, attest or close.${config.operatorAgent ? '' : ` Your operator-agent identity is not provisioned yet; report that onboarding must run master autonomy --admin-token-stdin --apply.`}`}`;
+  const prompt = `${founder} ${itemLeadBrief.trim()}${config.forPerson ? ` Work only items whose human owner is ${config.forPerson}.` : ' Skip owned items.'} Never implement, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, node ${config.cliPath} guide master and master status. Leave dispatch, review, proofs and merge to node ${config.cliPath} master run; workers claim for themselves. Draw the emblem when master emblem reports set: false. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. ${config.repository.toLowerCase() === graphyardRepository ? '' : `${upstreamRule(config.repository)} `}${supervised ? supervisedInstruction : `Every decision is yours to apply at once with your own identity: node ${config.cliPath} master create, release, unblock, requirements, rework, attest or close.${config.operatorAgent ? '' : ` Your operator-agent identity is not provisioned yet; report that onboarding must run master autonomy --admin-token-stdin --apply.`}`}`;
   const reviewInstruction = supervised
     ? `Independent review starts on its own: when a candidate passes the build gate, node ${config.cliPath} master run launches a reviewer session for its exact head and the control plane merges it once every gate passes. It launches no other session; never review or approve a candidate yourself, never launch a reviewer, and never submit evidence.`
     : `Independent review and proof collection start on their own: master run launches them for each candidate's exact head. Read findings and route rework; never review yourself, never submit evidence.`;
@@ -272,7 +271,9 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // GY-3237: the install state the master session's own recovery commands write — reviewer
     // bindings beside the coordinator credential (reviewer.ts reviewerCredentialDirectory) and
     // the managed worktree root its launches allocate checkouts under — granted writable.
-    const stateDirectories = [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, config)];
+    // GY-3385: and each recorded peer's peers directory, where the session places the reporter
+    // tokens it issues them (master peer issue), created where missing before the confinement binds.
+    const stateDirectories = [resolve(config.credentialFile, '../..', 'reviewers'), worktreeRoot(root, config), ...preparePeerExchange(config)];
 
     // The master starts on its own request too; a runtime without that contract is prompted
     // after start, with the text last and the confirmation following it. The request is the

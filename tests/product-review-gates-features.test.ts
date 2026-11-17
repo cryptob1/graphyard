@@ -33,6 +33,8 @@ function feature(key: string, head = H): Work {
     criteria: [{ id: 'AC-1', text: 'Works end to end', proofs: ['e2e:feature-works'] }],
     policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
     ready: true, epoch: 1, lease: null, workspaces: [{ host: 'h', path: `/w/${key}`, branch: candidate.branch, epoch: 1, owner: 'worker-1' }], candidate, submission: { epoch: 1, pr: 0 }, reworkRequested: false,
+    // The control plane's evaluation marks a normal unreviewed head's review owed after merge (GY-3421).
+    postMergeReview: 'owed',
     scenarioRequirements: [], evidence: [{ id: 'e1', proof: 'e2e:feature-works', sha: head, baseSha: B, policyRevision: 1, producer: 'merge-trial', trusted: true, result: 'pass', executed: 1, skipped: 0, at }], blocker: null, gates: [], violations: [], implementers: ['worker-1'],
     observation: {
       source: 'control-plane', at, candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false,

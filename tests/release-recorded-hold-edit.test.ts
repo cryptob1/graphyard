@@ -32,7 +32,7 @@ const call = async (bearer: string, method: 'GET' | 'POST', path: string, body?:
   assert.equal(response.status, 200, JSON.stringify(parsed));
   return parsed;
 };
-const file = (title: string, extra: Record<string, unknown> = {}) => call(token(operator.id), 'POST', 'work', {
+const file = (title: string, extra: Record<string, unknown> = {}) => call(token(operator.id), 'POST', 'work', { why: 'w', simplest: 's',
   title, type: 'chore', description: 'The first description', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:release-recorded-hold-edit', 'e2e:fixture'] }], policy: { checks: ['test'], review: true }, ...extra }) as Promise<Work>;
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 

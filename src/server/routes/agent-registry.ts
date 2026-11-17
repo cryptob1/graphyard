@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type pg from 'pg';
 import { demand } from '../../model.js';
 import { readRegistry } from '../../agent-registry.js';
+import { unownedFamilySql } from '../../store/tables/work.js';
 import { connectDefaultRoles, connectProvider, connectProviders } from '../../fleet.js';
 import { applyRegistryMutation, registryMutationSchemas } from '../../model-boundary/registry.js';
 import { executorHostHeader, looksLikeSecret, proposedConcurrency, proposedRuntimes, fleetRoles, type RegistryMutation } from '../../model/registry.js';
@@ -156,7 +157,7 @@ const readConnectEvents = (db: Pick<pg.PoolClient, 'query'>) =>
   // The newest 500 requests with every event of each: a long-lived request keeps its claimed,
   // progress and result events however many others (or host-key registrations) came after it.
   db.query(`WITH recent AS (SELECT payload->'connect'->>'id' AS id FROM events WHERE work_id IS NULL AND kind='${connectEventPrefix}request' ORDER BY seq DESC LIMIT 500)
-    SELECT seq,actor,kind,payload,created_at FROM events WHERE work_id IS NULL AND kind LIKE '${connectEventPrefix}%' AND kind <> '${connectEventPrefix}host-key' AND payload->'connect'->>'id' IN (SELECT id FROM recent) ORDER BY seq DESC`);
+    SELECT seq,actor,kind,payload,created_at FROM events WHERE ${unownedFamilySql(connectEventPrefix)} AND kind <> '${connectEventPrefix}host-key' AND payload->'connect'->>'id' IN (SELECT id FROM recent) ORDER BY seq DESC`);
 
 function connectAccountRoutes(): import('../routes.js').Route[] {
   return [

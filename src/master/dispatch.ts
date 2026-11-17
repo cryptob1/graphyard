@@ -24,9 +24,10 @@ import { repinPath, type CanaryOffer } from '../model/registry.js';
 import { reviewStandards } from '../review-prompt.js';
 import { launcherCoordinatorRoot, preservePartialWork, prepareConfinedGitPaths, sessionConfinement } from './launch.js';
 import { defaultHeadlessExec, HeadlessConfigurationError, startHeadlessWorker, type HeadlessExec } from '../headless-session.js';
+import { exhaustionHold, markHostAccountExhausted } from '../host-accounts.js';
 import { liveRun } from '../runner/registry.js';
 import { runTranscript } from '../model/sessions.js';
-import { detectRuntimeExhaustion } from './runtime-prompt.js';
+import { detectHeadlessExhaustion } from './runtime-prompt.js';
 import { detectLoggedOut } from './logged-out.js';
 import { cycleBaseTip, dependencyDirectories, failureText, preservedWorkNote, shareDependencies, type SharedDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
@@ -358,7 +359,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     if (confinementRoot) prepareConfinedGitPaths(confinementRoot);
     const paths = workerPaths(prepared.path);
     // So is the host's verification lock directory, or a sandboxed worker's heavy runs go unbounded (GY-612).
-    const writable = [...writablePaths({ ...paths, commonDir: paths.commonDir ?? await sharedGitDirectory(root) }), ...sessionSlotsGrant(root, config)];
+    const writable = [...writablePaths({ ...paths, commonDir: paths.commonDir ?? await sharedGitDirectory(root) }), ...sessionSlotsGrant()];
     const args = grantWorkerPaths(launch.kind, launch.args, writable, prepared.path);
     // The worker's own rules go into its worktree before the session starts, so pushing its
     // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
@@ -418,11 +419,17 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
    * and the account hold are recorded on the item, where the next attempt's brief reads them.
    */
   async function stoppedOnLimit(output: string) {
-    const notice = detectRuntimeExhaustion(output, launch.kind!, Date.now());
+    const notice = detectHeadlessExhaustion(output, launch.kind!, Date.now());
     if (!notice) return null;
     const partialWork = await preservePartialWork(prepared.path, `${work.key} attempt ${prepared.epoch} stopped on its provider's limit notice`);
     await capacity?.({ event: 'exhausted', role: 'worker', epoch: prepared.epoch, profile: profile.name, account: launch.account ?? null, runtime: launch.kind ?? null,
       reason: `the headless worker stopped on its provider's limit notice: ${notice.reason}`.slice(0, 500), resetsAt: notice.resetsAt ?? null, partialWork });
+    // GY-3333: the hold is recorded beside the login home too, so every install on this host reads
+    // the account as exhausted until the same reset rather than rediscovering it with a session.
+    if (launch.home) {
+      try { markHostAccountExhausted(launch.home, { by: config.repository ?? config.url, reason: notice.reason, at: new Date().toISOString(), ...exhaustionHold(notice.resetsAt, Date.now()) }); }
+      catch { /* the control-plane hold stands; only the shared record could not be written */ }
+    }
     return notice;
   }
   /**
@@ -470,9 +477,12 @@ export const destructivePromptGuidance = 'Never give rm or mv a glob or variable
  * inside its worktree.
  */
 export const externalDirectoryPromptGuidance = 'Your launch already granted the repository tree, so an OpenCode external-directory prompt names a path outside it: Reject it and continue in your worktree. ';
+/** GY-3382: the item's two lead sentences, read before building and stayed inside; an item from before them has neither. */
+export const workerLeadSection = (work: Partial<Pick<Work, 'why' | 'simplest'>>) => work.why || work.simplest
+  ? `Read why and simplest first and stay inside them. Why: ${work.why ?? 'not stated'} Simplest: ${work.simplest ?? 'not stated'} ` : '';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository' | 'run'>> & { fastGates?: boolean },
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'policyRevision' | 'messages'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'why' | 'simplest' | 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'policyRevision' | 'messages'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -487,7 +497,7 @@ export function workerPrompt(
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha: baseSha ?? undefined });
   const standards = reviewStandards(work);
-  return `Implement ${work.key}: ${work.title}. Claimed as ${profile.principal} under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Use the assigned worktree; never weaken criteria; commit on the assigned branch, and submit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action: complete ends your lease; stop at once on lease loss (node ${config.cliPath} guide complete). `
+  return `Implement ${work.key}: ${work.title}. ${workerLeadSection(work)}Claimed as ${profile.principal} under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Use the assigned worktree; never weaken criteria; commit on the assigned branch, and submit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action: complete ends your lease; stop at once on lease loss (node ${config.cliPath} guide complete). `
     + attemptBoundSection(config.run, work, epoch)
     + `Do not submit trusted evidence or merge; review and producers are requested on their own. `
     + installed

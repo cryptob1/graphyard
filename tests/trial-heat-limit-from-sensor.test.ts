@@ -22,7 +22,7 @@ async function host(label: string, sensor: { name: string; celsius: number; crit
   if (sensor.crit) await writeFile(join(dir, 'temp1_crit'), `${sensor.crit * 1000}\n`);
   if (sensor.max) await writeFile(join(dir, 'temp1_max'), `${sensor.max * 1000}\n`);
   const [program, ...words] = trialContainerLaunch({ image: 'graphyard-trial:local', mounts: [[base, '/scratch', false]], network: 'none',
-    load: { slots: join(base, 'slots'), cap: 2, order: trialStartOrder.merge, hotCelsius: trialHotCelsius, floorBytes: 30e9, hwmon, pressureBoundSeconds: 600, waitBoundSeconds: null } });
+    load: { slots: join(base, 'slots'), cap: 2, order: trialStartOrder.merge, hotCelsius: trialHotCelsius, floorBytes: 30e9, hwmon, pressureBoundSeconds: 600 } });
   const child: ChildProcess = spawn(program!, [...words, 'true'], { cwd: base, env: { PATH: `${bin}:/usr/bin:/bin` }, stdio: ['ignore', 'ignore', 'pipe'] });
   let said = '';
   child.stderr!.on('data', chunk => { said += chunk; });
@@ -39,30 +39,32 @@ async function host(label: string, sensor: { name: string; celsius: number; crit
   }
 }
 
-test(`${proof} — a coretemp sensor with a 105C critical point starts a trial at 98C`, async () => {
-  const run = await host('heat-crit-cool', { name: 'coretemp', celsius: 98, crit: 105 });
-  assert.equal(run.started, true, run.said);
-  assert.doesNotMatch(run.said, /waiting/);
-});
-
-test(`${proof} — the same sensor at 103C waits, naming the reading and the 102C limit`, async () => {
-  const run = await host('heat-crit-hot', { name: 'coretemp', celsius: 103, crit: 105 });
-  assert.equal(run.started, false);
-  assert.match(run.said, /waiting: a CPU sensor reads 103C, at or over its 102C limit/);
-});
-
-test(`${proof} — a sensor with only a 100C max waits at 97C and goes at 96C`, async () => {
-  const hot = await host('heat-max-hot', { name: 'k10temp', celsius: 97, max: 100 });
+test(`${proof} — a coretemp sensor with a 105C critical waits at 95C naming the 85C limit, and starts at 84C`, async () => {
+  const hot = await host('heat-crit-hot', { name: 'coretemp', celsius: 95, crit: 105 });
   assert.equal(hot.started, false);
-  assert.match(hot.said, /reads 97C, at or over its 97C limit/);
-  assert.equal((await host('heat-max-cool', { name: 'k10temp', celsius: 96, max: 100 })).started, true);
+  assert.match(hot.said, /waiting: a CPU sensor reads 95C, at or over its 85C limit/);
+  assert.equal((await host('heat-crit-cool', { name: 'coretemp', celsius: 84, crit: 105 })).started, true);
 });
 
-test(`${proof} — a sensor with neither waits at 95C and goes at 94C`, async () => {
-  const hot = await host('heat-none-hot', { name: 'coretemp', celsius: 95 });
+test(`${proof} — a sensor whose crit-3 is under 85C waits at that lower limit: crit 84 holds 81C and starts 80C`, async () => {
+  const hot = await host('heat-crit-low-hot', { name: 'coretemp', celsius: 81, crit: 84 });
   assert.equal(hot.started, false);
-  assert.match(hot.said, /reads 95C, at or over its 95C limit/);
-  assert.equal((await host('heat-none-cool', { name: 'coretemp', celsius: 94 })).started, true);
+  assert.match(hot.said, /reads 81C, at or over its 81C limit/);
+  assert.equal((await host('heat-crit-low-cool', { name: 'coretemp', celsius: 80, crit: 84 })).started, true);
+});
+
+test(`${proof} — a sensor with only a 100C max still reads it: the limit stays 85C, holding 86C and starting 84C`, async () => {
+  const hot = await host('heat-max-hot', { name: 'k10temp', celsius: 86, max: 100 });
+  assert.equal(hot.started, false);
+  assert.match(hot.said, /reads 86C, at or over its 85C limit/);
+  assert.equal((await host('heat-max-cool', { name: 'k10temp', celsius: 84, max: 100 })).started, true);
+});
+
+test(`${proof} — a sensor with neither waits at 85C and goes at 84C`, async () => {
+  const hot = await host('heat-none-hot', { name: 'coretemp', celsius: 85 });
+  assert.equal(hot.started, false);
+  assert.match(hot.said, /reads 85C, at or over its 85C limit/);
+  assert.equal((await host('heat-none-cool', { name: 'coretemp', celsius: 84 })).started, true);
 });
 
 test(`${proof} — a hot non-CPU sensor (nvme) is ignored`, async () => {

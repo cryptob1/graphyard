@@ -52,7 +52,7 @@ test('e2e:reclaim-unregistered-worktree — the loop removes an ended attempt\'s
   git(['add', '.gitignore']);
   git(['-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'base']);
   const prepare = async (title: string, path: (key: string) => string) => {
-    const filed = await ok(operator, 'work', { title, type: 'chore',
+    const filed = await ok(operator, 'work', { why: 'w', simplest: 's', title, type: 'chore',
       criteria: [{ id: 'AC-1', text: 'Works', proofs: ['e2e:reclaim-unregistered-worktree'] }] }) as Work;
     await ok(operator, `work/${filed.id}/ready`, {});
     const branch = `graphyard/${filed.key.toLowerCase()}-1`;

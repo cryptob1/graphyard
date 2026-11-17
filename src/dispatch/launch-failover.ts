@@ -1,24 +1,10 @@
 import { type ChildRun } from '../child-runner.js';
-import { withReviewerDefaults, type MasterConfig, type ReviewerProfile } from '../master/profiles.js';
 import { herdrErrorCode, SessionStartError, sessionWords, type StartBounds } from '../master/launch.js';
 import { detectExhaustion, type ExhaustionSignal } from '../model/capacity.js';
 import { herdrSubcommand, isHerdrCommand } from '../master/herdr.js';
 import { capacityRefusal } from '../fleet.js';
 import { instantExitReason } from './attempts.js';
-/**
- * The reviewer profile that answers automatic requests: the configured one, else the only one.
- * The configured one runs `automaticReviewerConcurrency` sessions when it declares none (GY-1072).
- */
-export function selectReviewerProfile(input: MasterConfig): { profile: ReviewerProfile | null; reason: string | null } {
-  // Every review posts through the API under a one-time token (GY-1525): it needs a profile, not a reviewer App.
-  const config = withReviewerDefaults(input);
-  if (config.run.reviewerProfile) {
-    const profile = config.reviewers.find(item => item.name === config.run.reviewerProfile) ?? null;
-    return profile ? { profile, reason: null } : { profile: null, reason: `run.reviewerProfile names ${config.run.reviewerProfile}, which is not a configured reviewer profile` };
-  }
-  if (config.reviewers.length === 1) return { profile: config.reviewers[0], reason: null };
-  return { profile: null, reason: config.reviewers.length ? 'more than one reviewer profile is configured; set run.reviewerProfile in .graphyard/master.json to the one automatic dispatch launches' : 'no reviewer profile is configured; add one with master reviewer add' };
-}
+export { selectReviewerProfile } from '../master/profiles.js';
 /**
  * A launched session Herdr cannot find within seconds of its launch. The launcher types the
  * launch into the pane and reads it until the runtime is ready (master.ts, `awaitRuntimeStart`):

@@ -1,56 +1,71 @@
 // Concern: host verification slots — the per-host bound on concurrent full suites and type checks, and the PATH wrapper sessions run them through.
 import { closeSync, fstatSync, openSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { ChildProcessError, runChild } from '../child-runner.js';
+import { ChildProcessError, inheritedVariables, runChild } from '../child-runner.js';
+import { dataDirectory } from '../install/worktree-root.js';
 import { randomUUID } from 'node:crypto';
-import { totalmem } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
- * Host verification slots (GY-612).
+ * The host heavy-job budget (GY-612, GY-3290).
  *
- * On 26 September 2026 a 62 GB host ran fourteen full suites and five `tsc --noEmit` runs at once,
- * across worker worktrees and proof checkouts: each suite starts its own Postgres, each run holds up
- * to a gigabyte, and available memory fell to one or two gigabytes while agent runtimes were reaped.
- * Nothing bounded how many heavy verification runs a host executes at once.
+ * On 26 September 2026 a 62 GB host ran fourteen full suites and five `tsc --noEmit` runs at once;
+ * on 13 November a 24-core host shared by several Graphyard projects sat at load 50–86 and local
+ * verification timed out, because each project bounded only its own runs. Every Graphyard project
+ * of one user on one host now shares one budget: a heavy job — a session's test, type-check or
+ * build command, a host-run worker verification, a merge, gate or diagnostic trial, a preview build,
+ * a deploy build — takes one slot first, and at most `limit` (two unless the host says otherwise)
+ * run at once.
  *
- * A heavy run — `npm test`, `npm run test:browser`, `npm run typecheck` and `tsc --noEmit`, directly
- * or through `npx` — started by a Graphyard session takes one slot of a host-wide semaphore first:
- * a directory `slot-N` renamed (atomically) into the lock directory, holding its owner's locked file. A run
- * that finds every slot held waits, saying so and naming the directory and the holders, and takes
- * the first slot that frees. A slot whose owner died is taken back by the next waiter.
+ * A slot is a directory `slot-N` renamed (atomically) into the host's lock directory
+ * (`hostHeavyJobsDirectory`, outside every repository), holding its owner's kernel-locked file. A
+ * job that finds the budget spent waits, naming the holders and their projects, and starts when one
+ * frees. A slot whose owner died is taken back by the next waiter; nothing is ever killed. The
+ * limit is the whole number in the directory's `limit` file, read at every attempt: lowering it
+ * leaves running jobs alone and admits no new one until fewer than the new limit run.
  *
- * The session harness puts the lock directory and the bound on every session's tab
- * (`GRAPHYARD_VERIFICATION_SLOTS_DIR`, `GRAPHYARD_VERIFICATION_SLOTS`) with a wrapper directory first
- * on its PATH (`tsc`, `npx`); the suite's own runner (tests/helpers/run-tests.ts) takes the slot for
- * `npm test`, `npm run test:browser` and `npm run typecheck`. A run with no lock directory in its
- * environment — CI, a person's shell, a test inside the suite, which never sees GRAPHYARD_* — is not
- * bounded. A run inside one that holds a slot (`GRAPHYARD_VERIFICATION_SLOT_HELD`) takes none.
+ * The loop and the deploy watch join the budget at start (`joinHostHeavyBudget`); the session
+ * harness puts the lock directory on every session's tab with a wrapper directory first on its
+ * PATH (`tsc`, `npx`, `npm`, `pnpm`); this repository's own runner (tests/helpers/run-tests.ts)
+ * takes the slot for its suite and type check. A run with no lock directory in its environment —
+ * CI, a person's shell, a test inside the suite or a trial, which never see GRAPHYARD_* — is not
+ * bounded. Work inside a job that holds a slot (`GRAPHYARD_VERIFICATION_SLOT_HELD` in a child,
+ * the async context in this process) reuses it and takes none.
  */
 
-export const slotsDirectoryVariable = 'GRAPHYARD_VERIFICATION_SLOTS_DIR', slotsVariable = 'GRAPHYARD_VERIFICATION_SLOTS', heldVariable = 'GRAPHYARD_VERIFICATION_SLOT_HELD';
-/** One slot per this many gigabytes of memory, and never fewer than two. */
-export const gigabytesPerSlot = 8, minimumSlots = 2;
-/** The directory under the managed worktree root that holds the slots. */
-export const verificationSlotsDirectory = (managedRoot: string) => resolve(managedRoot, '.verification-slots');
+export const slotsDirectoryVariable = 'GRAPHYARD_VERIFICATION_SLOTS_DIR', projectVariable = 'GRAPHYARD_HEAVY_JOB_PROJECT', heldVariable = 'GRAPHYARD_VERIFICATION_SLOT_HELD';
+/** How many heavy jobs a host runs at once unless its `limit` file says otherwise. */
+export const defaultHeavyJobs = 2;
+/** The one lock directory every Graphyard project of this user shares: under the data directory, outside every repository. */
+export const hostHeavyJobsDirectory = (environment: NodeJS.ProcessEnv = process.env) => resolve(dataDirectory(environment), 'heavy-jobs');
+/** The lock directory this process uses: the one it joined (`joinHostHeavyBudget`), else the host's. */
+export const heavyJobsDirectory = (environment: NodeJS.ProcessEnv = process.env) => environment[slotsDirectoryVariable] ?? hostHeavyJobsDirectory(environment);
+/** The host's limit: the whole number in `<directory>/limit`, else two. */
+export function heavyJobLimit(directory: string) {
+  try { const limit = Number(readFileSync(join(directory, 'limit'), 'utf8').trim()); return Number.isInteger(limit) && limit >= 1 ? limit : defaultHeavyJobs; }
+  catch { return defaultHeavyJobs; }
+}
+/** Slot numbers from here up are declarations (a trial's shard files), never part of the limit. */
+export const declarationSlot = 1000;
 /** The memory one running suite file is planned at: GY-1821 measured a full suite's swing on a 24-CPU host at about this much a file. */
 export const bytesPerSuiteFile = 3 * 2 ** 28;
 
-/** max(2, floor(total memory GB / 8)); `GRAPHYARD_VERIFICATION_SLOTS` on the host overrides it. */
-export function defaultVerificationSlots(totalBytes = totalmem()) {
-  return Math.max(minimumSlots, Math.floor(totalBytes / 2 ** 30 / gigabytesPerSlot));
-}
-export function configuredVerificationSlots(environment: NodeJS.ProcessEnv = process.env, totalBytes = totalmem()) {
-  const configured = Number(environment[slotsVariable]);
-  return Number.isInteger(configured) && configured >= 1 ? configured : defaultVerificationSlots(totalBytes);
+/** This process (the loop, the deploy watch) joins the host budget as `project`: everything heavy it runs from here on takes a slot. */
+export function joinHostHeavyBudget(project: string, environment: NodeJS.ProcessEnv = process.env) {
+  environment[slotsDirectoryVariable] ??= hostHeavyJobsDirectory(environment);
+  environment[projectVariable] = project;
 }
 
-export interface SlotOwner { identity?: string; locked?: true; pid: number; label: string; cwd: string; at: string; /** The in-flight suite files the holder declared (`declareSlotFiles`, GY-1821): what later runs deduct from the floor's budget. */ files?: number }
+export interface SlotOwner { identity?: string; locked?: true; pid: number; label: string; project?: string; cwd: string; at: string; /** The in-flight suite files the holder declared (`declareSlotFiles`, GY-1821): what later runs deduct from the floor's budget. */ files?: number }
 export interface HeldSlot { slot: number; path: string; release: () => void }
 export interface AcquireOptions {
-  directory: string; slots: number; label: string;
-  /** Called once, when every slot is held, with the line the run prints. */
+  directory: string; label: string; project?: string;
+  /** The limit, for a caller that fixes it; absent, the host's `limit` file is read at every attempt. */
+  slots?: number;
+  /** Called once, when the budget is spent, with the line the run prints. */
   onWait?: (line: string) => void;
+  /** Stops the wait: the job was cancelled before it started. */
+  signal?: AbortSignal;
   pollMs?: number; firstSlot?: number; files?: number;
   /** GY-3304: wait while the host's heavy work is drained (`master drain`); a running trial's own declaration never waits. */
   drainable?: boolean;
@@ -58,18 +73,20 @@ export interface AcquireOptions {
 
 /**
  * GY-3304: the host's heavy-work drain — `master drain REASON` writes it beside the slots, `master resume`
- * removes it. While it stands no new heavy job starts on the host: merge trials, revert trials, the
+ * removes it. GY-3445: it sits in its own `drain/` folder, which only the master session's confinement
+ * leaves writable; every other session that takes slots reads it. While it stands no new heavy job starts on the host: merge trials, revert trials, the
  * batch gate, declared checks, host worker verification and sessions' own suites and type checks wait;
  * jobs already running finish, and claims, heartbeats and status go on. A file, so a restart keeps it.
  */
 export interface HeavyDrain { reason: string; requestedBy: string; at: string }
-export const heavyDrainFile = (directory: string) => join(directory, 'drain.json');
+export const heavyDrainDirectory = (directory: string) => join(directory, 'drain');
+export const heavyDrainFile = (directory: string) => join(heavyDrainDirectory(directory), 'drain.json');
 export function readHeavyDrain(directory: string): HeavyDrain | null {
   try { const drain = JSON.parse(readFileSync(heavyDrainFile(directory), 'utf8')); return typeof drain?.reason === 'string' ? drain : null; } catch { return null; }
 }
 export function requestHeavyDrain(directory: string, reason: string, requestedBy: string, now = new Date()): HeavyDrain {
   const drain: HeavyDrain = { reason: reason.slice(0, 500), requestedBy, at: now.toISOString() }, pending = `${heavyDrainFile(directory)}.${randomUUID()}`;
-  mkdirSync(directory, { recursive: true });
+  mkdirSync(heavyDrainDirectory(directory), { recursive: true });
   writeFileSync(pending, JSON.stringify(drain));
   renameSync(pending, heavyDrainFile(directory));
   return drain;
@@ -157,7 +174,16 @@ async function reclaimStale(path: string) {
   } finally { closeSync(fd); }
 }
 
+/** The heavy jobs running now: every live slot below the declarations, dead owners' reclaimed first. */
+async function running(directory: string) {
+  for (const entry of heldSlots(directory)) await reclaimStale(join(directory, `slot-${entry.slot}`));
+  return heldSlots(directory).filter(entry => entry.slot < declarationSlot);
+}
+
 async function tryTake(directory: string, slots: number, owner: SlotOwner, firstSlot = 0): Promise<HeldSlot | null> {
+  // The limit counts jobs, not slot numbers: a job admitted under a higher limit keeps running on its
+  // number, and nothing new starts until fewer than the limit run.
+  if (firstSlot < declarationSlot && (await running(directory)).length >= slots) return null;
   for (let slot = firstSlot; slot < firstSlot + slots; slot++) {
     const path = join(directory, `slot-${slot}`);
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -192,34 +218,45 @@ async function tryTake(directory: string, slots: number, owner: SlotOwner, first
   return null;
 }
 
-/** The line a waiting run prints: what it waits for, on what, and who holds the slots. */
+const holderText = (entry: { slot: number; owner: SlotOwner | null }) => entry.owner ? `${entry.owner.label}${entry.owner.project ? ` (${entry.owner.project})` : ''}` : `slot-${entry.slot}`;
+/** The line a waiting job prints: the shared capacity it waits for, and the jobs and projects that hold it. */
 export function waitLine(options: Pick<AcquireOptions, 'directory' | 'slots' | 'label'>) {
-  const holders = heldSlots(options.directory).map(entry => entry.owner ? `${entry.owner.label} (pid ${entry.owner.pid}, ${entry.owner.cwd})` : `slot-${entry.slot}`);
-  return `graphyard: ${options.label} waits for a host verification slot: all ${options.slots} under ${options.directory} are held${holders.length ? ` by ${holders.join('; ')}` : ''}. It starts when one frees (${slotsVariable} sets the bound on this host).`;
+  const holders = heldSlots(options.directory).filter(entry => entry.slot < declarationSlot)
+    .map(entry => `${holderText(entry)}${entry.owner ? ` [pid ${entry.owner.pid}, ${entry.owner.cwd}]` : ''}`);
+  return `graphyard: ${options.label} waits for a host heavy-job slot: every Graphyard project on this host shares ${options.slots ?? heavyJobLimit(options.directory)} at once`
+    + `${holders.length ? `, held by ${holders.join('; ')}` : ''}. It starts when one frees (${join(options.directory, 'limit')} sets the limit).`;
 }
+/** The same wait as a merge trial's step, which the control plane bounds at 100 characters. */
+export const waitStep = (directory: string) =>
+  `waiting for a host heavy-job slot, held by ${heldSlots(directory).filter(entry => entry.slot < declarationSlot).map(holderText).join(', ')}`.slice(0, 100);
 
-/** Take a slot, waiting as long as every one is held. */
+/** Take a slot, waiting as long as the budget is spent. */
 export async function acquireVerificationSlot(options: AcquireOptions): Promise<HeldSlot> {
   const pollMs = options.pollMs ?? 1000;
   mkdirSync(options.directory, { recursive: true });
-  const owner: SlotOwner = { identity, locked: true, files: options.files, pid: process.pid, label: options.label, cwd: process.cwd(), at: new Date().toISOString() };
+  const owner: SlotOwner = { identity, locked: true, files: options.files, pid: process.pid, label: options.label, ...(options.project ? { project: options.project } : {}), cwd: process.cwd(), at: new Date().toISOString() };
   let told = false, drained = false;
   for (;;) {
+    if (options.signal?.aborted) throw options.signal.reason;
     const drain = options.drainable ? readHeavyDrain(options.directory) : null;
     if (drain) {
       if (!drained) { drained = true; options.onWait?.(`graphyard: ${options.label} waits: ${heavyDrainLine(drain)}`); }
       await new Promise(done => setTimeout(done, pollMs));
       continue;
     }
-    const held = await tryTake(options.directory, options.slots, owner, options.firstSlot);
+    const held = await tryTake(options.directory, options.slots ?? heavyJobLimit(options.directory), owner, options.firstSlot);
     if (held) {
-      if (told) options.onWait?.(`graphyard: ${options.label} took host verification slot ${held.slot}`);
-      return held;
+      // Jobs that passed the count together and took different numbers are too many: each steps back and tries again.
+      if (options.firstSlot !== undefined || (await running(options.directory)).length <= (options.slots ?? heavyJobLimit(options.directory))) return held;
+      held.release();
     }
     if (!told) { told = true; options.onWait?.(waitLine(options)); }
-    await new Promise(done => setTimeout(done, pollMs));
+    await new Promise(done => setTimeout(done, pollMs * (0.5 + Math.random())));
   }
 }
+
+const reportUnusable = (label: string, directory: string, error: unknown) =>
+  process.stderr.write(`graphyard: ${label} runs outside the host heavy-job budget: ${directory} cannot be used (${error instanceof Error ? error.message : String(error)})\n`);
 
 /**
  * Take a slot for `label` when this process runs in a Graphyard session and holds none yet, or
@@ -230,18 +267,46 @@ export async function sessionVerificationSlot(label: string, environment: NodeJS
   const directory = environment[slotsDirectoryVariable];
   if (!directory || environment[heldVariable]) return null;
   let held: HeldSlot;
-  try { held = await acquireVerificationSlot({ directory, slots: configuredVerificationSlots(environment), label, onWait: log, drainable: true }); }
-  catch (error) { log(`graphyard: ${label} runs without a host verification slot: ${directory} cannot be used (${error instanceof Error ? error.message : String(error)})`); return null; }
+  try { held = await acquireVerificationSlot({ directory, label, project: environment[projectVariable], onWait: log, drainable: true }); }
+  catch (error) { reportUnusable(label, directory, error); return null; }
   process.once('exit', held.release);
   return held;
 }
 
-/** Whether a command is a heavy verification run: a `tsc` type check, or one through `npx`. */
-export function heavyCommand(command: string, args: string[]) {
+/** What a detached child of a job that holds a slot carries: the lock directory (its declarations go there) and the mark that it takes no slot of its own. */
+export const heldJobEnvironment = (): Record<string, string> =>
+  process.env[slotsDirectoryVariable] ? { [slotsDirectoryVariable]: process.env[slotsDirectoryVariable]!, [heldVariable]: '1' } : {};
+
+/**
+ * Run one heavy job of this process (a trial, a host-run verification, a preview or deploy build)
+ * inside the host budget: wait for a slot, run, and free it however the job ends. Its children
+ * carry the slot (`heldVariable`), and a heavy job started inside it runs at once on the same
+ * slot. A process that never joined the budget runs the job as it always did.
+ */
+export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal } = {}): Promise<T> {
+  const directory = process.env[slotsDirectoryVariable];
+  if (!directory || process.env[heldVariable] || inheritedVariables.getStore()?.[heldVariable]) return job();
+  let held: HeldSlot;
+  try { held = await acquireVerificationSlot({ directory, label, project: process.env[projectVariable], onWait: options.onWait ?? (line => process.stderr.write(`${line}\n`)), signal: options.signal, drainable: true }); }
+  catch (error) { if (options.signal?.aborted) throw error; reportUnusable(label, directory, error); return job(); }
+  try { return await inheritedVariables.run({ [heldVariable]: '1' }, job); } finally { held.release(); }
+}
+
+const heavyScript = /^(test|build|typecheck)\b/;
+/**
+ * Whether a command is a heavy job: a `tsc` type check (or one through `npx`), or a package
+ * manager's test, build or type-check script. A checkout that carries Graphyard's own runner
+ * (tests/helpers/run-tests.ts) is left to it: the runner takes the slot and sizes its breadth by it.
+ */
+export function heavyCommand(command: string, args: string[], cwd = process.cwd()) {
   const typecheck = (words: string[]) => !words.some(word => ['--watch', '-w', '--version', '-v', '--help', '-h', '--init'].includes(word));
+  const at = args.findIndex(word => !word.startsWith('-'));
   if (command === 'tsc') return typecheck(args);
-  if (command === 'npx') { const at = args.findIndex(word => !word.startsWith('-')); return at >= 0 && args[at] === 'tsc' && typecheck(args.slice(at + 1)); }
-  return false;
+  if (command === 'npx') return at >= 0 && args[at] === 'tsc' && typecheck(args.slice(at + 1));
+  if (command !== 'npm' && command !== 'pnpm' || at < 0) return false;
+  const script = ['run', 'run-script'].includes(args[at]!) ? args.slice(at + 1).find(word => !word.startsWith('-')) : args[at] === 't' ? 'test' : args[at]!;
+  if (!script || !heavyScript.test(script)) return false;
+  return !existsSync(join(cwd, 'tests/helpers/run-tests.ts'));
 }
 
 /** PATH without the wrapper directory, so the wrapper runs the real command. */
@@ -252,15 +317,15 @@ export function onPathOf(name: string, path: string) {
 }
 
 /**
- * The wrapper directory a session's PATH starts with: `tsc` and `npx` scripts shipped in this
- * installation (bin/verification), each running bin/graphyard-verify.mjs with its command's name.
+ * The wrapper directory a session's PATH starts with: `tsc`, `npx`, `npm` and `pnpm` scripts shipped
+ * in this installation (bin/verification), each running bin/graphyard-verify.mjs with its command's name.
  * The lock directory is created at launch (sessionSlotsGrant) so a sandboxed runtime can be granted it.
  */
 export const verificationBin = fileURLToPath(new URL('../../bin/verification', import.meta.url));
 
-/** The variables a session's tab carries: the lock directory, the bound, and PATH with the wrappers first. */
-export function verificationEnvironment(managedRoot: string, environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  return { [slotsDirectoryVariable]: verificationSlotsDirectory(managedRoot), [slotsVariable]: String(configuredVerificationSlots(environment)),
+/** The variables a session's tab carries: the host's lock directory, its project, and PATH with the wrappers first. */
+export function verificationEnvironment(project: string, environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  return { [slotsDirectoryVariable]: environment[slotsDirectoryVariable] ?? hostHeavyJobsDirectory(environment), [projectVariable]: project,
     PATH: [verificationBin, pathWithout(environment.PATH, verificationBin)].filter(Boolean).join(delimiter) };
 }
 
@@ -277,7 +342,7 @@ export function withVerificationPath(harness: Record<string, string>, launch: Re
 
 /**
  * The wrapper's plan for one command: the real executable (PATH without the wrappers), the PATH its
- * child runs with, and whether it is a heavy verification run that takes a slot. bin/graphyard-verify.mjs
+ * child runs with, and whether it is a heavy job that takes a slot. bin/graphyard-verify.mjs
  * spawns it; children go through src/child-runner.ts everywhere else.
  */
 export function wrappedCommand(command: string, args: string[], environment: NodeJS.ProcessEnv = process.env) {

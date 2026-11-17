@@ -6,7 +6,7 @@
 
 ## Why Graphyard
 
-- **You decide goals, money, credentials.**
+- **You decide goals, money, credentials.** They wait under Needs you; blockers are the Master's.
 - **Every change is proven.** Workers build, agents review, heads are trialled on main.
 - **Production stays safe.** Main deploys itself; failures revert automatically.
 

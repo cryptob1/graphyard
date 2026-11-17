@@ -56,10 +56,17 @@ CREATE INDEX IF NOT EXISTS events_work_revision ON events (work_id,(payload->'wo
 -- never a scan of the item's history.
 CREATE INDEX IF NOT EXISTS events_work_delivery ON events(work_id,seq)
   WHERE ${DELIVERY_EVENT_PREDICATE};
+-- GY-3402: the install-wide records (agent registry, connect requests, team access) are the newest
+-- events of one kind family with no item. A LIKE on kind cannot use a btree under the database's
+-- collation, so each read scanned the whole ledger; this answers them newest-first in one probe.
+CREATE INDEX IF NOT EXISTS events_unowned_family ON events(split_part(kind,'.',1),seq) WHERE work_id IS NULL;
 ${eventWorkFunctions}
 -- Append-only but for the audited compaction of routine rows (store/compaction.ts, GY-979).
 ${eventsImmutableDdl}`,
 });
+/** Rows of one install-wide kind family (`prefix` ends in its '.'), through `events_unowned_family`. */
+export const unownedFamilySql = (prefix: string, alias = 'events') =>
+  `${alias}.work_id IS NULL AND split_part(${alias}.kind,'.',1) = '${prefix.slice(0, -1)}'`;
 /** Where the next ledger compaction batch starts (store/compaction.ts): a lost row only restarts the pass. */
 export const ledgerCompactionCursor = defineTable({
   name: 'ledger_compaction_cursor', orderBy: 'id', cache: true,

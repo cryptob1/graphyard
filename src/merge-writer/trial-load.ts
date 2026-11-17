@@ -17,35 +17,36 @@ export const trialShardLanes = (cores: number) => Math.max(2, Math.floor(cores))
 export const trialSlotCount = (cores: number, requested: number, affordableFiles: number | null = null) =>
   Math.max(1, Math.min(requested, Math.floor(cores / 2), affordableFiles === null ? Infinity : Math.floor(affordableFiles / 2)));
 /** The trials that can each hold a serve and a session container at once: a smaller cap would leave them all waiting on each other. */
-const minimumTrialContainers = 6;
+export const minimumTrialContainers = 6;
 /** Scale the normal cap by CPU not stolen, leaving room for a serve/session pair. */
 export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, Math.floor(cores / 2)) * usable / cores));
 /** The hwmon sensor names that read a CPU, for the trial guard here and the loop's launch guard (GY-3373). */
 export const cpuSensorNames = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal'];
-/** GY-3376: a start waits while a CPU sensor reads 3C under its own critical (else max) temperature; this is the limit for a sensor that reports neither. */
-export const trialHotCelsius = 95;
+/** GY-3376, GY-3416: a start waits while a CPU sensor reads the lower of this and 3C under its own critical (else max) temperature — a laptop at 95-98C against a 102C crit-3 was never held; this alone is the limit for a sensor that reports neither. */
+export const trialHotCelsius = 85;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
 export const gateTrialKey = 'batch-gate';
-/** Who starts first once a start can go: the lower number. */
-export const trialStartOrder = { merge: 0, gate: 1, verification: 2 } as const;
+/** GY-3444: the gate's containers' CPU weight (Docker's default is 1024), so under load its checks run ahead of merge trials and worker verification. */
+export const gateCpuShares = 4096;
+/** Who starts first once a start can go: the lower number. GY-3444: the batch gate's checks first, so a loaded host never starves the deploy path. */
+export const trialStartOrder = { gate: 0, merge: 1, verification: 2 } as const;
 
 /**
  * GY-3332: how long a start waits on host pressure (heat, the disk floor) before it fails as a trial-host
- * fault, with no verdict on its head; and how long a worker's verification waits for anything, so
- * `complete` never hangs on a start it cannot see. A merge or gate start's wait for a slot is bounded by its trial's own deadline.
+ * fault, with no verdict on its head. A wait for a slot under the cap is capacity, not a fault (GY-3390):
+ * every start waits its turn, bounded only by its own run's deadline (a worker verification's 55 minutes).
  */
 export const trialPressureBoundSeconds = 10 * 60;
-export const trialVerificationBoundSeconds = 10 * 60;
 
 /** What the launcher reads to admit a container. `slots` is per machine, not per install: any install's containers load the same CPUs. */
-export interface TrialLoad { slots: string; cap: number; order: number; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number; waitBoundSeconds: number | null }
+export interface TrialLoad { slots: string; cap: number; order: number; /** GY-3444: Docker --cpu-shares, set for the gate alone. */ cpuShares?: number; /** GY-3444: the gate's cap while the CPU is hot: it starts within it instead of waiting on heat. */ hotCap?: number; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number }
 
 /** The load of one start for `root`'s install; `run.diskFloorGb` is the one setting it reads. */
 const hostCpu = trialCpuMonitor();
 export async function trialLoad(root: string, who: keyof typeof trialStartOrder, usable = hostCpu.cores(), cores = availableParallelism()): Promise<TrialLoad> {
   const run = await readFile(join(root, '.graphyard', 'master.json'), 'utf8').then(text => JSON.parse(text).run ?? {}, () => ({}));
-  return { slots: trialSlots(), cap: trialContainerCap(cores, usable), order: trialStartOrder[who], hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon',
-    pressureBoundSeconds: trialPressureBoundSeconds, waitBoundSeconds: who === 'verification' ? trialVerificationBoundSeconds : null };
+  return { slots: trialSlots(), cap: trialContainerCap(cores, usable), order: trialStartOrder[who], ...(who === 'gate' ? { cpuShares: gateCpuShares, hotCap: Math.max(1, Math.floor(trialContainerCap(cores, usable) / 2)) } : {}), hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon',
+    pressureBoundSeconds: trialPressureBoundSeconds };
 }
 export const trialSlots = (home = homedir()) => join(home, '.gy', 'trial-slots');
 
@@ -63,10 +64,11 @@ def read(path):
     except OSError:
         return ''
 def limit(path):
+    # GY-3416: the lower of the constant and the sensor's own critical (else max) minus 3.
     for kind in ('_crit', '_max'):
         value = read(path.replace('_input', kind))
         if value.isdigit() and int(value) > 0:
-            return int(value) // 1000 - 3
+            return min(load['hotCelsius'], int(value) // 1000 - 3)
     return load['hotCelsius']
 def hottest():
     # (reading, limit) of the first CPU sensor at or over its own limit, else None.
@@ -82,9 +84,12 @@ def free(path):
         return None
 def gb(size):
     return '%.1f GB' % (size / 1e9)
+def cap():
+    # GY-3444: a hot CPU never holds the batch gate's start: it starts within half the cap instead.
+    return load['hotCap'] if load.get('hotCap') and hottest() else load['cap']
 def pressure():
     hot = hottest()
-    if hot:
+    if hot and not load.get('hotCap'):
         return 'a CPU sensor reads ' + str(hot[0]) + 'C, at or over its ' + str(hot[1]) + 'C limit', False
     for source, target, readonly in spec['mounts']:
         space = None if readonly else free(source)
@@ -111,7 +116,8 @@ def take_slot():
     spare = None
     try:
         names = set(os.path.basename(path) for path in glob.glob(os.path.join(load['slots'], 'slot-*')))
-        names.update('slot-' + str(slot) for slot in range(load['cap']))
+        allowed = cap()
+        names.update('slot-' + str(slot) for slot in range(allowed))
         occupied = 0
         for name in sorted(names):
             fd = locked(name, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -121,7 +127,7 @@ def take_slot():
                 spare = fd
             else:
                 os.close(fd)
-        if occupied < load['cap']:
+        if occupied < allowed:
             return spare
         if spare is not None:
             os.close(spare)
@@ -134,6 +140,8 @@ def admit():
     os.makedirs(load['slots'], exist_ok=True)
     # A start waiting on the disk floor says so here, for master status; a killed launcher's note names a dead pid.
     note = os.path.join(load['slots'], 'floor-' + str(os.getpid()))
+    # GY-3444: any wait says so too, by start order, so the batch gate's bound leaves the wait out.
+    waiting = os.path.join(load['slots'], 'wait-' + str(load['order']) + '-' + str(os.getpid()))
     queued = None
     said = None
     began = time.time()
@@ -157,22 +165,27 @@ def admit():
                 if queued is not None:
                     os.close(queued)
                     queued = None
-                bound = load.get('pressureBoundSeconds')
+                bound = load['pressureBoundSeconds']
             else:
-                why = 'the machine-wide cap of ' + str(load['cap']) + ' trial containers is reached'
+                why = 'the machine-wide cap of ' + str(cap()) + ' trial containers is reached'
                 if queued is None:
                     queued = locked('waiting-' + str(load['order']), fcntl.LOCK_SH)
-                bound = load.get('waitBoundSeconds')
+                # A slot wait is capacity, never a fault: it has no bound, and only pressure that follows it is timed.
+                bound = None
+                began = time.time()
             if why != said:
                 print('${waitingLine}: ' + why, file=sys.stderr, flush=True)
+                if said is None:
+                    open(waiting, 'w').close()
                 said = why
             if bound is not None and time.time() - began >= bound:
                 print('${faultLine}the trial container waited ' + str(int(time.time() - began)) + 's to start and gave up: ' + why, file=sys.stderr, flush=True)
                 sys.exit(75)
             time.sleep(1)
     finally:
-        if os.path.exists(note):
-            os.remove(note)
+        for path in (note, waiting):
+            if os.path.exists(path):
+                os.remove(path)
 `;
 
 /** The launcher's own lines from `chunks` of its stderr, each passed to `line` as it arrives (GY-3332): what a waiting start shows its caller. */
@@ -198,6 +211,18 @@ export function trialFloorWaits(slots = trialSlots()): string[] {
     if (!pid) return [];
     try { process.kill(Number(pid), 0); return [readFileSync(join(slots, name), 'utf8')]; }
     catch { try { unlinkSync(join(slots, name)); } catch { /* another reader took it */ } return []; } // a killed launcher's note
+  });
+}
+
+/** GY-3444: whether a live launcher on this machine waits to start a container of start order `who` now. */
+export function trialStartWaiting(who: keyof typeof trialStartOrder, slots = trialSlots()): boolean {
+  let names: string[];
+  try { names = readdirSync(slots); } catch { return false; }
+  return names.some(name => {
+    const pid = new RegExp(`^wait-${trialStartOrder[who]}-(\\d+)$`).exec(name)?.[1];
+    if (!pid) return false;
+    try { process.kill(Number(pid), 0); return true; }
+    catch { try { unlinkSync(join(slots, name)); } catch { /* another reader took it */ } return false; } // a killed launcher's note
   });
 }
 

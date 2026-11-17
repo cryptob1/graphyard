@@ -17,7 +17,7 @@ const shots = process.env.UI_REVIEW_SHOTS ? new URL('../verification/ui-review/a
 
 async function seed(url: string) {
   const file = async (n: number, title: string) => (await (await fetch(`${url}/api/work`, { method: 'POST', headers: { ...operator, 'Idempotency-Key': `ui-shell-all-${n}` },
-    body: JSON.stringify({ title, type: 'feature', description: 'Seeded for the page shell.', criteria: [{ id: 'AC-1', text: 'It works in the browser', proofs: ['e2e:fixture'] }] }) })).json() as { id: string });
+    body: JSON.stringify({ title, why: 'People finish the task faster.', simplest: 'One small change on an existing page.', type: 'feature', description: 'Seeded for the page shell.', criteria: [{ id: 'AC-1', text: 'It works in the browser', proofs: ['e2e:fixture'] }] }) })).json() as { id: string });
   for (const [n, title] of [[1, 'Sign-up form remembers the email'], [2, 'Faster search on the Work page']] as const) {
     const item = await file(n, title);
     await fetch(`${url}/api/work/${item.id}/ready`, { method: 'POST', headers: { ...operator, 'Idempotency-Key': `ui-shell-all-ready-${n}` }, body: JSON.stringify({ reason: 'Released by the ui-shell-all-pages case' }) });

@@ -1,9 +1,10 @@
-import { once } from '../store/mutations.js';
+import { once, record } from '../store/mutations.js';
 import { recordDispatch } from '../engine/evaluate.js';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { demand, implementerIdentities, type Principal } from '../model.js';
+import { demand, implementerIdentities, operatorScopeIncludes, type Principal } from '../model.js';
+import { dispatchHistoryLimit, liveReviewRequest } from '../model/dispatch.js';
 import type { ControlPlaneReviewLaunch, ControlPlaneVerdict } from '../model/post-merge-review.js';
 import { reviewEvents, verdictStateOf } from '../review-post.js';
 import { blockingFindings } from '../review-cap.js';
@@ -155,6 +156,32 @@ export async function recordReviewLaunch(services: Services, actor: Principal, i
     return { registered: true, key: work!.key, launch: launch.id, reviewer: launch.reviewer, head: launch.head, baseTip: launch.baseTip, expiresAt, postMerge: launch.postMerge };
   }));
   return result;
+}
+
+/**
+ * `POST /api/work/:id/review-request` (GY-3428): `master review` renews the head's review request.
+ * The standing request is cancelled and a fresh one opened for the same head, so the loop — which
+ * counts sessions per request and leaves a spent one to the master — launches a reviewer for it on
+ * its next cycle. Refused while a reviewer session for the head is running: that one answers it.
+ */
+export async function renewReviewRequest(services: Services, actor: Principal, id: string, key: string) {
+  demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'Only the master (coordinator or operator agent) or an admin may renew a review request', 403);
+  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+  return services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, { id, renew: 'review' }, async () => {
+    const all = await decisionWork(db, [id]);
+    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    demand(operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
+    const previous = liveReviewRequest(work!);
+    demand(previous, `${work!.key} has no standing review request to renew`, 409);
+    demand(!work!.sessions?.some(handle => handle.kind === 'review' && handle.state === 'running' && handle.head === previous!.sha), `A reviewer session for ${work!.key} is running on ${previous!.sha.slice(0, 12)}; it answers the request`, 409);
+    const resolved = { ...previous!, state: 'cancelled' as const, resolvedAt: now.toISOString(), resolution: 'renewed by master review: the request is asked afresh' };
+    work!.autoDispatch = { ...work!.autoDispatch!, review: null, history: [...work!.autoDispatch!.history, resolved].slice(-dispatchHistoryLimit) };
+    await record(db, work!, actor.id, 'dispatch.cancelled', { details: { ...resolved, at: now.toISOString() } });
+    services.engine.evaluate(work!, all, now);
+    await recordDispatch(db, work!, now);
+    await save(db, work!, actor.id, 'dispatch.renewed', now, { previous: previous!.id, requestId: work!.autoDispatch?.review?.id ?? null });
+    return { renewed: true, key: work!.key, previous: previous!.id, requestId: work!.autoDispatch?.review?.id ?? null };
+  }));
 }
 
 type Judged = { refusal: { reason: string; status: number } } | { result: unknown };
