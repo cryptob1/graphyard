@@ -6,7 +6,7 @@
 // NAME.down exists, as OpenSSH does for a host it cannot reach); `sshd` runs a real OpenSSH server.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { temporaryDirectory } from './temp-dirs.js';
@@ -31,6 +31,7 @@ def save():
 def log(word):
     open(os.path.join(STATE, 'calls.log'), 'a').write(word + '\\n')
 command = args[0]
+open(os.path.join(STATE, 'every-call.log'), 'a').write(command + '\\n')
 if command == 'info':
     print('fixture')
 elif command == 'ps':
@@ -108,6 +109,8 @@ SSH_ORIGINAL_COMMAND="$last" exec "${shim}"
 }
 
 export const dockerCalls = (state: string) => existsSync(join(state, 'calls.log')) ? execFileSync('cat', [join(state, 'calls.log')], { encoding: 'utf8' }).split('\n').filter(Boolean) : [];
+/** Every Docker call the host made, by its command word. */
+export const dockerEveryCall = (state: string) => existsSync(join(state, 'every-call.log')) ? readFileSync(join(state, 'every-call.log'), 'utf8').split('\n').filter(Boolean) : [];
 export const dockerCount = (state: string, word: string) => dockerCalls(state).filter(entry => entry === word).length;
 export const dockerCreates = async (state: string): Promise<string[][]> => existsSync(join(state, 'creates.jsonl'))
   ? (await readFile(join(state, 'creates.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
@@ -147,12 +150,12 @@ export async function shardRepository(label: string, files: readonly string[], e
 }
 export const commitFile = async (root: string, path: string, text: string) => { await writeFile(join(root, path), text); git(root, 'add', '-A'); git(root, 'commit', '-qm', `change ${path}`); return git(root, 'rev-parse', 'HEAD'); };
 
-/** Kill every process under the ones `matches` picks (by command line), and those too. */
-export function killTrees(matches: (pid: number, command: string) => boolean) {
+/** Kill every process under the ones `matches` picks (by working directory: the shim execs python, so its command line names no path), and those too. */
+export function killTrees(matches: (pid: number, cwd: string) => boolean) {
   const table = readdirSync('/proc').filter(name => /^\d+$/.test(name)).flatMap(pid => {
-    try { return [{ pid: Number(pid), ppid: Number(readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '').split(' ')[1]), command: readFileSync(`/proc/${pid}/cmdline`, 'utf8') }]; } catch { return []; }
+    try { return [{ pid: Number(pid), ppid: Number(readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '').split(' ')[1]), cwd: readlinkSync(`/proc/${pid}/cwd`) }]; } catch { return []; }
   });
-  const tree = new Set(table.filter(entry => matches(entry.pid, entry.command)).map(entry => entry.pid));
+  const tree = new Set(table.filter(entry => matches(entry.pid, entry.cwd)).map(entry => entry.pid));
   for (let grew = true; grew;) { grew = false; for (const { pid, ppid } of table) if (tree.has(ppid) && !tree.has(pid)) { tree.add(pid); grew = true; } }
   for (const pid of tree) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
 }

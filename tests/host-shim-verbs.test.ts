@@ -30,7 +30,9 @@ test(`${proof} — host prepare installs the shim as the only command of this ma
   // GY-3419: the host's own tools when both are installed, else the static extras fetched into the home; either way the install runs.
   assert.match(script, /"\$setuptool" install/, 'rootless Docker');
   const installed = /<<'GRAPHYARD_SHIM'\n([\s\S]*?)GRAPHYARD_SHIM\n/.exec(script)![1]!;
-  assert.equal(spawnSync('python3', ['-c', 'import ast, sys; ast.parse(sys.stdin.read())'], { input: installed }).status, 0, 'the installed shim is valid Python');
+  assert.equal(spawnSync('sh', ['-n'], { input: installed }).status, 0, 'the installed shim is valid sh');
+  const verbs = /<<'GRAPHYARD_VERBS'\n([\s\S]*?)GRAPHYARD_VERBS\n/.exec(installed)![1]!;
+  assert.equal(spawnSync('python3', ['-c', 'import ast, sys; ast.parse(sys.stdin.read())'], { input: verbs }).status, 0, 'its verbs are valid Python');
 });
 
 test(`${proof} — a plain shell command, another user's files, docker run with the root filesystem and any malformed verb are refused`, () => {

@@ -39,13 +39,19 @@ async function fixture(browser: Browser, phone = false) {
     Object.defineProperty(window, 'Terminal', { configurable: true, get: () => original, set: value => {
       original = class extends value { constructor(options: unknown) { super(options); (window as any).testTerminal = this; } };
     } });
+    // GY-3368: 'reconnecting' lasts one 250 ms retry delay, shorter than expect's polling gaps, so
+    // every state the terminal enters is recorded and the test reads the record, not one sample.
+    const states: string[] = (window as any).terminalStates = [];
+    new MutationObserver(changes => { for (const change of changes) states.push((change.target as Element).getAttribute('data-terminal')!); })
+      .observe(document, { subtree: true, attributes: true, attributeFilter: ['data-terminal'] });
   });
   const { code } = await (await fetch(`${url}/api/sign-in-links`, { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } })).json() as { code: string };
   await page.goto(`${url}/#sign-in=${code}&master`);
   const calls = async () => (await readFile(join(site, 'herdr.log'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   const inputs = async () => (await calls()).filter(entry => entry.command?.type === 'terminal.input').map(entry => entry.command.text);
   await expect(page.locator('.xterm-rows')).toContainText('screen of w1:master', settled);
-  return { page, child, current, save, calls, inputs, stop: async () => {
+  const reconnects = () => page.evaluate(() => (window as any).terminalStates.filter((state: string) => state === 'reconnecting').length);
+  return { page, child, current, save, calls, inputs, reconnects, stop: async () => {
     await context.close(); stopping.abort();
     const ended = once(child, 'exit'); child.send('stop'); await ended; await database.close();
     process.env = original;
@@ -100,14 +106,14 @@ test('e2e:master-page-ux — history, fitting, native input, clipboard, reconnec
     // written after the drop could miss that read (GY-3261).
     f.current.gap = 'output produced during the gap'; await f.save();
     f.child.send('drop-terminals');
-    await expect(page.locator('.live-terminal')).toHaveAttribute('data-terminal', 'reconnecting');
+    await expect.poll(f.reconnects).toBe(1);
     await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, settled);
     expect(await page.evaluate(() => (window as any).survivedDrop)).toBe(true);
     // A failed reconnect while offline must keep retrying once the network returns.
     await page.context().setOffline(true);
     f.current.gap = 'output while offline'; await f.save();
     f.child.send('drop-terminals');
-    await expect(page.locator('.live-terminal')).toHaveAttribute('data-terminal', 'reconnecting');
+    await expect.poll(f.reconnects).toBe(2);
     await page.waitForTimeout(1000);
     await page.context().setOffline(false);
     await expect(page.locator('.xterm-rows')).toContainText(f.current.gap, settled);

@@ -358,7 +358,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     if (confinementRoot) prepareConfinedGitPaths(confinementRoot);
     const paths = workerPaths(prepared.path);
     // So is the host's verification lock directory, or a sandboxed worker's heavy runs go unbounded (GY-612).
-    const writable = [...writablePaths({ ...paths, commonDir: paths.commonDir ?? await sharedGitDirectory(root) }), ...sessionSlotsGrant(root, config)];
+    const writable = [...writablePaths({ ...paths, commonDir: paths.commonDir ?? await sharedGitDirectory(root) }), ...sessionSlotsGrant()];
     const args = grantWorkerPaths(launch.kind, launch.args, writable, prepared.path);
     // The worker's own rules go into its worktree before the session starts, so pushing its
     // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.

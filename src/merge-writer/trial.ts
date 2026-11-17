@@ -447,14 +447,12 @@ export async function trialAffordableFiles(read?: () => Promise<HostMemoryReadin
   if (!reading) return null;
   return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile);
 }
-/** The first slot index a trial declares at: past any bound a host hands out, so no run ever takes or waits on it. */
-export const trialDeclarationSlot = 1000;
 /** Declare trial breadth through the same kernel-owned reservation as ordinary suites. */
-export async function declareTrialFiles(directory: string, key: string, files: number): Promise<() => Promise<void>> {
-  if (!(files >= 1) || !existsSync(directory)) return async () => {};
+export async function declareTrialFiles(directory: string | undefined, key: string, files: number): Promise<() => Promise<void>> {
+  if (!(files >= 1) || !directory || !existsSync(directory)) return async () => {};
   try {
-    const { acquireVerificationSlot } = await import('../master/verification-slots.js');
-    const held = await acquireVerificationSlot({ directory, slots: 1000, firstSlot: trialDeclarationSlot,
+    const { acquireVerificationSlot, declarationSlot } = await import('../master/verification-slots.js');
+    const held = await acquireVerificationSlot({ directory, slots: 1000, firstSlot: declarationSlot,
       label: `merge trial ${key}`, files: Math.floor(files) });
     return async () => held.release();
   } catch { /* the trial runs as it would have; only the budget sharing is lost */ }
@@ -1402,11 +1400,13 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const shards: string[][] = [], pinned: boolean[] = [];
     for (const pool of [{ files: split.remoteable, lanes: trialShardLanes(cores) + remoteLanes, local: false }, { files: split.localOnly, lanes: trialShardLanes(cores), local: true }])
       for (const group of input.groupSize === undefined ? shardTestFiles(pool.files, pool.lanes, durations) : groupTestFiles(pool.files, input.groupSize)) { shards.push(group); pinned.push(pool.local); }
-    const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
+    const slotsDirectory = process.env[(await import('../master/verification-slots.js')).slotsDirectoryVariable];
     const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
     input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
     const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
     let stopped: unknown = null;
+    // A shard a host turned away is noted after every shard's output, so the note stays in the log tail kept on the item.
+    const dropped: string[] = [];
     const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, deadline, signal: input.signal }) : null;
     // One shard on this machine, or on `remote`; a remote host that turned it away rethrows, so it runs elsewhere.
     const shard = async (index: number, remote?: string) => {
@@ -1435,7 +1435,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries,
           unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
       } catch (error) {
-        if (error instanceof HostDroppedError) { log.push(`[remote] ${error.message}; its shard runs on another host`); throw error; }
+        if (error instanceof HostDroppedError) { dropped.push(`[remote] ${error.message}; its shard runs on another host`); throw error; }
         log.push(...entries);
         // A remote shard past the deadline ends the trial as a timeout, as a local one does.
         stopped ??= (error as { timedOut?: boolean }).timedOut ? new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail()) : error;
@@ -1455,6 +1455,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     } finally { await release(); await session?.close(); }
     const ran = settledShards.filter(shard => shard !== undefined);
     for (const shard of ran) log.push(...shard.entries);
+    log.push(...dropped);
     // A shard past the deadline ends the trial as a timeout once every shard has stopped, its log holding what the others printed.
     if (stopped instanceof TrialTimeoutError) throw new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail());
     if (stopped !== null) throw stopped;

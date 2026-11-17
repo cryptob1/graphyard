@@ -10,10 +10,14 @@ import { workerVerificationPump } from '../src/daemon/worker-verification.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import type { MasterSession } from '../src/cli/master/session.js';
 import type { MergeRecordEvent } from '../src/merge-writer/executor.js';
-import { acquireVerificationSlot, readHeavyDrain, requestHeavyDrain, resumeHeavyDrain, verificationSlotsDirectory } from '../src/master/verification-slots.js';
+import { acquireVerificationSlot, readHeavyDrain, requestHeavyDrain, resumeHeavyDrain, slotsDirectoryVariable } from '../src/master/verification-slots.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { join } from 'node:path';
+
+/** The host lock directory this process reads the drain from (GY-3290), inside the test's own directory. */
+const hostDirectory = (base: string) => process.env[slotsDirectoryVariable] = join(base, 'heavy-jobs');
 
 // GY-3304: the Chief drains the host's heavy work for another project's verification window. A job
 // already running finishes; new merge trials, batch gates, declared checks, host worker verification
@@ -70,12 +74,14 @@ function world(directory: string) {
 }
 
 test('e2e:heavy-work-drain — a running trial finishes under a drain while queued merge trials and the batch gate wait and the loop keeps cycling; resume admits them with every gate, and a restart keeps the drain', { timeout: 60_000 }, async () => {
-  const base = await temporaryDirectory('heavy-drain'), directory = verificationSlotsDirectory(base);
+  const base = await temporaryDirectory('heavy-drain'), directory = hostDirectory(base);
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { worktreeRoot: base, mergeWriter: { deployKeyFile: '/keys/deploy' } } });
   const yard = world(directory);
   let state = emptyDaemonState(config), effects = yard.effects();
   await runCycle(config, state, effects, () => start);
+  // The trial takes a slot of the host budget (GY-3290) before it starts.
+  while (!yard.trials.length) await settle(10);
   assert.deepEqual(yard.trials, [1], 'one job runs');
 
   // The Chief drains through its CLI, naming why and who asked.
@@ -122,7 +128,7 @@ test('e2e:heavy-work-drain — a running trial finishes under a drain while queu
 });
 
 test('e2e:heavy-work-drain — declared checks and worker verification stay queued, and a session suite waits while one already running finishes', { timeout: 30_000 }, async () => {
-  const base = await temporaryDirectory('heavy-drain-host'), directory = verificationSlotsDirectory(base);
+  const base = await temporaryDirectory('heavy-drain-host'), directory = hostDirectory(base);
   const takes: unknown[] = [];
   const pump = workerVerificationPump(base, () => 'machine-a', async (path, body) => { if (path === 'worker-verifications/take') takes.push(body); return []; }, () => base);
 
