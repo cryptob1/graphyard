@@ -159,9 +159,10 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
       }
       const records = end.ok || end.status !== 255 ? await shim(target, `fetch-records ${run} ${shard}`) : '';
       // SSH's own failure (255), a launcher that gave up on the host's heat or disk, or a shard that died
-      // without a verdict (no records): the shard runs on another host, its output's tail kept in the trial log.
+      // without a verdict (no records): the shard runs on another host, its output's tail kept in the trial log
+      // (less the launcher's own waiting lines, which on a hot host would fill it).
       const fault = trialContainerFault(end.out);
-      if (!end.ok && (end.status === 255 || end.status === null || fault || !records.trim())) throw new HostDroppedError(target, fault ?? end.out.slice(-500));
+      if (!end.ok && (end.status === 255 || end.status === null || fault || !records.trim())) throw new HostDroppedError(target, fault ?? end.out.replace(/^graphyard trial container: (waiting|starting).*\n/gm, '').slice(-500));
       return { ...end, records };
     },
     async close() {
