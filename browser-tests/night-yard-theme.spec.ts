@@ -136,7 +136,7 @@ test('e2e:night-yard-theme — Night Yard serves by default with rain over grain
   // The choice is this browser's: a reload serves Daylight again, and Night Yard is one button away.
   expect(await page.evaluate(() => localStorage.getItem('graphyard.theme'))).toBe('daylight');
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible(live);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'daylight');
   expect(await background(page)).toEqual([243, 244, 239]);
   await page.getByRole('button', { name: 'Switch theme to Night Yard' }).click();
