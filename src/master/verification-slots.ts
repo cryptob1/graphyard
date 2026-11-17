@@ -48,8 +48,9 @@ export function heavyJobLimit(directory: string) {
 /** Slot numbers from here up are declarations (a trial's shard files), never part of the limit. */
 export const declarationSlot = 1000;
 /**
- * GY-3450: the batch gate's reserved slot, beside the limit. The gate's check takes it first and
- * starts at once however many item trials and worker verifications fill the limit; no other job takes it.
+ * GY-3450: the deploy path's reserved slot, beside the limit. The batch gate's check and the deploy
+ * build and restart of the commit it verified take it first and start at once however many item
+ * trials and worker verifications fill the limit; no item job takes it.
  */
 export const gateSlot = declarationSlot - 1;
 /** The memory one running suite file is planned at: GY-1821 measured a full suite's swing on a 24-CPU host at about this much a file. */
@@ -74,7 +75,7 @@ export interface AcquireOptions {
   pollMs?: number; firstSlot?: number; files?: number;
   /** GY-3304: wait while the host's heavy work is drained (`master drain`); a running trial's own declaration never waits. */
   drainable?: boolean;
-  /** GY-3450: the batch gate's check — takes the reserved slot when it is free, else an ordinary one. */
+  /** GY-3450: the deploy path (the batch gate's check, a deploy build or restart) — takes the reserved slot when it is free, else an ordinary one. */
   reserved?: boolean;
 }
 
@@ -83,7 +84,7 @@ export interface AcquireOptions {
  * removes it. GY-3445: it sits in its own `drain/` folder, which only the master session's confinement
  * leaves writable; every other session that takes slots reads it. While it stands no new heavy job starts on the host: merge trials, revert trials,
  * declared checks, host worker verification and sessions' own suites and type checks wait;
- * jobs already running finish, and claims, heartbeats and status go on. GY-3450: the batch gate is never drained — it is the deploy path. A file, so a restart keeps it.
+ * jobs already running finish, and claims, heartbeats and status go on. GY-3450: the deploy path (batch gate, deploy build and restart) is never drained. A file, so a restart keeps it.
  */
 export interface HeavyDrain { reason: string; requestedBy: string; at: string }
 export const heavyDrainDirectory = (directory: string) => join(directory, 'drain');
@@ -292,11 +293,11 @@ export const heldJobEnvironment = (): Record<string, string> =>
  * carry the slot (`heldVariable`), and a heavy job started inside it runs at once on the same
  * slot. A process that never joined the budget runs the job as it always did.
  */
-export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal; until?: AbortSignal; gate?: boolean } = {}): Promise<T> {
+export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal; until?: AbortSignal; reserved?: boolean } = {}): Promise<T> {
   const directory = process.env[slotsDirectoryVariable];
   if (!directory || process.env[heldVariable] || inheritedVariables.getStore()?.[heldVariable]) return job();
   let held: HeldSlot;
-  try { held = await acquireVerificationSlot({ directory, label, project: process.env[projectVariable], onWait: options.onWait ?? (line => process.stderr.write(`${line}\n`)), signal: options.signal, drainable: !options.gate, reserved: options.gate }); }
+  try { held = await acquireVerificationSlot({ directory, label, project: process.env[projectVariable], onWait: options.onWait ?? (line => process.stderr.write(`${line}\n`)), signal: options.signal, drainable: !options.reserved, reserved: options.reserved }); }
   catch (error) { if (options.signal?.aborted) throw error; reportUnusable(label, directory, error); return job(); }
   // GY-3449: a cancelled job (`signal`), or one whose owner's run ended (`until`: a gate run that
   // verified, timed out, held or stopped for a restart), gives its slot back at once, even while a
