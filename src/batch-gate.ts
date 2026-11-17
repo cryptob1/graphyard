@@ -79,7 +79,9 @@ export interface GateRecord {
    * finishes it after a restart instead of cutting a new batch (GY-3135). The `files`, `checks` and
    * `results` fields are optional only for records an older loop wrote.
    */
-  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]>; whole?: boolean; /** The run's current step, named before each phase (GY-3141). */ step?: string; /** GY-3444: the time its checks waited for a trial slot or CPU, which its bound does not count. */ waitedMs?: number } | null;
+  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]>; whole?: boolean; /** The run's current step, named before each phase (GY-3141). */ step?: string; /** GY-3444: the time its checks waited for a trial slot or CPU, or the loop was down, which its bound does not count. */ waitedMs?: number;
+    /** GY-3444: when the loop last saw the run going, so the time a restart took is not the gate's own. */ seenAt?: string;
+    /** GY-3444: the detached trial run of its current check, which the loop after a restart adopts. */ run?: { commit: string; /** A digest of the check's proofs and files. */ input: string; directory: string } } | null;
   /** The last settled run (GY-3141), so status names why nothing has verified instead of guessing. */
   lastOutcome: GateLastOutcome | null;
   /** The current batch's recuts after a revert and its timeouts; cleared when a gate passes. */
@@ -163,7 +165,7 @@ export interface GatePorts {
    * (the selection over `files`) or `test:<file>` — and answers the failing ones, a failing
    * affected test as `test:<file>`. The run is bounded by `timeoutMs`, what is left of the gate's own limit.
    */
-  run(commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number): Promise<string[]>;
+  run(commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number, signal?: AbortSignal): Promise<string[]>;
   /** GY-3444: whether the gate's checks wait for a trial slot or CPU now: time the gate's bound does not count. */
   waiting?(): boolean;
   /** Reverts the landing from main through the serve-revert path (trial, leased push, re-land filed); answers the revert, why it is held, or a retry (main moved under the push). */
@@ -315,7 +317,9 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   const checks = adopted?.checks?.length ? adopted.checks : await gateChecks(ports, record, tip, landings, whole);
   const results: Record<string, string[]> = adopted?.results ?? {};
   record.inFlight = adopted ? { ...adopted, files, checks, results, whole } : { tip, startedAt: at(), files, checks, results, whole };
-  if (!adopted) await ports.checkpoint?.();
+  // GY-3444: the time the loop was down — between its last sight of the run and this adoption — is not the gate's own.
+  if (adopted?.seenAt) record.inFlight.waitedMs = (adopted.waitedMs ?? 0) + Math.max(0, ports.now() - Date.parse(adopted.seenAt));
+  await ports.checkpoint?.();
   // The run's current step, named before each phase and kept in the record, so a reader mid-flight sees where the gate is (GY-3141).
   const step = async (label: string) => { record.inFlight = { ...record.inFlight!, step: label.slice(0, 200) }; await ports.checkpoint?.(); };
   // The clock is the batch's own, so a restart between steps never lengthens the gate. GY-3444: it
@@ -332,14 +336,17 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     if (key in finished) return Promise.resolve(finished[key]!); // a step the last loop finished
     const left = deadline() - ports.now();
     if (left <= 0) return Promise.reject(new GateTimeout());
-    let last = ports.now(), timer: NodeJS.Timeout | undefined;
+    let last = ports.now(), saved = last, timer: NodeJS.Timeout | undefined;
     const tick = () => {
       const now = ports.now();
-      if (ports.waiting?.()) record.inFlight = { ...record.inFlight!, waitedMs: (record.inFlight!.waitedMs ?? 0) + now - last };
+      record.inFlight = { ...record.inFlight!, seenAt: new Date(now).toISOString(), ...(ports.waiting?.() ? { waitedMs: (record.inFlight!.waitedMs ?? 0) + now - last } : {}) };
       last = now;
+      if (now - saved >= 30_000) { saved = now; void ports.checkpoint?.(); }
     };
-    // The trial's own clock runs through its waits, so it gets one more bound of headroom for them; the gate's own-time check ends it.
-    return Promise.race([ports.run(commit, runChecks, runFiles, left + bound), new Promise<never>((_, reject) => { timer = setInterval(() => { tick(); if (ports.now() > deadline()) reject(new GateTimeout()); }, 1000); })])
+    // The check's budget is the gate's own remaining time (AC-7): the gate's clock stops it, through
+    // `stop`, however long its waits run; the trial's own wall clock is only a backstop of two more bounds.
+    const stop = new AbortController();
+    return Promise.race([ports.run(commit, runChecks, runFiles, left + 2 * bound, stop.signal), new Promise<never>((_, reject) => { timer = setInterval(() => { tick(); if (ports.now() > deadline()) { reject(new GateTimeout()); stop.abort(new GateTimeout()); } }, 1000); })])
       .then(async failed => {
         tick();
         if (ports.now() > deadline()) throw new GateTimeout();

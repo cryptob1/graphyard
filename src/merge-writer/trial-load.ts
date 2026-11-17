@@ -39,13 +39,13 @@ export const trialStartOrder = { gate: 0, merge: 1, verification: 2 } as const;
 export const trialPressureBoundSeconds = 10 * 60;
 
 /** What the launcher reads to admit a container. `slots` is per machine, not per install: any install's containers load the same CPUs. */
-export interface TrialLoad { slots: string; cap: number; order: number; /** GY-3444: Docker --cpu-shares, set for the gate alone. */ cpuShares?: number; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number }
+export interface TrialLoad { slots: string; cap: number; order: number; /** GY-3444: Docker --cpu-shares, set for the gate alone. */ cpuShares?: number; /** GY-3444: the gate's cap while the CPU is hot: it starts within it instead of waiting on heat. */ hotCap?: number; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number }
 
 /** The load of one start for `root`'s install; `run.diskFloorGb` is the one setting it reads. */
 const hostCpu = trialCpuMonitor();
 export async function trialLoad(root: string, who: keyof typeof trialStartOrder, usable = hostCpu.cores(), cores = availableParallelism()): Promise<TrialLoad> {
   const run = await readFile(join(root, '.graphyard', 'master.json'), 'utf8').then(text => JSON.parse(text).run ?? {}, () => ({}));
-  return { slots: trialSlots(), cap: trialContainerCap(cores, usable), order: trialStartOrder[who], ...(who === 'gate' ? { cpuShares: gateCpuShares } : {}), hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon',
+  return { slots: trialSlots(), cap: trialContainerCap(cores, usable), order: trialStartOrder[who], ...(who === 'gate' ? { cpuShares: gateCpuShares, hotCap: Math.max(1, Math.floor(trialContainerCap(cores, usable) / 2)) } : {}), hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon',
     pressureBoundSeconds: trialPressureBoundSeconds };
 }
 export const trialSlots = (home = homedir()) => join(home, '.gy', 'trial-slots');
@@ -84,9 +84,12 @@ def free(path):
         return None
 def gb(size):
     return '%.1f GB' % (size / 1e9)
+def cap():
+    # GY-3444: a hot CPU never holds the batch gate's start: it starts within half the cap instead.
+    return load['hotCap'] if load.get('hotCap') and hottest() else load['cap']
 def pressure():
     hot = hottest()
-    if hot:
+    if hot and not load.get('hotCap'):
         return 'a CPU sensor reads ' + str(hot[0]) + 'C, at or over its ' + str(hot[1]) + 'C limit', False
     for source, target, readonly in spec['mounts']:
         space = None if readonly else free(source)
@@ -113,7 +116,8 @@ def take_slot():
     spare = None
     try:
         names = set(os.path.basename(path) for path in glob.glob(os.path.join(load['slots'], 'slot-*')))
-        names.update('slot-' + str(slot) for slot in range(load['cap']))
+        allowed = cap()
+        names.update('slot-' + str(slot) for slot in range(allowed))
         occupied = 0
         for name in sorted(names):
             fd = locked(name, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -123,7 +127,7 @@ def take_slot():
                 spare = fd
             else:
                 os.close(fd)
-        if occupied < load['cap']:
+        if occupied < allowed:
             return spare
         if spare is not None:
             os.close(spare)
@@ -163,7 +167,7 @@ def admit():
                     queued = None
                 bound = load['pressureBoundSeconds']
             else:
-                why = 'the machine-wide cap of ' + str(load['cap']) + ' trial containers is reached'
+                why = 'the machine-wide cap of ' + str(cap()) + ' trial containers is reached'
                 if queued is None:
                     queued = locked('waiting-' + str(load['order']), fcntl.LOCK_SH)
                 # A slot wait is capacity, never a fault: it has no bound, and only pressure that follows it is timed.

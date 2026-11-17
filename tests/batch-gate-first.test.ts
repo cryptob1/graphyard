@@ -24,6 +24,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const repository = 'owner/project';
 const start = Date.parse('2030-04-01T00:00:00Z');
+const minute = 60_000;
 const iso = (at: number) => new Date(at).toISOString();
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } as NodeJS.ProcessEnv;
@@ -177,4 +178,70 @@ test('e2e:batch-gate-first — with a gate in flight and merge trials queued, ma
   assert.deepEqual(world.gated, [world.tip, world.newest()], 'the forced timeout restarted the gate on the newest tip');
   assert.equal(record.verified, world.newest());
   assert.equal(gateSummary(record)!.inFlight, null, 'once settled the gate holds nothing');
+});
+
+test('integration:batch-gate-survives-restart — a loop restart during a gate run adopts the detached run instead of orphaning it, and neither the restart nor a heat hold counts against the bound', async () => {
+  const { noteBatchGateStopping } = await import('../src/daemon/cycle-batch-gate.js');
+  const world = await fixture('batch-gate-restart');
+  let clock = start;
+  const passing = { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {}, e2e: [] } as unknown as MergeTrialRun;
+  const launches: string[] = [], adoptions: string[] = [];
+  let endFirst!: (error: Error) => void;
+  const loopReads = (adopt: MergeWriterReads['adoptTrialRun']): MergeWriterReads => ({
+    baseBranch: 'main', now: () => clock, cores: 2, parallel: 1,
+    fetch: async () => { git(world.coordinator, 'fetch', '-q', 'origin', 'main'); return git(world.coordinator, 'rev-parse', 'origin/main'); },
+    git: async (args, extra) => execFileSync('git', ['-C', world.coordinator, ...args], { encoding: 'utf8', env: { ...env, ...extra } }),
+    merge: async () => { throw new Error('unused'); },
+    trial: async () => { throw new Error('the gate trials detached'); },
+    launchTrialRun: request => {
+      launches.push(request.mergeSha);
+      return { directory: '/runs/gate-1', mergeSha: request.mergeSha, trial: () => new Promise<MergeTrialRun>((_, reject) => { endFirst = reject; }), detach: () => {}, cancel: () => {} };
+    },
+    adoptTrialRun: adopt,
+    push: async () => 'pushed', holds: async () => true, record: async () => undefined,
+    gate: { root: world.coordinator, repository },
+  });
+  const loop = (reads: MergeWriterReads) => {
+    const state = emptyDaemonState({ url: 'http://127.0.0.1:1', repository } as any);
+    return { state, cycle: { state, effects: { mergeWriter: reads } as any, snapshot: { work: [], now: iso(start) } as any, performed: [], now: () => clock, log: () => {} } };
+  };
+
+  // The first loop launches the gate's check as a detached run, then holds launches on heat for 30 minutes.
+  const first = loop(loopReads(async () => null));
+  const firstFlight = await batchGateStep(first.cycle);
+  const deadline = Date.now() + 10_000;
+  while (!launches.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(launches, [world.tip], 'the check runs detached');
+  first.state.cpuPressure = { celsius: 96, avg60: 10 } as any;
+  clock += 30 * minute;
+  await new Promise(resolve => setTimeout(resolve, 1300));
+  const kept = readGateRecord(gateRecordPath(world.coordinator))!.inFlight!;
+  assert.equal(kept.run?.directory, '/runs/gate-1', 'the run\'s directory rides the record');
+  assert.ok((kept.waitedMs ?? 0) >= 30 * minute, 'the heat hold is not the gate\'s own time');
+  assert.ok(kept.seenAt, 'the loop records when it last saw the run');
+
+  // The loop restarts — a CLI upgrade — and is down for 20 minutes: 50 minutes have passed since the cut.
+  noteBatchGateStopping(first.state);
+  clock += 20 * minute;
+  const second = loop(loopReads(async ref => { adoptions.push(ref.directory); return { directory: ref.directory, mergeSha: ref.mergeSha, trial: async () => passing, detach: () => {}, cancel: () => {} }; }));
+  const secondFlight = await batchGateStep(second.cycle);
+  await secondFlight!.gate;
+  assert.deepEqual(adoptions, ['/runs/gate-1'], 'the next loop adopts the detached run');
+  assert.deepEqual(launches, [world.tip], 'and launches no second run');
+  const record = readGateRecord(gateRecordPath(world.coordinator))!;
+  assert.equal(record.verified, world.tip, 'the adopted run\'s verdict verifies the tip: neither the restart nor the heat hold timed it out');
+  assert.equal(record.held, null);
+  endFirst(new Error('the first loop stopped'));
+  await firstFlight!.gate;
+});
+
+test('integration:batch-gate-survives-restart — a gate timeout that overlapped a restart or heat pause re-runs once on the newest main instead of holding', async () => {
+  const world = await gateFirstWorld('batch-gate-restart-timeout');
+  const flights = await batchGateStep(world.cycle);
+  world.release();
+  await flights!.gate;
+  assert.deepEqual(world.gated, [world.tip, world.newest()], 'the timed-out run re-ran on the newest main');
+  const record = readGateRecord(gateRecordPath(world.coordinator))!;
+  assert.equal(record.held, null, 'a timeout never holds');
+  assert.equal(record.verified, world.newest());
 });
