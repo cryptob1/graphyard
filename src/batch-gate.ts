@@ -122,7 +122,7 @@ export interface GateRecord {
   filed?: Record<string, { item: string | null; at: string }>;
   /** Filing failures that never aborted a run (GY-3147), newest last; the last few are kept. */
   notes?: string[];
-  /** GY-3431: the failures recorded on each open flaky-check item instead of a revert, by item key, the last few kept. Optional only for records an older loop wrote. */
+  /** GY-3431: the failures recorded on each open flaky-check item instead of a revert, by item key: the last few per item, the ten items failing most recently. Optional only for records an older loop wrote. */
   flaky?: Record<string, { check: string; tip: string; at: string }[]>;
   at: string;
 }
@@ -364,7 +364,8 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
         const flakyItem = ports.flaky?.(check);
         if (flakyItem) {
           knownFlaky.push({ check, item: flakyItem });
-          (record.flaky ??= {})[flakyItem] = [...record.flaky[flakyItem] ?? [], { check, tip, at: at() }].slice(-filingNotesWindow);
+          const { [flakyItem]: earlier = [], ...others } = record.flaky ?? {};
+          record.flaky = Object.fromEntries([...Object.entries(others), [flakyItem, [...earlier, { check, tip, at: at() }].slice(-filingNotesWindow)]].slice(-10));
           continue;
         }
         // A known red is a check that also fails on the last verified commit: an affected test, or a
