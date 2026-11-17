@@ -8,7 +8,7 @@ import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { standingStepFailures, workerGrowthKey, masterLaunchKey, masterLaunchBackoffAfter } from '../daemon/cycle.js';
 import { fetchRefusalKey } from '../daemon/cycle-batch-gate.js';
-import { cpuWaiting } from '../daemon/cpu-pressure.js';
+import { implementationWaiting } from '../daemon/cpu-pressure.js';
 import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
 import { heavyDrainLine, heavyJobsDirectory, readHeavyDrain } from '../master/verification-slots.js';
@@ -220,7 +220,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // waiting line while launches are held; GY-3401: each new session's test budget and the trial cap.
     cpuPressure: state?.cpuPressure
       ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal, celsius: state.cpuPressure.celsius,
-        waiting: cpuWaiting(state), testBudget: state.cpuPressure.testBudget, trialCap: state.cpuPressure.trialCap }
+        waiting: implementationWaiting(state), testBudget: state.cpuPressure.testBudget, trialCap: state.cpuPressure.trialCap }
       : null,
     // GY-3190: the latest daily report of what the loop's sweeps stopped or removed, and the disk Graphyard's leftovers hold.
     leftovers: state?.leftovers.report ?? null,

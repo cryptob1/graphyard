@@ -45,7 +45,7 @@ import { actionStallDelay, actionStallThreshold } from '../model/action-progress
 import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
-import { cpuPressureStep, cpuWaiting } from './cpu-pressure.js';
+import { cpuPressureStep, cpuWaiting, implementationWaiting } from './cpu-pressure.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
 import { controlPlaneStep } from './control-plane.js';
@@ -138,6 +138,8 @@ export interface Cycle {
   checkoutTrustRefused?: ReadonlySet<string>;
   /** The loop's journal line writer: steps that settle beside the cycle log through it (GY-3141). */
   log: (line: string) => void;
+  /** GY-3437: settles once this cycle's reviews and trials have had their launches; a worker launch waits for it, so they take free capacity first. */
+  reviewsAndTrials?: Promise<void>;
 }
 
 /**
@@ -210,7 +212,9 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   for (const [key] of inFlight) delete state.actions[key];
   performed.push(...reconcilePendingActions(state, read.snapshot.work, clock));
   for (const [key, action] of inFlight) state.actions[key] = action;
-  const cycle: Cycle = { config, state, effects, now, ...read, clock, performed, launcher: launches, reservedProfiles: launches.held(), log };
+  let reviewedAndTrialled!: () => void;
+  const cycle: Cycle = { config, state, effects, now, ...read, clock, performed, launcher: launches, reservedProfiles: launches.held(), log,
+    reviewsAndTrials: new Promise<void>(resolve => { reviewedAndTrialled = resolve; }) };
 
   if (!config.forPerson) await step('close', () => closeStep(cycle));
   await step('dispatch', async () => {
@@ -225,6 +229,7 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   });
   // GY-3119: the batch gate on main starts beside the cycle once the merge writer's step ran.
   if (!config.forPerson) await step('merge writer', () => mergeWriterStep(cycle).then(() => batchGateStep(cycle)));
+  reviewedAndTrialled();
   if (own) { await launches.idle(); performed.push(...launches.drain()); }
   await step('persist', async () => {
     // GY-3274: the lessons and product brief the master session recorded straight to the file are
@@ -621,10 +626,11 @@ async function dispatchStep(cycle: Cycle) {
   }
   // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) or too hot (GY-3373) no new worker,
   // reviewer or trial starts: one status line names the figure, and running sessions are never
-  // stopped. The first cycle below it launches again on its own.
+  // stopped. The first cycle below it launches again on its own. GY-3437: from 80C only new
+  // workers wait, so the reviews and trials that finish work drain the heat.
   const cpuWaitingLine = cpuWaiting(state) ?? undefined;
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
-  if (!state.diskHeadroom && !cpuWaitingLine && !refusedRoles.has('worker')) for (const item of claimable) {
+  if (!state.diskHeadroom && !implementationWaiting(state) && !refusedRoles.has('worker')) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
     // GY-3104: a third equal failure holds the item for the master's decision.
@@ -649,7 +655,7 @@ async function dispatchStep(cycle: Cycle) {
     ahead.push({ key, priority: item.priority, done: new Promise<void>(resolve => { settled = resolve; }) });
     launcher.submit(key, [free.profile.name], async sink => {
       try {
-        await Promise.all(before.map(entry => entry.done));
+        await Promise.all([...before.map(entry => entry.done), cycle.reviewsAndTrials]);
         if (before.some(entry => state.actions[entry.key]?.state === 'waiting')) return;
         await launchWorker(cycle, item, key, free.profile, sink, canaries, held.exclude);
       } finally { settled(); }
