@@ -32,7 +32,7 @@ if (mode === 'trial' || mode === 'gate') {
   const reads = mergeWriterReads({ baseBranch: 'main', run: {}, repository: project } as any, root, defaultChildRun, { base: scratch, record: async () => {}, trial });
   const check = () => reads.trial(head, [], { key: mode === 'gate' ? gateTrialKey : id, criteria: [] }, undefined, step => console.error(`step: ${step}`));
   // The batch gate wraps its trial port in the reserved heavy job, including for other repositories.
-  if (mode === 'gate') await heavyTrial(gateTrialKey, undefined, undefined, check, undefined, true);
+  if (mode === 'gate') await heavyTrial(gateTrialKey, step => console.error(`step: ${step}`), undefined, check, undefined, true);
   else await check();
 } else if (mode === 'check') {
   await runWorkerCheck({ root, base: scratch, baseBranch: 'main', key: id, head, check: 'test', trial });
