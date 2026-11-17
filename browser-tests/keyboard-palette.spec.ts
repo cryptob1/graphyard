@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
 import { boardStatus, boardWork, NOW } from './ui-board';
+import { serveXterm } from './xterm';
 
 // GY-3272 AC-2: the dashboard is keyboard-first — Cmd/Ctrl+K opens the palette (an item key and
 // Enter opens that item), j/k walk the Work rows and Enter opens the one under the cursor,
@@ -28,6 +29,7 @@ async function serve(page: Page) {
     if (path.includes('/work/')) return route.fulfill({ json: state.work.find(w => path.endsWith(w.id)) ?? {} });
     return route.fulfill({ json: [] });
   });
+  await serveXterm(page); // the Master page's xterm.js, served locally (GY-3357)
   await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
