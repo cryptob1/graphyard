@@ -25,6 +25,10 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 - Setup invites or revokes viewers and maintainers.
 - Sharing one machine across installs: the [shared server guide](shared-server.md).
 
+## Delivery feedback
+
+Work's **Taste** feed shows recent deliveries with why and evidence: **Looks good** records your call, **Send back** turns your note into a follow-up item and a proposed master lesson; nothing waits on a taste.
+
 ## Publishing
 
 - Verified deploys publish `@cryptob1/graphyard` with npm OIDC provenance plus both GHCR images via Actions — no host publish token. `graphyard guide publishing` covers owner setup.
