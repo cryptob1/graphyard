@@ -61,10 +61,14 @@ test('e2e:stall-alarm — the Master page shows the stall alarm with its cause w
     await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible({ timeout: 15_000 });
     const banner = page.locator('.stall-alarm');
     await expect(banner).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('.page-heading + .stall-alarm')).toBeVisible();
     await expect(banner).toContainText('no launch since 2026-11-16T08:00:00.000Z');
     await expect(banner).toContainText('launches waiting: CPU 96C');
     // A launch starts: the loop's next read names no alarm, and the page clears it.
-    await loopRead(url, null);
+    const running = { ...item, stage: 'build', sessions: [{ kind: 'implementation', state: 'running', startedAt: new Date(start + 12 * 60_000).toISOString() }] } as unknown as Work;
+    const cleared = stallAlarm({ now: start + 12 * 60_000, open: [running], ready: [], freeSlots: 0, state, registry: null, serving: null });
+    expect(cleared).toBeNull();
+    await loopRead(url, cleared);
     await expect(banner).toHaveCount(0, { timeout: 30_000 });
   } finally { await page.close(); await close(); }
 });
