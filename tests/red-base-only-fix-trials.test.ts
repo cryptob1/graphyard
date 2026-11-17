@@ -115,6 +115,8 @@ test('integration:red-base-only-fix-trials — while main fails, only a head cha
   // Main now carries the change to what failed: the waiting head starts again.
   run.tip.at = green;
   await run.step();
+  assert.deepEqual(run.trialled, ['GY-2'], 'the cycle after a merge settles its flight');
+  await run.step();
   assert.deepEqual(run.trialled, ['GY-2', 'GY-1'], 'once main changes what failed, the waiting head is trialled');
   assert.deepEqual(run.waiting(), []);
 });
@@ -133,6 +135,7 @@ test('e2e:red-base-fix-first — with main red, the fixing item merges while oth
   run.settle();
 
   run.tip.at = green;
+  await run.step(); // the cycle after a merge settles its flight
   await run.step();
   assert.deepEqual(run.trialled.at(-1), 'GY-1', 'once main is green the waiting item is trialled');
   assert.ok(run.recorded.some(entry => entry.key === 'GY-1' && entry.event.kind === 'pushed'), 'and merges');
