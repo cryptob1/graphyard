@@ -12,7 +12,7 @@ import { Store } from '../src/store.js';
 import { daemonStatePath, emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { hottestCpuCelsius } from '../src/daemon/cpu-pressure.js';
+import { cpuCelsius } from '../src/daemon/cpu-pressure.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -124,12 +124,14 @@ test(`${proof} — with crit-105C sensors the limit is 85C: at 96C (the hottest 
     snapshot: coordinationSnapshot, agents: () => [], herdr: () => ({ agents: [], available: true }),
     credentials: async () => ({ w1: { available: true, reason: null } }),
     closeSession: () => {}, dispatch: async item => { dispatched.push(item.key); return { pane: 'pane-gy1', epoch: 1 }; },
-    cpuPressure: async () => ({ ...calm(stat += 1000), celsius: await hottestCpuCelsius(sensors) }),
+    cpuPressure: async () => ({ ...calm(stat += 1000), celsius: await cpuCelsius(sensors) }),
     dispatchTick: async (_snapshot, held) => { ticks.push(held); },
     mergeWriter: { ...ports, parallel: 4, cores: 24 } as MergeWriterReads,
     persist: async () => {},
   };
-  const cycle = async () => { await runCycle(config, state, daemon); await mergeWriterIdle(state); };
+  // GY-3426: the guard averages the last 60 s, so each cycle here reads a minute after the last.
+  let clock = Date.now();
+  const cycle = async () => { clock += 61_000; await runCycle(config, state, daemon, () => clock); await mergeWriterIdle(state); };
 
   // The operator's reading: package 95C, core 96C — over the 85C limit, under the old 102C one.
   await cycle();
