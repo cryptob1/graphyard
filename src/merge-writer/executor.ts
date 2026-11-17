@@ -4,7 +4,7 @@ import type { Work } from '../model.js';
 import { evaluate } from '../model-boundary/gates.js';
 import { riskOf } from '../model-boundary/risk-class.js';
 import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
-import { trialFailurePrefix } from '../model/rework-ground.js';
+import { proofPassesOnBasePrefix, trialFailurePrefix } from '../model/rework-ground.js';
 import { parseFailedTests } from '../model/base-failure.js';
 import { maskSecrets } from '../redaction.js';
 import { leadingProof } from '../model/flake-ledger.js';
@@ -83,7 +83,7 @@ export interface MergeTrialRun extends TrialRun {
     /** GY-2954: the crashed process the base run's output names — the run's database died under it — bounded. */ crash?: string;
     /** GY-2954: the first failing case's assertion text in the base run's TAP, bounded. */ assertion?: string };
   /** GY-2984, GY-3167: a feature or bug item's proofs that every one passed on the base tip too, with that tip: the head's proofs show nothing it changed. */
-  notReproduced?: { proofs: string[]; tip: string };
+  notReproduced?: { proofs: string[]; tip: string; files: string[] };
   /**
    * GY-3267: the browser cases' kept screenshots — `after` from the candidate's run, `before` from
    * the base tip's — posted with the trial record and shown side by side on the item page.
@@ -225,7 +225,12 @@ export function trialFailureReason(trial: { conflict?: readonly string[]; run?: 
     return withStepDetail(`${trialFailurePrefix}: tests ${files}`, run.logTail);
   }
   // GY-2984, GY-3167: a feature or bug fix whose proofs already pass on the base proves nothing it changed.
-  if (run.notReproduced) return `${trialFailurePrefix}: not reproduced: ${run.notReproduced.proofs.join(', ')} ${run.notReproduced.proofs.length > 1 ? 'pass' : 'passes'} on the base tip ${run.notReproduced.tip}`;
+  // GY-3423: said plainly, so nobody reads it as a flaky failure: the proof shows nothing the change does.
+  if (run.notReproduced) {
+    const { proofs, tip, files } = run.notReproduced;
+    return `${proofPassesOnBasePrefix}: ${proofs.join(', ')} already ${proofs.length > 1 ? 'pass' : 'passes'} on the base tip ${tip} without this change, so ${proofs.length > 1 ? 'they show' : 'it shows'} nothing the change does. `
+      + `Change ${files.length ? files.join(', ') : 'the proof\'s test'} so a case fails on the base tip and passes with the change.`;
+  }
   return null;
 }
 /** The declared executable proofs must satisfy the acceptance rule before main can change. */
@@ -586,7 +591,8 @@ async function reproduceOnBase(run: MergeTrialRun, input: MergeTrialInput, proof
   // GY-3267: the base run's kept screenshots are the before side of whatever the trial already kept.
   const shots = mergeTrialShots(run.screenshots ?? [], onBase.run.e2e ?? [], 'before');
   const withBefore = shots.length ? { ...run, screenshots: shots } : run;
-  return passing ? { ...withBefore, notReproduced: { proofs, tip } } : withBefore;
+  const caseFiles = [...files, ...e2eProofs.map(proof => `e2e/cases/${proof.slice(4)}.json`)];
+  return passing ? { ...withBefore, notReproduced: { proofs, tip, files: caseFiles } } : withBefore;
 }
 
 /**
