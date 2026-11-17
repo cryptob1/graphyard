@@ -16,6 +16,7 @@ import { actionLine } from './run.js';
 import { actionDetailMax, message, storeAction } from './state.js';
 import { batchGateFlights as flights, busyTrialSlots } from './trial-slots.js';
 import { faultItem } from './control-plane.js';
+import { currentEvidence } from '../model/evidence.js';
 import { EnvironmentFault, declaredEnvironments, environmentSecretsFile, environmentStatePath, localEnvironment, loopLifecycle, trustedCheckout, type AppEnvironment } from '../app-environments.js';
 import { installSecretsDirectory } from '../e2e/steps.js';
 import { join } from 'node:path';
@@ -139,9 +140,32 @@ async function gateEnvironments(reads: MergeWriterReads, commit: string, cases: 
 export const pinningProof = (key: string) =>
   `unit:${key.slice(key.indexOf(':') + 1).toLowerCase().replace(/^test:tests\//, '').replace(/\.test\.ts$/, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')}-pinned`;
 
+/** The proof a gate filing owes once the batch gate passes again; the loop records it itself (GY-3443). */
+export const repairedProof = 'manual:batch-gate-repaired';
+
 /** A batch gate filing's item: its pinning test is named from its check. */
 export const gateFiledItem = (input: { title: string; description: string; key: string }, baseBranch: string) =>
-  faultItem({ title: input.title, description: input.description, proof: pinningProof(input.key), repaired: { text: 'The batch gate passes again', proof: 'manual:batch-gate-repaired' }, reason: `Filed by the batch gate on ${baseBranch}` });
+  faultItem({ title: input.title, description: input.description, proof: pinningProof(input.key), repaired: { text: 'The batch gate passes again', proof: repairedProof }, reason: `Filed by the batch gate on ${baseBranch}` });
+
+/**
+ * GY-3443: while the gate's last outcome is verified, every open item owing `manual:batch-gate-repaired`
+ * whose candidate head has no current evidence for it gets a trusted pass citing the verified tip.
+ * A held, reverted or failed last outcome records nothing; a head already recorded is skipped, so a
+ * cycle writes at most once per item head.
+ */
+async function recordRepaired(record: GateRecord, work: readonly Work[], attest: NonNullable<MergeWriterReads['attest']>, now: number, note: (key: string, state: 'done' | 'failed', detail: string) => void) {
+  const last = record.lastOutcome;
+  if (last?.outcome !== 'verified' || !last.tip) return;
+  const owing = work.filter(item => item.stage !== 'done' && item.candidate && item.criteria?.some(criterion => criterion.proofs.includes(repairedProof))
+    && !currentEvidence(item, repairedProof, new Date(now)));
+  for (const item of owing) {
+    const head = item.candidate!.sha;
+    try {
+      await attest(item, repairedProof, `The batch gate verified ${last.tip} at ${last.finishedAt}`, `batch-gate-repaired:${item.id}:${head}:${item.policyRevision}:${last.tip}`);
+      note(`batch-gate-repaired:${item.key}`, 'done', `Recorded ${repairedProof} on ${item.key} head ${head.slice(0, 12)}: the batch gate verified ${last.tip.slice(0, 12)}`);
+    } catch (error) { note(`batch-gate-repaired:${item.key}`, 'failed', `Could not record ${repairedProof} on ${item.key}: ${message(error)}`); }
+  }
+}
 
 /** The gate's ports over the merge writer's reads. */
 export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> }, work: readonly Work[], trusted: () => string | null = () => null): GatePorts & { diagnose: DiagnosePort } {
@@ -306,6 +330,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       note('batch-gate:verified-ref', 'failed', `Could not publish the verified commit ${record!.verified!.slice(0, 12)} at refs/graphyard/verified: ${message(error)}`);
     }
   }
+  if (reads.attest) await recordRepaired(record, cycle.snapshot.work, reads.attest, cycle.now(), note);
   // The deploy watch writes this after health, CLI publication and pinning. Re-read every cycle,
   // including after restart; a kept/failed deployment is not a successful release. The deploy
   // record retains verification even when the gate has already advanced to a newer commit.
