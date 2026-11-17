@@ -11,6 +11,8 @@ import type { Work } from './work.js';
 export type WorkSummary = Pick<Work, 'id' | 'key' | 'title' | 'stage'> & Omit<Partial<Work>, 'summary'> & {
   /** The marker, standing in for the item's plain `summary` sentence (GY-2011), which the whole document carries. */
   summary: true;
+  /** That plain sentence itself, kept beside the marker (GY-3393) so the Taste feed shows a delivery's why without reading its document. */
+  plainSummary?: string;
   /** How many action rows the item completed; its resolved rows themselves are left out. */
   completedActions?: number;
 };

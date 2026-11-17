@@ -41,6 +41,7 @@ const faq: [string, string, ReactNode][] = [
   ['faq-credentials', 'Which credentials does setup need?', <>A GitHub CLI login with admin access to the repository (<code>gh auth login --scopes repo</code>). <code>up</code> registers a deploy key with it, and only the merge writer pushes; where deploy keys are not allowed, <code>--push-auth gh</code> pushes with your gh login instead. Agent accounts are your own Claude, Codex or other logins on the host, connected from the Setup page. No GitHub App and no publish token are needed.</>],
   ['faq-filing', 'How do I file and prioritise work?', <>On Work, press <strong>New work item</strong>. A title and a sentence or two are enough; the Master writes the acceptance criteria, and <strong>Advanced</strong> takes full detail. Set priority from P0 (first) to P3 on the work row or the item page; the next dispatch uses it. The Master files work too, ranked by the product brief.</>],
   ['faq-item', 'What does an item’s page show?', <>It opens on why the item helps users, the proof it works — the trial’s screenshots of the changed page — and one plain line on what changed. Then one line says who acts next and where the item stands. The gates, every trial and each attempt’s detail stay one click down, under Technical details.</>],
+  ['faq-taste', 'What is Taste?', <>A feed on Work of the latest shipped items with their evidence. <strong>Looks good</strong> clears the card. <strong>Send back</strong> files your note as a follow-up item and a proposed lesson for agents. Deliveries never wait on it.</>],
   ['faq-master', 'What does the Master do, versus the loop?', <>The Master is the install’s AI coordinator. It learns the product, keeps the product brief (Settings → Product), turns goals into ranked work items, answers when an item needs judgement and files fixes for recurring faults. It does not write the code; workers do. The loop is plain code, no AI: it runs every delivery step in cycles, so work keeps moving while the Master thinks.</>],
   ['faq-context', 'How do agents share context?', <>Three places. The <strong>product brief</strong> (Settings → Product) says what the product is for; the Master keeps it and every session’s request carries it. <strong>AGENTS.md</strong> in your repository holds the project’s rules, plus a short block Graphyard writes naming its guide topics. The <strong>work item</strong> holds the goal, criteria and history; when an attempt ends, the next worker continues from its committed work. The Master also keeps short lessons every Master session reads; one a lint rule, type or test could enforce becomes a work item, and once that item ships the lesson is removed. The header counts these as gates removed this week, beside reverts this week.</>],
   ['faq-delivery', 'How are changes tested, reviewed, merged and deployed?', <>A worker submits a commit. A different agent reviews it, and every criterion needs a passing proof from someone other than the builder. The merge writer trials the commit on the latest main, running the tests the change affects, then merges it to main itself. Merged changes are verified together as a batch; a failing batch reverts the change that broke it. Verified main deploys, and a failed health check rolls back. See {link('docs-flow', 'How a change ships')}.</>],
@@ -85,21 +86,22 @@ export default function GuidePage() {
       <ul>
         <li><strong>You, the owner</strong>: goals and priorities, money and accounts, and sign-ins for people.</li>
         <li><strong>The Master</strong>: the AI coordinator. It keeps the product brief, plans work items and unsticks them.</li>
-        <li><strong>The loop</strong>: plain code, no AI. It hands work to agents, runs merge trials, merges and deploys.</li>
+        <li><strong>The loop</strong>: plain code, no AI. It hands out work, runs merge trials, merges and deploys.</li>
         <li><strong>Workers and reviewers</strong>: AI coding sessions. Nobody reviews their own work.</li>
       </ul>
-      <p>Your repository is the <strong>managed app</strong>: the product being built. Graphyard is the factory beside it, with its own server, dashboard and database.</p>
+      <p>Your repository is the <strong>managed app</strong> being built. Graphyard is the factory beside it, with its own server, dashboard and database.</p>
     </section>
 
     <section id="docs-first-item" className="panel" aria-labelledby="docs-first-item-title">
       <h2 id="docs-first-item-title">Your first item</h2>
       <ol className="guide-journey">
         <li><strong>Check the host.</strong> Linux with Docker, Node, Git and the GitHub CLI; <code>npx @cryptob1/graphyard doctor</code> names anything missing and its fix.</li>
-        <li><strong>Connect your repository.</strong> In its checkout, run <code>npx @cryptob1/graphyard up --repo OWNER/NAME</code>. It installs everything on this host and prints a sign-in link.</li>
-        <li><strong>Open the dashboard.</strong> The link signs you in at <code>http://127.0.0.1:4310</code>, or the port <code>up</code> chose. Setup connects your agent accounts.</li>
-        <li><strong>State a goal.</strong> On Work, press <strong>New work item</strong> and give it a title. The Master writes the criteria.</li>
+        <li><strong>Connect your repository.</strong> In its checkout, run <code>npx @cryptob1/graphyard up --repo OWNER/NAME</code>. It installs everything and prints a sign-in link.</li>
+        <li><strong>Open the dashboard.</strong> The link signs you in at <code>http://127.0.0.1:4310</code>, or the port <code>up</code> chose. Setup connects agent accounts.</li>
+        <li><strong>State a goal.</strong> On Work, press <strong>New work item</strong> and title it. The Master writes the criteria.</li>
         <li><strong>Watch it move.</strong> Under Moving it goes from build to deploy. Open it to see who acts next.</li>
-        <li><strong>Find the result.</strong> Shipped lists what merged and went live.</li>
+        <li><strong>Find the result.</strong> Shipped lists what went live.</li>
+        <li><strong>Rate it.</strong> Taste: <strong>Looks good</strong>, or <strong>Send back</strong> with a note.</li>
         <li><strong>Meet a blocker.</strong> Stuck items show under Blocked for the Master to clear; your decisions wait under Needs you.</li>
       </ol>
     </section>
