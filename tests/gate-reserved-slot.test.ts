@@ -124,10 +124,11 @@ test('integration:gate-reserved-slot — with both ordinary slots held by item w
     assert.equal(yard.checks(), 0, 'the gate check waits for a slot');
     yard.advance(gateStartStallMs - 1_000);
     await batchGateStep(yard.cycle);
-    assert.equal(yard.state.actions[gateStallKey], undefined, 'no alarm before five minutes');
+    const stall = () => yard.state.actions[gateStallKey];
+    assert.equal(stall(), undefined, 'no alarm before five minutes');
     yard.advance(1_000);
     await batchGateStep(yard.cycle);
-    const alarm = yard.state.actions[gateStallKey];
+    const alarm = stall();
     assert.equal(alarm?.state, 'failed', 'the stall alarm stands');
     for (const holder of ['merge trial GY-1', 'worker verification GY-2', 'merge trial batch-gate (other-project)']) assert.match(alarm!.detail, new RegExp(holder.replace(/[()]/g, '\\$&')), `the alarm names ${holder}`);
     other.release();
