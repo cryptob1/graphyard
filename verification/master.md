@@ -14,7 +14,6 @@ Paths: src/master/**, src/master.ts, src/daemon/**, src/reviewer.ts
 - `tests/deploy-unit.test.ts`: graphyard-deploy.service (`upgrade --watch`); the loop restarts onto the tip it serves.
 - `tests/main-batch-gate.test.ts`, `tests/publish-verified.test.ts`, `tests/diagnostic-filing-carries-output.test.ts`, `tests/browser-trial-failure-diagnosis.test.ts`: batch gate, diagnostic filings; a failed browser run's failing test and error survive noisy teardown in verdict, revert and gate records (GY-3305).
 - `tests/worker-credit-handoff.test.ts`: provider-limit stops preserve work, naming the next account's commit; `e2e:worker-credit-handoff`.
-- `tests/stall-alarm-causes.test.ts`: the stall alarm names its cause first in `master status` and wakes the master; `e2e:stall-alarm`.
 
 ## Drive
 

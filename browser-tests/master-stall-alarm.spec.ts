@@ -7,6 +7,7 @@ import { coordinationViewHeader } from '../src/server/work-view';
 import { emptyDaemonState } from '../src/daemon/state';
 import { stallAlarm } from '../src/daemon/stall-alarm';
 import type { Work } from '../src/model';
+import { serveXterm } from './xterm';
 
 // e2e:stall-alarm — GY-3432: a fixture install with a ready item and a free worker slot whose
 // launches have been held for 10 minutes. The loop's coordination read names its stall alarm
@@ -44,6 +45,7 @@ async function loopRead(url: string, alarm: string | null) {
 test('e2e:stall-alarm — the Master page shows the stall alarm with its cause while launches are held, and clears it once a launch starts', async ({ page, context }) => {
   test.setTimeout(90_000);
   const { url, close } = await plane(context);
+  await serveXterm(context);
   try {
     // Launches held 11 minutes by heat, one free slot, one ready item: the loop's own check.
     const start = Date.parse('2026-11-16T08:00:00Z');
