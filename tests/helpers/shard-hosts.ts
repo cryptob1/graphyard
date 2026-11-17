@@ -6,7 +6,7 @@
 // NAME.down exists, as OpenSSH does for a host it cannot reach); `sshd` runs a real OpenSSH server.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createServer } from 'node:net';
 import { temporaryDirectory } from './temp-dirs.js';
@@ -150,12 +150,12 @@ export async function shardRepository(label: string, files: readonly string[], e
 }
 export const commitFile = async (root: string, path: string, text: string) => { await writeFile(join(root, path), text); git(root, 'add', '-A'); git(root, 'commit', '-qm', `change ${path}`); return git(root, 'rev-parse', 'HEAD'); };
 
-/** Kill every process under the ones `matches` picks (by command line), and those too. */
-export function killTrees(matches: (pid: number, command: string) => boolean) {
+/** Kill every process under the ones `matches` picks (by working directory: the shim execs python, so its command line names no path), and those too. */
+export function killTrees(matches: (pid: number, cwd: string) => boolean) {
   const table = readdirSync('/proc').filter(name => /^\d+$/.test(name)).flatMap(pid => {
-    try { return [{ pid: Number(pid), ppid: Number(readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '').split(' ')[1]), command: readFileSync(`/proc/${pid}/cmdline`, 'utf8') }]; } catch { return []; }
+    try { return [{ pid: Number(pid), ppid: Number(readFileSync(`/proc/${pid}/stat`, 'utf8').replace(/^.*\) /s, '').split(' ')[1]), cwd: readlinkSync(`/proc/${pid}/cwd`) }]; } catch { return []; }
   });
-  const tree = new Set(table.filter(entry => matches(entry.pid, entry.command)).map(entry => entry.pid));
+  const tree = new Set(table.filter(entry => matches(entry.pid, entry.cwd)).map(entry => entry.pid));
   for (let grew = true; grew;) { grew = false; for (const { pid, ppid } of table) if (tree.has(ppid) && !tree.has(pid)) { tree.add(pid); grew = true; } }
   for (const pid of tree) { try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ } }
 }

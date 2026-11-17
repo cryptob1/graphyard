@@ -1395,6 +1395,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
     const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
     let stopped: unknown = null;
+    // A shard a host turned away is noted after every shard's output, so the note stays in the log tail kept on the item.
+    const dropped: string[] = [];
     const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, deadline, signal: input.signal }) : null;
     // One shard on this machine, or on `remote`; a remote host that turned it away rethrows, so it runs elsewhere.
     const shard = async (index: number, remote?: string) => {
@@ -1423,7 +1425,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries,
           unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
       } catch (error) {
-        if (error instanceof HostDroppedError) { log.push(`[remote] ${error.message}; its shard runs on another host`); throw error; }
+        if (error instanceof HostDroppedError) { dropped.push(`[remote] ${error.message}; its shard runs on another host`); throw error; }
         log.push(...entries);
         // A remote shard past the deadline ends the trial as a timeout, as a local one does.
         stopped ??= (error as { timedOut?: boolean }).timedOut ? new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail()) : error;
@@ -1443,6 +1445,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     } finally { await release(); await session?.close(); }
     const ran = settledShards.filter(shard => shard !== undefined);
     for (const shard of ran) log.push(...shard.entries);
+    log.push(...dropped);
     // A shard past the deadline ends the trial as a timeout once every shard has stopped, its log holding what the others printed.
     if (stopped instanceof TrialTimeoutError) throw new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail());
     if (stopped !== null) throw stopped;

@@ -35,7 +35,7 @@ before(async () => {
   if (spawnSync('sh', ['-c', 'command -v sshd || test -x /usr/sbin/sshd']).status === 0) {
     const server = await sshdHost(hosts.root, hosts.shim, hosts.home('loopback'), join(hosts.root, 'hosts', 'loopback', 'bin'), hosts.bin);
     second = { target: `${server.user}@127.0.0.1`, kill: server.kill, start: server.start };
-  } else second = { target: 'gy-compute@loopback', kill: () => killTrees((_, command) => command.includes(hosts.shim)), start: async () => {} };
+  } else second = { target: 'gy-compute@loopback', kill: () => killTrees((_, cwd) => cwd.startsWith(hosts.home('loopback'))), start: async () => {} };
   target = second.target;
   const python = await pinnedPython(await temporaryDirectory('two-host-oracle'));
   answers = join(hosts.root, 'answers.jsonl'); slow = join(hosts.root, 'slow');
