@@ -996,7 +996,8 @@ export async function mergeWriterStep(cycle: Cycle) {
   if (state.cpuPressure) state.cpuPressure.trialCap = { now: parallel, full: fullCap };
   const gateSlots = batchGateBusySlots(state);
   const busy = new Set([...live].flatMap(flight => flight.keys ?? [flight.key]));
-  if (busy.size + gateSlots < parallel && ![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.unconfirmed?.length
+  // GY-3437: at the launch limit no new trial starts; the cap still reads half, so status shows what returns once it cools.
+  if (busy.size + gateSlots < parallel && !cpuPressureHeld(state) && ![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.unconfirmed?.length
     && !writer.inFlight?.revert && !replayed && !delivered) {
     const free = snapshot.work.filter(item => !busy.has(item.key) && !settledNow.has(item.key));
     const ledger = snapshotLedger(free);

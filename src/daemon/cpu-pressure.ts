@@ -54,10 +54,11 @@ export const cpuHot = (state: Pick<DaemonState, 'cpuPressure'>) => (state.cpuPre
 /**
  * GY-3401: the merge writer's trial cap this cycle. A hot CPU no longer stops every trial: trials
  * running finish, and no new one starts beyond half the cap (at least one, GY-3437) until the reading falls below the limit.
- * A saturated CPU (pressure over its ceiling) or one at the launch limit (GY-3437) starts none.
+ * A saturated CPU (pressure over its ceiling) still starts none.
  */
 export function trialCapNow(state: Pick<DaemonState, 'cpuPressure'>, full: number): number {
-  if (cpuPressureHeld(state)) return 0;
+  const cpu = state.cpuPressure;
+  if (cpu?.avg60 != null && cpu.avg60 > cpuPressureCeiling) return 0;
   return cpuHot(state) ? Math.max(1, Math.floor(full / 2)) : full;
 }
 
