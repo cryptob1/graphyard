@@ -418,6 +418,32 @@ test('integration:main-batch-gate-failures — on real git, the culprit\'s merge
   assert.equal(record.verified, main);
 });
 
+test('integration:gate-skips-known-flaky — when the only failing batch check has an open flaky-check item, the gate reverts nothing, records the failure on that item and verifies the batch on its other checks; a failing check with no open flaky item still bisects and reverts (GY-3431)', async () => {
+  const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
+  const flakyItem = (stage: string) => ({ ...item('GY-50', ['unit:case-2-pinned']), title: 'Flaky check on main: e2e:case-2', stage }) as unknown as Work;
+  // GY-2 fails e2e:case-2 on every run, and e2e:case-2 has an open flaky-check item.
+  const open = await fixture('gate-known-flaky', 'GY-2');
+  const loop = reads(open.coordinator);
+  const record = bootstrapGate(repository, open.verified);
+  const outcome = await runGate(batchGatePorts({ ...loop.value, git: loop.value.git! }, [...open.work, flakyItem('backlog')]), record);
+  assert.equal(outcome.outcome, 'verified', 'the batch is kept');
+  assert.equal(record.verified, open.tip);
+  assert.equal(git(open.coordinator, 'rev-parse', 'origin/main'), open.tip, 'nothing is reverted');
+  assert.deepEqual(record.merges.map(merge => merge.reverted), [false, false, false]);
+  assert.equal(loop.trials.filter(trial => trial.commit !== open.tip).length, 0, 'no bisection runs');
+  assert.deepEqual(loop.trials[0]!.proofs.sort(), ['e2e:case-1', 'e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:smoke'], 'the batch is verified on its other checks');
+  assert.deepEqual(record.flaky?.['GY-50']?.map(failure => [failure.check, failure.tip]), [['e2e:case-2', open.tip]], 'the failure is recorded on the flaky item');
+  assert.equal(record.lastOutcome?.reason, 'kept the batch: e2e:case-2 failed and has the open flaky item GY-50');
+  assert.deepEqual(gateSummary(record)!.knownFlaky.map(flaky => [flaky.item, flaky.check, flaky.failures]), [['GY-50', 'e2e:case-2', 1]], 'master status names the flaky item');
+
+  // A closed flaky item exempts nothing: the failure bisects and reverts its culprit as before.
+  const closed = await fixture('gate-closed-flaky', 'GY-2');
+  const strict = reads(closed.coordinator);
+  const reverted = await runGate(batchGatePorts({ ...strict.value, git: strict.value.git! }, [...closed.work, flakyItem('done')]), bootstrapGate(repository, closed.verified));
+  assert.equal(reverted.outcome, 'reverted');
+  assert.equal(reverted.outcome === 'reverted' && reverted.culprit, 'GY-2');
+});
+
 test('integration:batch-gate-diagnostics-and-revert-rate — the scheduled full suite and catalog against the verified commit file items and never block; master status shows the revert rate over the last 20 merges and above 1 in 5 wakes the master', async () => {
   const verified = sha(1);
   const record: GateRecord = bootstrapGate(repository, verified);

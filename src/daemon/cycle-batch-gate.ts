@@ -184,6 +184,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
       return { revertSha: revert.revertSha };
     },
     file,
+    flaky: check => work.find(item => item.stage !== 'done' && item.title === `Flaky check on main: ${check}`)?.key ?? null,
     // The full suite (a package.json change selects every test) and the whole catalog, each its own trial so the catalog's time is its own; then the preview cases, in a repository that holds them.
     diagnose: async commit => {
       const suite = await trialFailures(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs, trusted);
