@@ -40,7 +40,7 @@ export function masterOwes(work: Work[], now: number) {
  * owes: the standing blockers that are the Master's, not the owner's (GY-3394) — Needs you carries
  * only the owner's three decisions.
  */
-export default function MasterPage({ work, observedAt, token, api, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'token' | 'api' | 'setSelected' | 'status'>) {
+export default function MasterPage({ work, observedAt, token, api, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'token' | 'api' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const [messages, setMessages] = useState<Message[]>([]);
   useEffect(() => {
     let live = true;
