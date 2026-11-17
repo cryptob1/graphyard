@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { launchHotCelsius } from '../src/daemon/cpu-pressure.js';
+import { trialHalfCelsius } from '../src/daemon/cpu-pressure.js';
 import type { TrialRunHandle, TrialRunRequest } from '../src/merge-writer/trial-run.js';
 import { mergeRecordKinds, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { foldMergeLedger } from '../src/model-boundary/merge-ledger.js';
@@ -14,9 +14,10 @@ import type { Work } from '../src/model.js';
 
 // GY-3401: on vishrog (24 cores, 99C) the GY-3373 guard stopped new launches but trials and
 // sessions already running kept the host at its limit. Now, while the CPU temperature the guard
-// reads sits at its limit, trials already running finish, the merge writer starts no trial beyond
-// half its cap, and the full cap returns once the reading drops below the limit. Driven through
-// the merge writer's own step over detached trial runs (the fixture of merge-writer-refills-slots).
+// reads sits at the trial halving limit (GY-3416: 5C under the launch limit), trials already
+// running finish, the merge writer starts no trial beyond half its cap, and the full cap returns
+// once the reading drops below it. Driven through the merge writer's own step over detached trial
+// runs (the fixture of merge-writer-refills-slots).
 
 const proof = 'integration:hot-trial-cap';
 
@@ -120,20 +121,20 @@ const waitFor = async (what: () => boolean, ms = 5_000) => { for (let waited = 0
 
 /** The CPU reading the loop's close step leaves on the state before the merge writer runs. */
 function reading(state: DaemonState, world: World, celsius: number) {
-  world.hot = celsius >= launchHotCelsius;
+  world.hot = celsius >= trialHalfCelsius;
   state.cpuPressure = { at: iso(start), avg60: 20, steal: null, stat: null, celsius, testBudget: null, trialCap: state.cpuPressure?.trialCap ?? null };
 }
 
-test(`${proof} — at the temperature limit running trials finish, no trial starts beyond half the cap of 4, and the full cap returns once it cools`, { timeout: 60_000 }, async () => {
+test(`${proof} — at the halving limit running trials finish, no trial starts beyond half the cap of 4, and the full cap returns once it cools`, { timeout: 60_000 }, async () => {
   const world = new World(0), state = emptyDaemonState(config), cycle = loop(world, state, false, start);
-  reading(state, world, 80);
+  reading(state, world, trialHalfCelsius - 1);
   // One head comes due a cycle, so each trial is its own flight and settles on its own.
   for (let n = 1; n <= 3; n++) { world.submitted = n; await cycle(); await waitFor(() => world.launches.length === n); }
   assert.deepEqual(world.launches, ['GY-1', 'GY-2', 'GY-3'], 'cool: three due heads start under the cap of 4');
   assert.deepEqual(state.cpuPressure?.trialCap, { now: 4, full: 4 });
 
-  // The sensor reaches the guard's limit and three more heads are due.
-  reading(state, world, launchHotCelsius);
+  // The sensor reaches the halving limit (GY-3416: 5C under the 85C launch limit) and three more heads are due.
+  reading(state, world, trialHalfCelsius);
   world.submitted = 6;
   await cycle();
   await new Promise(resolve => setTimeout(resolve, 50));
@@ -151,8 +152,8 @@ test(`${proof} — at the temperature limit running trials finish, no trial star
   assert.equal(world.hotPeak, 2, 'while hot, never more than 2 trials ran after a start');
   assert.ok(world.snapshot().slice(0, 2).every(item => item.stage === 'done'), 'the trials that ran on while hot finished and landed');
 
-  // It cools below the limit: the full cap returns at the next cycle.
-  reading(state, world, launchHotCelsius - 1);
+  // It cools below the halving limit: the full cap returns at the next cycle.
+  reading(state, world, trialHalfCelsius - 1);
   await cycle();
   await waitFor(() => world.launches.length === 6);
   assert.deepEqual(world.launches, ['GY-1', 'GY-2', 'GY-3', 'GY-4', 'GY-5', 'GY-6'], 'cool again: the two waiting heads start beside the two running');

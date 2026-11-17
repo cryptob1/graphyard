@@ -254,18 +254,20 @@ export default function WorkersPage({ work, observedAt, setSelected, setView, to
   const stale = view.running.filter(row => row.stale).length;
   const openCount = view.running.length - stale;
   const table = (rows: WorkerRow[], label: string) => <Table rows={rows} label={label} work={work} now={now} release={release} open={open} setOpen={setOpen} token={token} setSelected={setSelected} setView={setView}/>;
-  const cpu = status?.cpu as { avg60: number | null; steal: number | null; celsius?: number | null; testBudget?: number | null; trialCap?: { now: number; full: number } | null } | null | undefined;
+  const cpu = status?.cpu as { avg60: number | null; steal: number | null; celsius?: number | null; testBudget?: number | null; trialCap?: { now: number; full: number } | null; waiting?: boolean | null } | null | undefined;
   // GY-3401: each new session's share of test parallelism, and the trial cap — halved while the CPU is hot.
+  // GY-3416: and the guard's own word while it holds every new launch.
   const cpuFigures = cpu ? [cpu.avg60 === null ? null : `Host CPU pressure ${Math.round(cpu.avg60)}% · steal ${cpu.steal === null ? '—' : `${Math.round(cpu.steal)}%`}`,
     cpu.celsius == null ? null : `${cpu.avg60 === null ? 'Host CPU ' : ''}temperature ${Math.round(cpu.celsius)}°C`,
     cpu.testBudget == null ? null : `${cpu.testBudget} test workers per session`,
-    cpu.trialCap ? `trials ${cpu.trialCap.now < cpu.trialCap.full ? `${cpu.trialCap.now} of ${cpu.trialCap.full}` : cpu.trialCap.full}` : null].filter(Boolean).join(' · ') : '';
+    cpu.trialCap ? `trials ${cpu.trialCap.now < cpu.trialCap.full ? `${cpu.trialCap.now} of ${cpu.trialCap.full}` : cpu.trialCap.full}` : null,
+    cpu.waiting ? 'launches waiting' : null].filter(Boolean).join(' · ') : '';
   return <>
     <PageHeader title="Workers" fact={`${openCount} agent ${openCount === 1 ? 'session' : 'sessions'} open.${stale ? ` ${stale} not seen recently.` : ''} ${view.finished.length} ended.`}>
       {cpuFigures ? <span className="host-cpu" data-host-cpu>{cpuFigures}</span> : null}</PageHeader>
     {view.running.length ? table(view.running, 'Agent sessions') : <EmptyState title="No agent session is open.">Agents start here when the loop hands them an item.</EmptyState>}
     <p className="muted workers-note">Building means an agent is writing the change; Rework, that it is making the requested changes; In review, someone else judges it; Proving runs the proofs; the Master runs the loop. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes reads Not seen, never as live.</p>
-    <Hosts hosts={(status as { hosts?: HostRow[] } | undefined)?.hosts ?? []}/>
+    <Hosts hosts={status?.hosts ?? []}/>
     <ProjectMemorySection memory={status?.projectMemory}/>
     {/* A watched run that ends moves here: the section opens to it, so its panel stays in view. */}
     <details className="panel finished-sessions" open={view.finished.some(row => row.id === open) || undefined}><summary>Ended <span className="count">{view.finished.length}</span></summary>

@@ -47,7 +47,9 @@ export async function createWorktree(context: CliContext, work: any) {
   const epoch = Number(args[0]); const root = context.repositoryRoot();
   const status = await api('status');
   assertRepository((await discover(root)).repository, status.repository);
-  const branch = work.submission ? work.workspaces.find((w: any) => w.epoch === work.submission.epoch)?.branch : `graphyard/${work.key.toLowerCase()}-${epoch}`;
+  // GY-3413: a stale record whose submission epoch has no workspace takes the candidate's branch, else the latest workspace's.
+  const branch = work.submission ? work.workspaces.find((w: any) => w.epoch === work.submission.epoch)?.branch ?? work.candidate?.branch
+    ?? [...work.workspaces].sort((a: any, b: any) => b.epoch - a.epoch)[0]?.branch : `graphyard/${work.key.toLowerCase()}-${epoch}`;
   if (!branch) throw new Error('Submitted workspace branch is missing');
   const path = resolve(root, '.graphyard/worktrees', `${work.key}-${epoch}`);
   let startPoint = args[1] ?? 'HEAD';

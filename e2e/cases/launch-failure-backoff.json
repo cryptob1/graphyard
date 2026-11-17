@@ -1,0 +1,16 @@
+{
+  "id": "launch-failure-backoff",
+  "title": "A worker launch that keeps failing with one reason stops relaunching and shows in master status",
+  "description": "GY-3413: an item whose worker launch fails twice with the same reason, on whichever runtime the loop picks, is backed off on every runtime: no further launch (and no new epoch) until the backoff ends, and master status attention names the item, the reason and when it is tried again.",
+  "tags": ["dispatch", "attention"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "repeated launch failures back off and reach master status attention",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/launch-failure-backoff.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
