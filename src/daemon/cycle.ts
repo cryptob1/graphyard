@@ -18,7 +18,7 @@ import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../c
 import { capacityRefusal } from '../fleet.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterCauses, masterCausePrompt, messageCauses } from './master-stalled-delivery.js';
-import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld, normalizeFailureReason } from './repeated-failure.js';
+import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld, normalizeFailureReason, repeatingItems } from './repeated-failure.js';
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
 import { herdrWorkspaceOf } from '../master/herdr.js';
@@ -676,7 +676,9 @@ async function dispatchStep(cycle: Cycle) {
   // GY-3432: the stall alarm, before the master is woken, so a raised alarm wakes it this cycle.
   if (!config.forPerson) {
     const running = snapshot.work.flatMap(item => item.sessions ?? []).filter(session => session.kind === 'implementation' && session.state === 'running').length;
-    const alarm = stallAlarm({ now: clock, open, ready: claimable, freeSlots: allowed - running,
+    // An item in a run of equal failures already wakes the master by that run (GY-3104), held or not.
+    const repeating = repeatingItems(state.failureRuns), unheld = (item: Work) => !repeating.has(item.key);
+    const alarm = stallAlarm({ now: clock, open: open.filter(unheld), ready: claimable.filter(unheld), freeSlots: allowed - running,
       state, registry, serving: await Promise.resolve(effects.servingCommit?.()).catch(() => null) ?? null });
     if (recordStallAlarm(state, alarm, clock)) { cycle.log(`[graphyard-master] cycle ${state.cycle}: ${alarm ?? 'the stall alarm cleared'}`); await effects.persist(state); }
   }
