@@ -233,17 +233,19 @@ export const processAlive = (pid: number) => { try { process.kill(pid, 0); retur
 const runtimeStartFault = /could not (?:be )?start|never confirmed its runtime started|refused before it started|failed before it started|launch refused|exited (?:at launch|within seconds of its launch)|\bbwrap\b|unknown (?:option|flag|argument)|usage limit|session limit|rate limit|quota/i;
 export const runtimeStartFailure = (record: { state: string; resolution?: string | null }) =>
   record.state === 'failed' && !neverStarted(record) && !lostRun(record) && runtimeStartFault.test((record.resolution ?? '').split(' Its last words:')[0]!);
-export function sessionRetry(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], requestId: string, now: number) {
+export function sessionRetry(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], requestId: string, now: number, review = false) {
   const launched = records.filter(record => record.requestId === requestId);
   const last = launched.at(-1);
-  const unstarted = launched.filter(neverStarted), lost = launched.filter(lostRun), runtimeFailed = launched.filter(runtimeStartFailure);
+  // Producers keep counting runtime failures: their requests relaunch on a recovered profile instead (GY-1227).
+  const runtimeFault = (record: (typeof launched)[number]) => review && runtimeStartFailure(record);
+  const unstarted = launched.filter(neverStarted), lost = launched.filter(lostRun), runtimeFailed = launched.filter(runtimeFault);
   // `started` is the attempts counted against the limit: a lost run reached no verdict to count, nor did a runtime that never started.
   const started = launched.length - unstarted.length - lost.length - runtimeFailed.length;
   const report = { requestId, attempts: launched.length, started, neverStarted: unstarted.length, lost: lost.length, limit: sessionRetryLimit, unstartedLimit: unstartedRetryLimit, last: last ? { state: last.state, resolution: last.resolution ?? null } : null };
   if (!last) return { ...report, launch: true, settled: false, nextAt: null, exhausted: false };
   if (!retriedStates.includes(last.state)) return { ...report, launch: false, settled: true, nextAt: null, exhausted: false };
   if (started >= sessionRetryLimit || unstarted.length >= unstartedRetryLimit || launched.length >= requestAttemptLimit) return { ...report, launch: false, settled: false, nextAt: null, exhausted: true };
-  const nextAt = Date.parse(last.closedAt ?? last.requestedAt) + (lostRun(last) ? 0 : neverStarted(last) || runtimeStartFailure(last) ? sessionRetryBaseMs : sessionRetryDelay(started));
+  const nextAt = Date.parse(last.closedAt ?? last.requestedAt) + (lostRun(last) ? 0 : neverStarted(last) || runtimeFault(last) ? sessionRetryBaseMs : sessionRetryDelay(started));
   return { ...report, launch: now >= nextAt, settled: false, nextAt: new Date(nextAt).toISOString(), exhausted: false };
 }
 

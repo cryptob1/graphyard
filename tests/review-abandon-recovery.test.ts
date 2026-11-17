@@ -41,11 +41,11 @@ test('integration:review-abandon-recovery — sessions whose runtime could not s
     quick(2, 'the reviewer session finished (headless opencode: opencode exited with code 1: Free usage limit reached) without posting a verdict'),
     quick(3, 'the reviewer session finished (headless opencode: opencode exited with code 1: unknown option --standalone) without posting a verdict'),
   ];
-  const retry = sessionRetry(failures, 'r', at + 4 * 600_000);
+  const retry = sessionRetry(failures, 'r', at + 4 * 600_000, true);
   assert.deepEqual([retry.exhausted, retry.launch, retry.started], [false, true, 0], JSON.stringify(retry));
   // A session that ran and then failed still counts: four of them spend the request.
   const ran = failures.map(record => ({ ...record, resolution: 'the reviewer session finished (headless opencode: opencode exited with code 1: the session crashed mid-review) without posting a verdict' }));
-  assert.equal(sessionRetry(ran, 'r', at + 4 * 600_000).exhausted, true);
+  assert.equal(sessionRetry(ran, 'r', at + 4 * 600_000, true).exhausted, true);
 
   // Through the loop: four runtime start failures leave the request launching, never abandoned.
   await harness.configure([{ name: 'healthy-2', kind: 'kilo' }]);
