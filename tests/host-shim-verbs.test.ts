@@ -53,6 +53,7 @@ test(`${proof} — a shard runs through the trial launcher in its run directory 
   const listening: Server = await new Promise(resolve => { const server = createServer(socket => socket.end('host answered\n')).listen(0, '127.0.0.1', () => resolve(server)); });
   const port = (listening.address() as { port: number }).port;
   const { root, sha } = await shardRepository('host-shim-verbs-repo', ['tests/a.test.ts']);
+  const homeMode = (await stat(hosts.home('box'))).mode;
   const session = remoteShardSession({ root, sha, image, run: defaultChildRun, deadline: Date.now() + 50_000 });
   // The shard tries a private-range address, the tailnet range and this host; each must fail.
   const reach = `const net = require('node:net'); const targets = [['10.0.0.1', 80], ['192.168.1.1', 80], ['100.64.0.1', 80], ['127.0.0.1', ${port}]];
@@ -79,7 +80,7 @@ socket.on('error', error => done(error.code)); socket.on('timeout', () => done('
       assert.equal((await stat(path)).mode & 0o2070, 0o2070, `mapped group can write and traverse ${path}`);
     }
     assert.equal((await stat(join(runDirectory, 'repo', 'tests', 'a.test.ts'))).mode & 0o060, 0o060);
-    assert.equal((await stat(join(hosts.home('box'), '.graphyard', 'mirrors'))).mode & 0o020, 0, 'shared mirror stays outside the writable run');
+    assert.equal((await stat(hosts.home('box'))).mode, homeMode, 'host home permissions stay unchanged');
     assert.match(mounts[0]!, new RegExp(`^type=bind,src=${hosts.home('box')}/\\.graphyard/runs/trial-\\w+,dst=`), 'only the run directory is mounted');
   } finally { await session.close(); listening.close(); }
 });
