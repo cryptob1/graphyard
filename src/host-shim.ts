@@ -6,7 +6,7 @@
 //   receive-image IMAGE            `docker save` output on stdin, loaded once per warm image; older warm images go
 //   prepare-run REPO SHA IMAGE     a checkout of SHA cloned from the mirror under ~/.graphyard/runs,
 //                                  or `need-pack LAST` / `need-image` when the host lacks either
-//   run-shard RUN INDEX            JSON {files, argv, cpus, deadline} on stdin; the trial launcher runs argv
+//   run-shard RUN INDEX            JSON {files, argv, cpus, deadline} on stdin, nothing else; the trial launcher runs argv
 //                                  in IMAGE with --network=none, CPU, memory and process limits, only RUN mounted
 //   fetch-records RUN INDEX        the shard's per-file records
 //   clean RUN                      remove a run directory
@@ -111,6 +111,14 @@ elif verb == 'prepare-run':
     print('run ' + os.path.basename(run))
 else:
     run = os.path.join(runs, args[0])
+    # A shard request names its files, command, CPUs and deadline only: one asking for anything else (a mount, an image, a network) is refused.
+    if verb == 'run-shard':
+        try:
+            shard = json.load(sys.stdin)
+        except ValueError:
+            refuse()
+        if not isinstance(shard, dict) or set(shard) != {'files', 'argv', 'cpus', 'deadline'}:
+            refuse()
     if not os.path.isdir(run):
         sys.exit('graphyard-host-shim: no run ' + args[0])
     if verb == 'clean':
@@ -121,7 +129,6 @@ else:
         except OSError:
             pass
     else:
-        shard = json.load(sys.stdin)
         files, argv, cpus, deadline = shard.get('files'), shard.get('argv'), shard.get('cpus'), shard.get('deadline')
         strings = lambda values, forbidden: isinstance(values, list) and 0 < len(values) <= 5000 and all(isinstance(value, str) and not set(forbidden) & set(value) for value in values)
         if not strings(files, '\\0\\n') or not strings(argv, '\\0') or type(cpus) is not int or type(deadline) is not int:

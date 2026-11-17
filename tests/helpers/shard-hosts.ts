@@ -31,6 +31,7 @@ def save():
 def log(word):
     open(os.path.join(STATE, 'calls.log'), 'a').write(word + '\\n')
 command = args[0]
+open(os.path.join(STATE, 'every-call.log'), 'a').write(command + '\\n')
 if command == 'info':
     print('fixture')
 elif command == 'ps':
@@ -108,6 +109,8 @@ SSH_ORIGINAL_COMMAND="$last" exec "${shim}"
 }
 
 export const dockerCalls = (state: string) => existsSync(join(state, 'calls.log')) ? execFileSync('cat', [join(state, 'calls.log')], { encoding: 'utf8' }).split('\n').filter(Boolean) : [];
+/** Every Docker call the host made, by its command word. */
+export const dockerEveryCall = (state: string) => existsSync(join(state, 'every-call.log')) ? readFileSync(join(state, 'every-call.log'), 'utf8').split('\n').filter(Boolean) : [];
 export const dockerCount = (state: string, word: string) => dockerCalls(state).filter(entry => entry === word).length;
 export const dockerCreates = async (state: string): Promise<string[][]> => existsSync(join(state, 'creates.jsonl'))
   ? (await readFile(join(state, 'creates.jsonl'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
