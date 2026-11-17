@@ -13,7 +13,7 @@ import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
 import { installUrl } from '../../team-access.js';
 import { unownedFamilySql } from '../../store/tables/work.js';
-import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
+import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict, renewReviewRequest } from '../review-verdict.js';
 import { readTrialScreenshot } from '../trial-screenshots.js';
 import { mergeRecordInput, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
@@ -106,6 +106,14 @@ export const workRoutes = defineRoutes('work', [
       await refuseLead(context, id, action);
       const data = await parseJson(context, action === 'review-verdict' ? productScreenshotBodyLimit : undefined), key = context.idempotencyKey(), target = decodeURIComponent(id);
       return action === 'review-launch' ? recordReviewLaunch(context.services, context.actor, target, data, key) : recordReviewVerdict(context.services, context.actor, target, data, key);
+    },
+  },
+  // GY-3428: `master review` renews a review request the loop has stopped relaunching.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/review-request$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'review-request');
+      return renewReviewRequest(context.services, context.actor, decodeURIComponent(id), context.idempotencyKey());
     },
   },
   // A product review recorded by hand (GY-2989): the operator's or the loop's own verdict on a
