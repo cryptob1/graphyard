@@ -199,7 +199,7 @@ function Hosts({ hosts }: { hosts: HostRow[] }) {
         <td data-label="Steal">{figure(host.steal, '%')}</td>
         <td data-label="Runs now">{figure(host.runs)}</td></>}
     </tr>)}</tbody>
-  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Added hosts are watched, not given work yet: trials and previews run on this machine.</p> : null}</section>;
+  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Added hosts are watched, not given work yet: test merges and previews run on this machine.</p> : null}</section>;
 }
 
 function ProjectMemorySection({ memory }: { memory?: any }) {

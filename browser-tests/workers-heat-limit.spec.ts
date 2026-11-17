@@ -62,7 +62,7 @@ test('e2e:heat-limit-laptop — the Workers page header shows the laptop\'s hot 
     const figures = page.locator('.host-cpu');
     await expect(figures).toBeVisible({ timeout: 15_000 });
     await expect(figures).toContainText('temperature 96°C');
-    await expect(figures).toContainText('trials 2 of 4');
+    await expect(figures).toContainText('2 of 4 test merges at once');
     await expect(figures).toContainText('launches waiting');
   } finally { await page.close(); await close(); }
 });
