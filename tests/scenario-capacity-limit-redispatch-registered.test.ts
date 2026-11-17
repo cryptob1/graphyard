@@ -136,14 +136,14 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
 
   // GY-2973: an unregistered scenario no longer blocks create — the case is the item's own
   // deliverable, so it pins nothing and the merge trial refuses a head that lacks it.
-  const unregistered = await api('work', {
+  const unregistered = await api('work', { why: 'w', simplest: 's',
     type: 'chore',
     title: 'Unregistered sibling',
     criteria: [{ id: 'AC-1', text: 'adds its own case', proofs: ['e2e:not-a-registered-scenario'] }],
   }) as Work;
   assert.deepEqual(unregistered.scenarioRequirements, []);
 
-  const pinned = await api('work', {
+  const pinned = await api('work', { why: 'w', simplest: 's',
     type: 'chore',
     title: 'Pinned to capacity-limit-redispatch',
     criteria: [{ id: 'AC-1', text: 'capacity-limit-redispatch is registered', proofs: [`e2e:${id}`] }],

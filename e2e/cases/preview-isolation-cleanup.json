@@ -17,7 +17,7 @@
       "name": "create the first change",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "criteria": [
           {
             "id": "AC-1",
@@ -50,7 +50,7 @@
       "name": "create the second change",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "criteria": [
           {
             "id": "AC-1",

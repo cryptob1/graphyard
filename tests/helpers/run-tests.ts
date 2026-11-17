@@ -91,6 +91,16 @@ export function suiteBreadth({ budgetBytes, otherFiles, cpus, perFileBytes = byt
   return Math.max(2, Math.min(affordable, Math.max(2, cpus - 1)));
 }
 
+/**
+ * GY-3401: a Graphyard session's run never goes past the session's share of the host's test
+ * parallelism (VITEST_MAX_WORKERS, set at its launch from the cores and the sessions running), so
+ * sessions already running stop fanning one file out per core on a hot host.
+ */
+export function sessionSuiteBreadth(host: number | null, environment: NodeJS.ProcessEnv = process.env): number | null {
+  const budget = Number(environment.VITEST_MAX_WORKERS);
+  return Number.isInteger(budget) && budget >= 1 ? Math.min(host ?? budget, budget) : host;
+}
+
 /** The breadth this run starts at, or null when nothing judges it: a run inside a run, a host whose memory cannot be read (CI keeps node's own default). */
 export async function hostSuiteBreadth(environment: NodeJS.ProcessEnv = process.env, memory: typeof readHostMemory = readHostMemory, pid: number = process.pid): Promise<number | null> {
   if (environment[heldVariable]) return null;
@@ -239,7 +249,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const held = await sessionVerificationSlot(mode === 'typecheck' ? 'npm run typecheck' : mode === 'browser' ? 'npm run test:browser' : `npm test${args.length ? ` ${args.join(' ')}` : ''}`);
   // The breadth the host affords is computed with the slot already held, so a run that starts later
   // sees this one's declaration; it is declared back onto the slot for the runs after it (GY-1821).
-  const breadth = mode === 'test' ? await hostSuiteBreadth() : null;
+  const breadth = mode === 'test' ? sessionSuiteBreadth(await hostSuiteBreadth()) : null;
   if (held && breadth !== null) declareSlotFiles(held, breadth);
   try { process.exitCode = mode === 'typecheck' ? await typecheck(process.cwd(), args) : (await runTests({ browser: mode === 'browser', args, breadth: breadth ?? undefined })).code; }
   finally { held?.release(); }

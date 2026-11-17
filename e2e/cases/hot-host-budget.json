@@ -1,0 +1,22 @@
+{
+  "id": "hot-host-budget",
+  "title": "Hot host: master status and the Workers page show each session's test budget and the halved trial cap",
+  "description": "With a CPU sensor at 96C (well over the launch guard's 85C limit) and three sessions running, one loop cycle records the test parallelism a session launched now gets, floor(cores / running sessions) and never below 2, and the merge writer's trial cap halved from 4 to 2. Master status shows both, and the Workers page shows them beside CPU pressure and temperature at 1280 px and 390 px.",
+  "tags": ["dispatch", "dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "master status shows the test budget and the halved trial cap",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/hot-host-budget.test.ts",
+      "timeoutSeconds": 300
+    },
+    {
+      "kind": "command",
+      "name": "the test budget and trial cap on the served Workers page",
+      "run": "npm run test:browser -- browser-tests/workers-cpu-figures.spec.ts",
+      "timeoutSeconds": 420
+    }
+  ]
+}

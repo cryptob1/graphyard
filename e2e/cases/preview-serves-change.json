@@ -16,7 +16,7 @@
       "name": "create a change whose declared case needs a preview",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "criteria": [
           {
             "id": "AC-1",

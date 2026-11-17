@@ -25,6 +25,8 @@ const call = async (path, credential, body) => {
 
 let item = await call('work', token, {
   title: `Scratch delivery ${randomUUID()}`, type: 'chore',
+  why: 'Users need submitted changes to reach the running application reliably.',
+  simplest: 'Deliver one small change through the real pipeline in a disposable repository.',
   description: 'Exercise delivery in the disposable local repository.',
   criteria: [{ id: 'AC-1', text: 'The submitted change works and is served', proofs: ['unit:scratch-delivery', 'e2e:scratch-delivery'] }],
   policy: { checks: ['test'], review: true },
