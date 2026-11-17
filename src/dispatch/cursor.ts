@@ -157,9 +157,19 @@ export async function readDispatchCursor(root: string, config: MasterConfig): Pr
   const log: EnvironmentLog = await readEnvironmentLog(config);
   return Object.keys(log.environments).length || log.skipped.length ? { ...cursor, accounts: { environments: log.environments, skipped: log.skipped } } : cursor;
 }
+/** GY-3424: the launch failures a save keeps per item, newest first; a relaunch churn otherwise leaves thousands on one item. */
+export const dispatchFailuresPerItem = 20;
+const latestFailuresPerItem = (failures: DispatchCursor['failures']) => {
+  const kept: DispatchCursor['failures'] = {}, counts = new Map<string, number>();
+  for (const [id, failure] of Object.entries(failures).sort(([, a], [, b]) => b.at.localeCompare(a.at))) {
+    const count = counts.get(failure.work) ?? 0;
+    if (count < dispatchFailuresPerItem) { kept[id] = failure; counts.set(failure.work, count + 1); }
+  }
+  return kept;
+};
 export async function writeDispatchCursor(config: MasterConfig, cursor: DispatchCursor) {
   const { accounts: _accounts, ...persisted } = cursor;
-  await (await loopStateClient(config)).write('dispatch', [dispatchCursorSchema.parse(persisted)]);
+  await (await loopStateClient(config)).write('dispatch', [dispatchCursorSchema.parse({ ...persisted, failures: latestFailuresPerItem(persisted.failures) })]);
 }
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 /** What a tick failure records about state it could not persist, for `master status` and the attention it raises. */
