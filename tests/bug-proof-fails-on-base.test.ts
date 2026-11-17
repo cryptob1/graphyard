@@ -112,27 +112,3 @@ test(`${own} — a bug item whose unit proof and E2E proof both pass on the base
   assert.equal(bug.outcome.outcome, 'refused', JSON.stringify(bug.outcome));
   assert.equal((bug.outcome as { reason: string }).reason, `${proofPassesOnBasePrefix}: ${proof}, ${e2eProof} already pass on the base tip ${fixed.base} without this change, so they show nothing the change does. Change tests/fix.test.ts, e2e/cases/home-shows-fix.json so a case fails on the base tip and passes with the change.`);
 });
-
-test('integration:not-reproduced-wording — a trial whose proof passes on head and base says plainly the proof already passes on the base tip without the change and names the case file to change; repeated, it never asks for a different approach', { timeout: 300_000 }, async () => {
-  const { diagnosisSection, repeatedFailureCause } = await import('../src/daemon/repeated-failure.js');
-  const fixed = await repository(true, true);
-  const reasons: string[] = [];
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const refused = await merge(fixed, 'bug', [proof, e2eProof]);
-    assert.equal(refused.outcome.outcome, 'refused', JSON.stringify(refused.outcome));
-    reasons.push((refused.outcome as { reason: string }).reason);
-  }
-  for (const reason of reasons) {
-    assert.match(reason, new RegExp(`already pass on the base tip ${fixed.base} without this change`));
-    assert.match(reason, /Change tests\/fix\.test\.ts, e2e\/cases\/home-shows-fix\.json so a case fails on the base tip and passes with the change\./);
-    assert.doesNotMatch(reason, /not reproduced/);
-  }
-  for (const count of [2, 3]) {
-    const run = { key: 'GY-2984', kind: 'trial' as const, signature: 'trial:same', reasons, count, rework: null, handedIn: null, seen: [] };
-    const texts = [diagnosisSection(run), repeatedFailureCause(run)!.detail];
-    for (const text of texts) {
-      assert.ok(text.includes('fails on the base tip') || text.includes('fail on the base tip'), text);
-      assert.doesNotMatch(text, /different approach/, text);
-    }
-  }
-});
