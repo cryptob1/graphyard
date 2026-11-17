@@ -24,7 +24,7 @@ import { endRun, liveRun, registerRun, sessionTestBudget, type AdoptedRun } from
 import { detachedLaunch, processIdentity, readRunMeta, runAlive, runContainment, runEnvironment, runFiles, signalRun, type RunMeta } from './runner/pi.js';
 import { runRecord } from './runner/types.js';
 import { underTestRunner } from './runtime-environment.js';
-import { runtimeAdapter } from './master/runtimes.js';
+import { acceptedFlags, runtimeAdapter } from './master/runtimes.js';
 import { confinedRuntimeArgs } from './worker-sandbox.js';
 import { runtimeReport } from './model/token-costs.js';
 import { noteRunUsage } from './usage-capture.js';
@@ -45,8 +45,11 @@ export type HeadlessExec = (command: string, args: string[], options: { cwd: str
 export const headlessKind = (kind: string | undefined, contract?: RegisteredLaunch | null): kind is string => !!kind && (!!runtimeAdapter(kind)?.headless || !!contract?.headlessArgs);
 export class HeadlessConfigurationError extends Error {}
 
-/** Explicit argv replaces the interactive argv and built-in form. A leading subcommand precedes policy flags. */
-export function headlessArgs(kind: string, args: readonly string[], prompt: string, contract?: RegisteredLaunch | null): string[] {
+/**
+ * Explicit argv replaces the interactive argv and built-in form. A leading subcommand precedes policy flags.
+ * Of the form's optional flags, only `accepted` ones are passed, once each, whether the form or the profile names them (GY-3425).
+ */
+export function headlessArgs(kind: string, args: readonly string[], prompt: string, contract?: RegisteredLaunch | null, accepted: readonly string[] = []): string[] {
   if (contract?.headlessArgs) {
     const words = contract.headlessArgs;
     if (words.filter(word => word === requestPlaceholder).length !== 1) throw new HeadlessConfigurationError(`${kind}: launch.headlessArgs must contain exactly one {request}`);
@@ -55,10 +58,18 @@ export function headlessArgs(kind: string, args: readonly string[], prompt: stri
   }
   const form = runtimeAdapter(kind)?.headless;
   if (!form) throw new HeadlessConfigurationError(`The ${kind} runtime has no one-task contract. Set launch.headlessArgs with exactly one {request} using graphyard master registry runtime set NAME --headless-arg=ARG --reason REASON; reviews never use Herdr.`);
-  const drop = form.drop ?? [];
-  const kept = args.filter((arg, index) => !drop.some(flag => arg === flag || arg.startsWith(`${flag}=`) || args[index - 1] === flag));
+  const drop = form.drop ?? [], optional = form.optional ?? [];
+  const kept = args.filter((arg, index) => !drop.some(flag => arg === flag || arg.startsWith(`${flag}=`) || args[index - 1] === flag) && !optional.includes(arg));
   const placed = kept.includes(requestPlaceholder);
-  return [...form.before, ...kept.map(arg => arg === requestPlaceholder ? prompt : arg), ...form.flags, ...(placed ? [] : [prompt])];
+  return [...form.before, ...kept.map(arg => arg === requestPlaceholder ? prompt : arg), ...form.flags, ...optional.filter(flag => accepted.includes(flag)), ...(placed ? [] : [prompt])];
+}
+
+/** The headless command line of one run: the installed runtime, asked once which of its form's optional flags it takes. */
+export async function headlessArgv(launch: { kind: string; args: readonly string[]; contract?: RegisteredLaunch | null }, request: string, env: NodeJS.ProcessEnv): Promise<string[]> {
+  const form = runtimeAdapter(launch.kind)?.headless;
+  const program = realRuntimeBinary(form?.program ?? launchProgram(launch.kind), env);
+  const accepted = launch.contract?.headlessArgs || !form ? [] : await acceptedFlags(program, form.before, form.optional ?? [], env);
+  return [program, ...headlessArgs(launch.kind, launch.args, request, launch.contract, accepted)];
 }
 
 /** The answer's text is bounded: what the run printed past this is ignored. */
@@ -250,7 +261,7 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
     for (let attempt = 1; ; attempt++) {
       const prompt = attempt === 1 ? launch.request : `${launch.request}\n\nYour previous answer was not accepted: ${refused}. Answer again with the one JSON object asked for.`;
       const env = runEnvironment(process.env, launch.environment);
-      const argv = [...launch.wrapper, realRuntimeBinary(runtimeAdapter(launch.kind)?.headless?.program ?? launchProgram(launch.kind), env), ...headlessArgs(launch.kind, launch.args, prompt, launch.contract)];
+      const argv = [...launch.wrapper, ...await headlessArgv(launch, prompt, env)];
       const active = liveRun(input.name);
       if (active) active.agent = launch.kind;
       await input.onRun?.({ id, kind: launch.kind, ...(refused ? { reason: refused } : {}) });
@@ -382,7 +393,7 @@ export async function startHeadlessWorker(input: HeadlessWorker): Promise<{ id: 
   const record: HeadlessWorkerRecord = { id, name: input.name, work: input.work, epoch: input.epoch, principal: input.principal, account: input.account, kind: launch.kind, subject: input.subject.slice(0, 300), startedAt: new Date().toISOString() };
   writeFileSync(join(directory, sessionFile), JSON.stringify(record), { mode: 0o600 });
   const env = runEnvironment(process.env, { ...launch.environment, GRAPHYARD_RUN_LOG: join(directory, runLogName) });
-  const argv = [...input.supervisor, ...launch.wrapper, realRuntimeBinary(runtimeAdapter(launch.kind)?.headless?.program ?? launchProgram(launch.kind), env), ...headlessArgs(launch.kind, launch.args, launch.request, launch.contract)];
+  const argv = [...input.supervisor, ...launch.wrapper, ...await headlessArgv(launch, launch.request, env)];
   const stop = new AbortController(), detached = new AbortController();
   const running = input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env, timeoutMs: input.timeoutMs, signal: stop.signal, run: directory, detached: detached.signal });
   const ended = await Promise.race([running.then(() => ({ ok: true }), () => ({ ok: false })), new Promise<null>(done => setTimeout(() => done(null), input.startupMs ?? workerStartupMs).unref())]);
