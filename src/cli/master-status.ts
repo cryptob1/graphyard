@@ -8,11 +8,10 @@ import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { standingStepFailures, workerGrowthKey, masterLaunchKey, masterLaunchBackoffAfter } from '../daemon/cycle.js';
 import { fetchRefusalKey } from '../daemon/cycle-batch-gate.js';
-import { cpuWaiting } from '../daemon/cpu-pressure.js';
+import { implementationWaiting } from '../daemon/cpu-pressure.js';
 import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
-import { heavyDrainLine, readHeavyDrain, verificationSlotsDirectory } from '../master/verification-slots.js';
-import { worktreeRoot } from '../install/worktree-root.js';
+import { heavyDrainLine, heavyJobsDirectory, readHeavyDrain } from '../master/verification-slots.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary, trialImageKey } from '../daemon/cycle-merge-writer.js';
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
@@ -75,8 +74,6 @@ export async function npmPublishedVersion(run: ChildRun): Promise<string> {
 }
 
 /** The `master status` page. `run` reads main's tip from the checkout's remote-tracking ref; the deploy unit fetches it. */
-/** GY-3304: the drain record the loop and every session's heavy run read, beside the host's verification slots. */
-export const heavyDrainDirectory = (root: string, master: Pick<MasterConfig, 'repository' | 'run'>) => verificationSlotsDirectory(worktreeRoot(root, master));
 
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, run: ChildRun = defaultChildRun) {
   // An unreachable control plane (GY-2966) is reported, not thrown: since when, the server's last exit and the free disk space, as the loop recorded them.
@@ -174,7 +171,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   });
   // GY-3299: worker-pool growth the loop could not do, with the cause and the capacity it leaves, until growth succeeds.
   // GY-3304: a drain stands until master resume; it names why and who asked.
-  const drain = readHeavyDrain(heavyDrainDirectory(root, master));
+  const drain = readHeavyDrain(heavyJobsDirectory());
   const drained = drain ? [{ subject: 'heavy work', text: heavyDrainLine(drain), next: 'graphyard master resume once the quiet window is over' }] : [];
   const growth = state?.actions[workerGrowthKey]?.state === 'failed' ? [{ subject: 'worker pool', text: state.actions[workerGrowthKey]!.detail, next: 'Fix the cause named; the next loop cycle adds the missing worker profiles and clears this' }] : [];
   // GY-3328: the trial host lacks the trial image and could not provision it, until a trial runs again.
@@ -226,7 +223,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // waiting line while launches are held; GY-3401: each new session's test budget and the trial cap.
     cpuPressure: state?.cpuPressure
       ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal, celsius: state.cpuPressure.celsius,
-        waiting: cpuWaiting(state), testBudget: state.cpuPressure.testBudget, trialCap: state.cpuPressure.trialCap }
+        waiting: implementationWaiting(state), testBudget: state.cpuPressure.testBudget, trialCap: state.cpuPressure.trialCap }
       : null,
     // GY-3190: the latest daily report of what the loop's sweeps stopped or removed, and the disk Graphyard's leftovers hold.
     leftovers: state?.leftovers.report ?? null,

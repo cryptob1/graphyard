@@ -447,14 +447,12 @@ export async function trialAffordableFiles(read?: () => Promise<HostMemoryReadin
   if (!reading) return null;
   return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile);
 }
-/** The first slot index a trial declares at: past any bound a host hands out, so no run ever takes or waits on it. */
-export const trialDeclarationSlot = 1000;
 /** Declare trial breadth through the same kernel-owned reservation as ordinary suites. */
-export async function declareTrialFiles(directory: string, key: string, files: number): Promise<() => Promise<void>> {
-  if (!(files >= 1) || !existsSync(directory)) return async () => {};
+export async function declareTrialFiles(directory: string | undefined, key: string, files: number): Promise<() => Promise<void>> {
+  if (!(files >= 1) || !directory || !existsSync(directory)) return async () => {};
   try {
-    const { acquireVerificationSlot } = await import('../master/verification-slots.js');
-    const held = await acquireVerificationSlot({ directory, slots: 1000, firstSlot: trialDeclarationSlot,
+    const { acquireVerificationSlot, declarationSlot } = await import('../master/verification-slots.js');
+    const held = await acquireVerificationSlot({ directory, slots: 1000, firstSlot: declarationSlot,
       label: `merge trial ${key}`, files: Math.floor(files) });
     return async () => held.release();
   } catch { /* the trial runs as it would have; only the budget sharing is lost */ }
@@ -1393,7 +1391,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const readings = hosts.length ? await (input.remote?.read ?? (named => readShardHosts(named, run, cores)))(hosts) : [];
     const remoteLanes = readings.slice(1).filter(underHeatLimit).reduce((sum, reading) => sum + Math.floor(realFreeCores(reading)), 0);
     const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores) + remoteLanes, await checkoutDurations(worktree, strategy.durations)) : groupTestFiles(files, input.groupSize);
-    const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
+    const slotsDirectory = process.env[(await import('../master/verification-slots.js')).slotsDirectoryVariable];
     const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
     input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
     const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];

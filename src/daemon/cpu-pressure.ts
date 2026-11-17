@@ -30,6 +30,8 @@ export const cpuPressureCeiling = 85;
 export const launchHotCelsius = trialHotCelsius;
 /** GY-3401, GY-3416: from 5C under the limit the trial cap halves, before any launch waits. */
 export const trialHalfCelsius = trialHotCelsius - 5;
+/** GY-3437: from this reading no new implementation session starts, while reviews and trials go on to the launch limit and drain the heat. */
+export const implementationHotCelsius = trialHalfCelsius;
 
 /** GY-3426: the guard compares the average of the readings taken over this window to the limit. */
 export const heatWindowMs = 60_000;
@@ -42,17 +44,22 @@ export function cpuWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | nu
   return null;
 }
 export const cpuPressureHeld = (state: Pick<DaemonState, 'cpuPressure'>) => cpuWaiting(state) !== null;
+/** GY-3437: the line that holds new implementation sessions — every launch's line, else the lower implementation heat limit's. */
+export function implementationWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | null {
+  const celsius = state.cpuPressure?.celsius;
+  return cpuWaiting(state) ?? (celsius != null && celsius >= implementationHotCelsius ? `implementation launches waiting: CPU ${celsius}C; reviews and trials go on` : null);
+}
 /** GY-3401, GY-3416: whether the hottest CPU sensor sits at the trial halving limit. */
 export const cpuHot = (state: Pick<DaemonState, 'cpuPressure'>) => (state.cpuPressure?.celsius ?? -Infinity) >= trialHalfCelsius;
 /**
  * GY-3401: the merge writer's trial cap this cycle. A hot CPU no longer stops every trial: trials
- * running finish, and no new one starts beyond half the cap until the reading falls below the limit.
+ * running finish, and no new one starts beyond half the cap (at least one, GY-3437) until the reading falls below the limit.
  * A saturated CPU (pressure over its ceiling) still starts none.
  */
 export function trialCapNow(state: Pick<DaemonState, 'cpuPressure'>, full: number): number {
   const cpu = state.cpuPressure;
   if (cpu?.avg60 != null && cpu.avg60 > cpuPressureCeiling) return 0;
-  return cpuHot(state) ? Math.floor(full / 2) : full;
+  return cpuHot(state) ? Math.max(1, Math.floor(full / 2)) : full;
 }
 
 /** The CPU package sensor under `hwmon` in whole degrees (the hottest core where no package sensor exists); null where none is readable. */
@@ -98,12 +105,12 @@ export function stealPercent(previous: { total: number; steal: number } | null, 
 export async function cpuPressureStep(cycle: { state: DaemonState; effects: DaemonEffects; now: () => number; log: (line: string) => void }) {
   const { state, effects, now, log } = cycle;
   const reading = await Promise.resolve(effects.cpuPressure?.()).catch(() => null) ?? null;
-  const avg60 = reading?.pressure ? pressureAvg60(reading.pressure) : null, at = now(), previous = state.cpuPressure, was = cpuWaiting(state);
+  const avg60 = reading?.pressure ? pressureAvg60(reading.pressure) : null, at = now(), previous = state.cpuPressure, was = implementationWaiting(state);
   const samples = reading?.celsius == null ? [] : [...(previous?.samples ?? []).filter(([when]) => at - when < heatWindowMs && when <= at), [at, reading.celsius] as [number, number]];
   const celsius = samples.length ? Math.round(samples.reduce((sum, [, value]) => sum + value, 0) / samples.length) : null;
   const stat = avg60 !== null && reading?.stat ? cpuStatTotals(reading.stat) : null;
   state.cpuPressure = avg60 === null && celsius === null ? null
     : { at: new Date(at).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat, celsius, samples, testBudget: sessionTestBudget(), trialCap: previous?.trialCap ?? null };
-  const waiting = cpuWaiting(state);
-  if (!!waiting !== !!was) log(`[graphyard-master] cycle ${state.cycle}: ${waiting ? `${waiting}; no new worker, reviewer or trial starts until it falls` : 'launches resume'}`);
+  const waiting = implementationWaiting(state);
+  if (waiting?.split(':')[0] !== was?.split(':')[0]) log(`[graphyard-master] cycle ${state.cycle}: ${!waiting ? 'launches resume' : waiting === cpuWaiting(state) ? `${waiting}; no new worker, reviewer or trial starts until it falls` : waiting}`);
 }

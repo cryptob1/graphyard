@@ -46,6 +46,8 @@ test('e2e:merge-proof-review-admission binds proof and review to head, diff base
       const changed = structuredClone(work);
       const record = kind === 'proof' ? changed.evidence[0] : changed.observation!.reviews[0];
       Object.assign(record, { [field]: field === 'policyRevision' ? 99 : 'd'.repeat(40) });
+      // A manual: attestation checked the head, so the base moving under it still counts (GY-3429).
+      if (kind === 'proof' && field === 'baseSha') { assert.equal(mergeCandidateHold(changed), null); continue; }
       assert.ok(mergeCandidateHold(changed), `${kind} with wrong ${field} is refused`);
       if (kind === 'review') {
         reconcileReviewConflict(changed, new Date(at));
@@ -97,7 +99,7 @@ test('e2e:merge-proof-review-admission transactional push refuses missing eviden
     const engine = new Engine(store, 120, 'fixture/admission');
     engine.gitRunner = async () => ({ status: 0, stdout: '', stderr: '' });
     let index = 0;
-    for (const missing of ['proof', 'review', 'none', 'proof-sha', 'proof-baseSha', 'proof-policyRevision', 'review-sha', 'review-baseSha', 'review-policyRevision']) {
+    for (const missing of ['proof', 'review', 'none', 'proof-sha', 'proof-policyRevision', 'review-sha', 'review-baseSha', 'review-policyRevision']) {
       const work = admissionFixture(); work.id = randomUUID(); work.key = `GY-${++index}`;
       Object.assign(work, { revision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, priority: 1 });
       if (missing !== 'proof') attest(work);

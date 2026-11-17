@@ -183,8 +183,9 @@ export function evidenceBindsCandidate(work: CarryBearer, evidence: Pick<Evidenc
   const candidate = work.candidate;
   if (!candidate) return false;
   if (evidence.sha === candidate.sha && evidence.baseSha === candidate.baseSha) return true;
-  // A person checked the commit itself (GY-2986): the base tip moving under it asks them nothing new.
-  if (evidence.sha === candidate.sha && evidence.proof.startsWith('human:')) return true;
+  // A person (GY-2986) or the master (GY-3429) checked the commit itself: the base tip moving
+  // under it asks them nothing new. Trial evidence keeps its base binding.
+  if (evidence.sha === candidate.sha && /^(human|manual):/.test(evidence.proof)) return true;
   const carry = currentCarry(work);
   return !!carry && carry.evidence.some(entry => entry.carried && entry.proof === evidence.proof && entry.evidenceId === evidence.id);
 }
