@@ -125,7 +125,7 @@ async function dispatch(work: Work, confined = false) {
     try {
       const queued = await registeredReview(config, [work.key, 'reviewer'], { work: [work] }, mutate, async () => assert.fail('confined caller attempted a launch'));
       assert.equal(queued.queued, true);
-      assert.equal(queued.requestId, request.id);
+      assert.equal((queued as { previous?: string }).previous, request.id, 'master review renews the request');
     } finally { delete process.env.GRAPHYARD_CONFINEMENT; }
   }
   let calls = 0, dispatchCalls = 0;
