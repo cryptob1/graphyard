@@ -19,6 +19,7 @@ import * as revoke from './revoke.js';
 import * as rework from './rework.js';
 import * as session from './session.js';
 import * as submit from './submit.js';
+import * as taste from './taste.js';
 import * as unblock from './unblock.js';
 import * as windowCommand from './window.js';
 import * as workspace from './workspace.js';
@@ -26,5 +27,5 @@ import * as workspace from './workspace.js';
 /** Every command, one entry each. `run.ts` wraps them all in the same receipt, authorization and save. */
 export const table: Record<Command, Entry> = {
   create, ready, priority, requirements, unblock, rework, claim, heartbeat, release, workspace, submit, blocked, defer,
-  window: windowCommand, hold, message, evidence, reading, revoke, session, request, resubmit,
+  window: windowCommand, hold, message, evidence, reading, revoke, session, request, resubmit, taste,
 };

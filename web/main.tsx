@@ -16,6 +16,7 @@ import { initialView } from './pages/setup';
 import { requestedView } from '../src/model/setup-checklist';
 const itemLink = (hash: string) => /^#([A-Z][A-Z0-9]*-[A-Z0-9]+)$/.exec(hash)?.[1] ?? null;
 import { idempotencyKey } from './idempotency-key';
+import { poll } from './poll';
 import { ShippedToast } from './fun';
 import { applyTheme } from './theme';
 import { boot } from './boot';
@@ -38,6 +39,8 @@ function App() {
   // The last snapshot's cursor (GY-3231): a poll asks for what changed since it, and a delta answer
   // keeps the settled summaries it already holds, so a poll carries the open items, not the ledger.
   const snapshotCursor = useRef('');
+  // A mutation refresh supersedes background reads already in flight, including their errors.
+  const refreshVersion = useRef(0);
   const keepSnapshot = (items: { work: Work[]; cursor?: string; delta?: boolean }) => {
     snapshotCursor.current = items.cursor ?? '';
     setWork(previous => {
@@ -82,14 +85,14 @@ function App() {
     const items = await response.json(), served = await fetch('/api/board', { headers, signal }).then(r => r.ok ? r.json() : null, () => null); if (signal.aborted || epoch !== sessionEpoch.current) throw new Error('Superseded');
     keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError('');
   }
-  async function refresh(epoch: number) { const [items, system, served] = await Promise.all([api('work-snapshot'), api('status'), api('board').catch(() => null)]); if (epoch !== sessionEpoch.current) return; keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
+  async function refresh(epoch: number) { const version = ++refreshVersion.current; const [items, system, served] = await Promise.all([api('work-snapshot'), api('status'), api('board').catch(() => null)]); if (epoch !== sessionEpoch.current || version !== refreshVersion.current) return; keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
   // The sign-in page verifies the token first (web/pages/login.tsx); polling starts once it is accepted.
   const live = !!status;
   useEffect(() => {
     if (!live) return;
-    const controller = new AbortController(); const epoch = sessionEpoch.current; let active = true; let pending = false;
+    const controller = new AbortController(); const epoch = sessionEpoch.current; let active = true;
     const load = async () => {
-      if (pending) return; pending = true;
+      const version = refreshVersion.current;
       try {
         const read = async (path: string) => {
           const response = await fetch(`/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(15000)]) });
@@ -98,17 +101,17 @@ function App() {
           return response.json();
         };
         const [items, system, served] = await Promise.all([read(snapshotCursor.current ? `work-snapshot?since=${encodeURIComponent(snapshotCursor.current)}` : 'work-snapshot'), read('status'), read('board').catch(() => null)]);
-        if (active && epoch === sessionEpoch.current) { keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
+        if (active && epoch === sessionEpoch.current && version === refreshVersion.current) { keepSnapshot(items); keepBoard(served); setJobs(items.jobs ?? []); setObservedAt(Date.parse(items.now)); setStatus(system); setConnected(true); setLastUpdated(new Date().toLocaleTimeString()); setError(''); }
       } catch (e: any) {
-        if (!active || epoch !== sessionEpoch.current) return;
+        if (!active || epoch !== sessionEpoch.current || version !== refreshVersion.current) return;
         if (e.unauthorized) { signOut(); if (token) setError(e.message); }
         else { setConnected(false); setError('Connection unavailable. Displayed data may be stale; retrying automatically.'); }
-      } finally { pending = false; }
+      }
     };
     // A hidden tab's timers are throttled to once a minute, so returning to the tab reads at once.
-    const visible = () => { if (document.visibilityState === 'visible') void load(); };
-    void load(); const timer = setInterval(load, 5000); document.addEventListener('visibilitychange', visible);
-    return () => { active = false; controller.abort(); clearInterval(timer); document.removeEventListener('visibilitychange', visible); };
+    const polling = poll(load, 5000), visible = () => { if (document.visibilityState === 'visible') polling.now(); };
+    document.addEventListener('visibilitychange', visible);
+    return () => { active = false; controller.abort(); polling.stop(); document.removeEventListener('visibilitychange', visible); };
   }, [token, live]);
   // The browser tab names the project it serves (GY-3306): gh · OWNER/REPO from the same status
   // reply the header's project name renders, so an operator's tabs tell installs apart. Graphyard

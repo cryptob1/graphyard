@@ -9,6 +9,8 @@ export const mergeWriterTrialGround = 'merge-writer-trial-failed';
  * times`), which refuses nothing about the head and leaves it queued.
  */
 export const trialFailurePrefix = 'trial failed';
+/** GY-3423: how a feature's or bug's refusal opens when every proof already passed on the base tip. */
+export const proofPassesOnBasePrefix = `${trialFailurePrefix}: the proof already passes before the change`;
 
 /**
  * GY-1524. The ground a failed trial of the current head gives: the control plane's own merge

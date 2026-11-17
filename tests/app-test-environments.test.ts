@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import type { MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import type { MergeTrialRun } from '../src/merge-writer/executor.js';
 import type { Work } from '../src/model.js';
+import type { LifecycleExec } from '../src/app-environments.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3296: app test environments — where the app under test runs. A case naming a declared
@@ -83,7 +84,7 @@ async function fixture(options: { maxConcurrent?: number; secretsMode?: number }
   const { environmentLifecycle, environmentStatePath } = await environments();
   const lines: string[] = [];
   const stateFile = environmentStatePath(repo);
-  const lifecycle = (log = (line: string) => { lines.push(line); }) => environmentLifecycle({ stateFile, secretsFile: () => secretsFile, log });
+  const lifecycle = (log = (line: string) => { lines.push(line); }, exec?: LifecycleExec) => environmentLifecycle({ stateFile, secretsFile: () => secretsFile, log, exec });
   const calls = async () => existsSync(join(provider, 'calls.log')) ? (await readFile(join(provider, 'calls.log'), 'utf8')).trim().split('\n') : [];
   return { home, repo, provider, configHome, secretsFile, app, url, base, candidate, stateFile, lifecycle, lines, calls };
 }
@@ -225,28 +226,29 @@ test('e2e:app-test-environments — a provisioning outage and a teardown failure
   assert.ok(fx.lines.every(line => !line.includes(sentinel)));
 });
 
-test('e2e:app-test-environments — after a loop restart, list reaps a leaked owned instance and preserves the active one', async () => {
+/** A deferred made before the run that awaits it: its release exists whenever the body starts, however late. */
+const deferred = () => { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve; }); return { promise, release }; };
+
+/** A loop dies with an instance running; the restarted loop reaps it and an unrecorded owned one, keeps its own active instance, and tears it down when done. */
+async function restartScenario(exec?: LifecycleExec) {
   const fx = await fixture({ maxConcurrent: 3 });
-  const { declaredEnvironments, trustedCheckout } = await environments();
+  const { declaredEnvironments, trustedCheckout, readEnvironmentState } = await environments();
   const definition = declaredEnvironments(git(fx.repo, ['show', `${fx.base}:graphyard.json`])).staging!;
   const cwd = await trustedCheckout(async (args, env) => git(fx.repo, args, env), fx.repo, fx.base);
 
   // The old loop provisioned an instance and died with it running.
-  const crashed = fx.lifecycle();
-  let never!: () => void;
-  void crashed.use('staging', definition, fx.candidate, cwd, () => new Promise<void>(resolve => { never = resolve; }), () => true);
-  const { readEnvironmentState } = await environments();
+  const crashed = fx.lifecycle(undefined, exec), never = deferred();
+  void crashed.use('staging', definition, fx.candidate, cwd, () => never.promise, () => true);
   while (!readEnvironmentState(fx.stateFile).instances[0]?.url) await new Promise(resolve => setTimeout(resolve, 20));
   const leaked = readEnvironmentState(fx.stateFile).instances[0]!.runId;
   // And an owned instance the state file never recorded (the loop died before writing it).
   await writeFile(join(fx.provider, 'instances', 'inst-orphan'), 'gy-orphan');
 
-  // The restarted loop reaps both before it provisions its own instance.
-  const restarted = fx.lifecycle();
-  let finish!: () => void;
-  const active = restarted.use('staging', definition, fx.candidate, cwd, async () => {
-    await new Promise<void>(resolve => { finish = resolve; });
-  }, () => true);
+  // The restarted loop reaps both before it provisions its own instance. Its body may start well
+  // after up logs its first line (GY-3359: under load it had not when finish() ran), so the run is
+  // released through a deferred that exists before use() is called, never one the body assigns.
+  const restarted = fx.lifecycle(undefined, exec), finish = deferred();
+  const active = restarted.use('staging', definition, fx.candidate, cwd, () => finish.promise, () => true);
   while ((await fx.calls()).filter(line => line.startsWith('up')).length < 2) await new Promise(resolve => setTimeout(resolve, 20));
   const calls = await fx.calls();
   const mine = runIdOf(calls.filter(line => line.startsWith('up'))[1]);
@@ -257,11 +259,21 @@ test('e2e:app-test-environments — after a loop restart, list reaps a leaked ow
   assert.deepEqual(await restarted.reconcile('staging', definition, cwd, { PROVIDER_DIR: fx.provider, PROVIDER_TOKEN: sentinel, APP_URL: fx.url }), [], 'nothing left to reap');
   assert.deepEqual(await readdir(join(fx.provider, 'instances')), [`inst-${mine}`], 'the active instance is preserved');
   assert.deepEqual(readEnvironmentState(fx.stateFile).instances.map(entry => entry.runId), [mine]);
-  // The second up logs its first line before its script exits, so the body that sets `finish` can
-  // start a moment later than the assertions above; wait for it as the file's other waits do.
-  while (typeof finish !== 'function') await new Promise(resolve => setTimeout(resolve, 20));
-  finish(); await active; never();
+  finish.release(); await active; never.release();
   assert.deepEqual(await readdir(join(fx.provider, 'instances')), [], 'the active run tears down its own instance when done');
+}
+
+test('e2e:app-test-environments — after a loop restart, list reaps a leaked owned instance and preserves the active one', () => restartScenario());
+
+test('unit:app-test-environments-pinned — the restart case holds when the restarted run\'s body starts long after up has logged', async () => {
+  // The loaded host's timing, made certain: every up returns 300 ms after its script finished, so
+  // the body starts after the case has already asserted on the running instance and released it.
+  const { shellExec } = await environments();
+  await restartScenario(async (command, options) => {
+    const out = await shellExec(command, options);
+    if (command.includes('up.sh')) await new Promise(resolve => setTimeout(resolve, 300));
+    return out;
+  });
 });
 
 test('e2e:app-test-environments — secrets are 0600 and masked from candidate, worker and reviewer paths; merge trials leave environment cases to the gate', async () => {
