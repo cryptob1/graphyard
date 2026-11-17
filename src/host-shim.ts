@@ -28,23 +28,27 @@ export const hostProbeScript = [
 /** The warm image a host runs shards in: the trial image's digest and the lockfile's hash (`none` without one). */
 export const warmImagePattern = /^graphyard-warm:[0-9a-f]{12}-(?:[0-9a-f]{12}|none)$/;
 
-export const hostShimScript = `#!/usr/bin/python3 -I
+export const hostShimScript = `#!/bin/sh
 # graphyard-host-shim: the only command Graphyard's SSH key may run here (graphyard host prepare).
+refuse() { echo "graphyard-host-shim refuses: $SSH_ORIGINAL_COMMAND" >&2; exit 1; }
+[ $# -eq 0 ] || { [ $# -eq 2 ] && [ "$1" = --home ]; } || refuse
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
+case "$SSH_ORIGINAL_COMMAND" in
+  probe)
+    echo "user $(id -u) $(id -Gn)"
+${hostProbeScript.split('\n').map(line => `    ${line}`).join('\n')}
+    ;;
+  receive-pack\\ *|receive-image\\ *|prepare-run\\ *|run-shard\\ *|fetch-records\\ *|clean\\ *)
+    # The verbs that take arguments, validated and run in Python.
+    exec python3 -I -c "$(cat <<'GRAPHYARD_VERBS'
 import json, os, re, shutil, subprocess, sys, tempfile, time
 LAUNCHER = ${JSON.stringify(trialLauncher)}
-PROBE = ${JSON.stringify(hostProbeScript)}
 asked = os.environ.get('SSH_ORIGINAL_COMMAND', '')
 def refuse():
     sys.stderr.write('graphyard-host-shim refuses: ' + asked + '\\n')
     sys.exit(1)
-home = os.path.expanduser('~')
-if len(sys.argv) == 3 and sys.argv[1] == '--home':
-    home = sys.argv[2]
-elif len(sys.argv) != 1:
-    refuse()
-runtime = '/run/user/%d' % os.getuid()
-os.environ['XDG_RUNTIME_DIR'] = runtime
-os.environ['DOCKER_HOST'] = 'unix://' + runtime + '/docker.sock'
+home = sys.argv[2] if len(sys.argv) == 3 else os.path.expanduser('~')
 words = asked.split(' ')
 verb, args = words[0], words[1:]
 NAME = r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}'
@@ -52,7 +56,7 @@ SHA = r'[0-9a-f]{40}(?:[0-9a-f]{24})?'
 RUN = r'trial-[A-Za-z0-9_]{6,40}'
 IMAGE = ${JSON.stringify(warmImagePattern.source.slice(1, -1))}
 INDEX = r'[1-9][0-9]{0,3}'
-SHAPES = {'probe': [], 'receive-pack': [NAME, SHA], 'receive-image': [IMAGE], 'prepare-run': [NAME, SHA, IMAGE],
+SHAPES = {'receive-pack': [NAME, SHA], 'receive-image': [IMAGE], 'prepare-run': [NAME, SHA, IMAGE],
           'run-shard': [RUN, INDEX], 'fetch-records': [RUN, INDEX], 'clean': [RUN]}
 if verb not in SHAPES or len(args) != len(SHAPES[verb]) or not all(re.fullmatch(shape, arg) for shape, arg in zip(SHAPES[verb], args)):
     refuse()
@@ -61,8 +65,6 @@ def quiet(*command, **options):
     return subprocess.call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **options) == 0
 def has_image(image):
     return quiet('docker', 'image', 'inspect', image)
-if verb == 'probe':
-    sys.exit(subprocess.call(['sh', '-c', 'echo "user $(id -u) $(id -Gn)"\\n' + PROBE]))
 if verb in ('receive-pack', 'prepare-run'):
     mirror = os.path.join(mirrors, args[0] + '.git')
     if not os.path.isdir(mirror):
@@ -140,4 +142,8 @@ else:
         sys.stdout.flush()
         sys.exit(subprocess.call([sys.executable, '-I', '-S', '-c', LAUNCHER, json.dumps(spec)] + command,
                                  env={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': '/tmp', 'CI': '1'}))
+GRAPHYARD_VERBS
+)" "$@" ;;
+  *) refuse ;;
+esac
 `;

@@ -29,7 +29,9 @@ test(`${proof} — host prepare installs the shim as the only command of this ma
   assert.match(script, /gpasswd -d "\$user" docker/);
   assert.match(script, /dockerd-rootless-setuptool\.sh install/, 'rootless Docker');
   const installed = /<<'GRAPHYARD_SHIM'\n([\s\S]*?)GRAPHYARD_SHIM\n/.exec(script)![1]!;
-  assert.equal(spawnSync('python3', ['-c', 'import ast, sys; ast.parse(sys.stdin.read())'], { input: installed }).status, 0, 'the installed shim is valid Python');
+  assert.equal(spawnSync('sh', ['-n'], { input: installed }).status, 0, 'the installed shim is valid sh');
+  const verbs = /<<'GRAPHYARD_VERBS'\n([\s\S]*?)GRAPHYARD_VERBS\n/.exec(installed)![1]!;
+  assert.equal(spawnSync('python3', ['-c', 'import ast, sys; ast.parse(sys.stdin.read())'], { input: verbs }).status, 0, 'its verbs are valid Python');
 });
 
 test(`${proof} — a plain shell command, another user's files, docker run with the root filesystem and any malformed verb are refused`, () => {

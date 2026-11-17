@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { HostDroppedError, readRemoteShardRuns, readShardHosts, realFreeCores, remoteShardSummary, runShardsOnHosts, type HostReading, type PlacedHost } from '../src/merge-writer/remote-shards.js';
 import { runTrial } from '../src/merge-writer/trial.js';
+import { trialHotCelsius } from '../src/merge-writer/trial-load.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { shardHosts, shardRepository } from './helpers/shard-hosts.js';
 
@@ -81,8 +82,8 @@ test(`${proof} — the shim's probe reads a host's cores, load, steal and hottes
     throw new Error('no Docker here');
   };
   const [here, box, gone] = await readShardHosts(['gy-compute@box', 'gy-compute@gone'], run, 8);
-  assert.deepEqual({ ...here!, name: 'here' }, { name: 'here', cores: 8, busy: 0, steal: 0, celsius: null, limit: 95, away: false });
-  assert.deepEqual(box, { name: 'gy-compute@box', cores: 16, busy: 3.5, steal: 0.1, celsius: 71, limit: 95, away: false });
+  assert.deepEqual({ ...here!, name: 'here' }, { name: 'here', cores: 8, busy: 0, steal: 0, celsius: null, limit: trialHotCelsius, away: false });
+  assert.deepEqual(box, { name: 'gy-compute@box', cores: 16, busy: 3.5, steal: 0.1, celsius: 71, limit: trialHotCelsius, away: false });
   assert.equal(gone!.away, true);
 });
 
