@@ -27,7 +27,7 @@ import { slotsDirectoryVariable, waitStep, withHeavyJob } from '../master/verifi
 import { adoptTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
-import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { cpuPressureHeld, trialCapNow } from './cpu-pressure.js';
@@ -186,18 +186,20 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
 }
 
 /**
- * GY-3140: the due heads a recorded base failure on main's current tip holds out of trial, and that
- * failure's reason. Nothing is held when no base failure is recorded, the tip has moved past it,
- * the checkout cannot be read, or the reads carry no git.
+ * GY-3140, GY-3451: the due heads a recorded base failure holds out of trial, and that failure's
+ * reason. The failure stands until main changes the failing tests or the files they select
+ * (`standingBaseFailure`), so a merge that leaves main red frees nothing. A hotfix or base repair
+ * item is the master's own base fix and is never held. Nothing is held when no base failure is
+ * recorded, the checkout cannot be read, or the reads carry no git.
  */
 async function baseFailureHolds(reads: MergeWriterReads, ledger: Readonly<Record<string, MergeLedgerState>>, due: readonly Work[]): Promise<{ held: Set<string>; reason: string }> {
   const none = { held: new Set<string>(), reason: '' };
   if (!reads.git || !due.length || !Object.values(ledger).some(entry => entry.state === 'refused' && entry.refusal?.reason.startsWith(baseFailurePrefix))) return none;
   try {
-    const tip = (await reads.fetch()).toLowerCase(), failure = standingBaseFailure(ledger, tip);
+    const git = reads.git, tip = (await reads.fetch()).toLowerCase(), failure = await standingBaseFailure(args => git(args), ledger, tip);
     if (!failure) return none;
-    const git = reads.git;
-    return { held: await heldByBaseFailure(args => git(args), tip, failure, due.map(work => ({ id: work.id, head: work.candidate!.sha.toLowerCase() }))), reason: failure.reason };
+    const heads = due.filter(work => !isHotfix(work) && !isBaseRepair(work)).map(work => ({ id: work.id, head: work.candidate!.sha.toLowerCase() }));
+    return { held: await heldByBaseFailure(args => git(args), tip, failure, heads), reason: failure.reason };
   } catch { return none; }
 }
 
@@ -1049,19 +1051,19 @@ export async function mergeWriterStep(cycle: Cycle) {
       const queue = mergeQueue(free.filter(item => !held.has(item.key)), ledger, now());
       // GY-3353: every head keeps its oldest-first place, a timed-out one included: moved behind each newer arrival, it never came round again.
       const ordered = queue.queue;
-      const summary = ordered.slice(0, mergeWriterKeptQueue);
+      // GY-3140, GY-3451: while a base failure stands on main, a head that cannot repair it starts no trial: it is refused with the base failure at once and stays queued, shown waiting for a green base, and is trialled once main changes what fails.
+      const holding = await baseFailureHolds(reads, ledger, queue.due);
+      const summary = ordered.slice(0, mergeWriterKeptQueue).map(entry => holding.held.has(entry.id) ? { ...entry, waiting: `a green ${reads.baseBranch}: ${holding.reason}`.slice(0, 500) } : entry);
       if (JSON.stringify(summary) !== JSON.stringify(writer.queue)) { writer.queue = summary; changed = true; }
       // GY-2079: a timeout record whose head the queue no longer holds goes with it.
       const kept = writer.timeouts.filter(entry => busy.has(entry.key) || ordered.some(queued => queued.key === entry.key && queued.head === entry.head));
       if (kept.length !== writer.timeouts.length) { writer.timeouts = kept; changed = true; }
-      // GY-3140: while a base failure stands on main's tip, a head that cannot repair it starts no trial: it is refused with the base failure at once and stays queued, trialled once the tip moves on.
-      const holding = await baseFailureHolds(reads, ledger, queue.due);
       for (const work of queue.due.filter(entry => holding.held.has(entry.id))) {
         const head = work.candidate!.sha.toLowerCase(), prior = ledger[work.key];
         if (prior?.state === 'refused' && prior.head === head && prior.refusal?.reason === holding.reason) continue;
         await record(work, { kind: 'refused', head, reason: holding.reason });
         performed.push(storeAction(state, `merge-writer-base-hold:${work.key}:${head}`, { kind: 'merge', work: work.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
-          detail: `Held ${work.key} head ${head} without a trial: ${reads.baseBranch} fails on its tip and the head touches neither the failing tests nor the files they select (${holding.reason.slice(0, 500)}); it is trialled once ${reads.baseBranch} moves on` }));
+          detail: `Held ${work.key} head ${head} without a trial: ${reads.baseBranch} fails and the head touches neither the failing tests nor the files they select (${holding.reason.slice(0, 500)}); it waits for a green ${reads.baseBranch} and is trialled once ${reads.baseBranch} changes what fails` }));
         changed = true;
       }
       const runnable = ordered.filter(entry => !holding.held.has(entry.id));
