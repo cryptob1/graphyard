@@ -18,6 +18,7 @@ import { defaultMergeWriterParallel, mergeWriterSettings, trialTimeoutMinutes } 
 import { mergeStallMs } from '../model/merge-ledger.js';
 import { mergeSubject, trialMerge, TrialCancelledError, TrialTimeoutError, trialHiddenPaths, trialHostFaultHost, trialHostFaultPrefix, trialNetworkPoolFault, trialSandboxFault } from '../merge-writer/trial.js';
 import { trialRepositoryImageFault } from '../merge-writer/repository-trial-image.js';
+import { trialImageMissingFault } from '../install/trial-image.js';
 import { awaitsMerge } from '../model/merge-queue.js';
 import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import type { PreviewCaseRun } from '../merge-writer/served-previews.js';
@@ -29,7 +30,7 @@ import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-fai
 import { baseFailureHoldMs, baseFailurePrefix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
-import { cpuPressureHeld } from './cpu-pressure.js';
+import { cpuPressureHeld, trialCapNow } from './cpu-pressure.js';
 import { reportTrialHostFault, reportTrialImageFault, reportTrialNetworkFault, reportTrialSandboxFault } from './control-plane.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
@@ -43,6 +44,8 @@ export interface MergeWriterReads extends MergePorts {
    * every due merge starts.
    */
   admit?(): boolean;
+  /** GY-3328: provisions the image trials run when this host lacks it, before a detached trial launches (install/trial-image.ts `ensureTrialImage`); absent, nothing is provisioned. */
+  ensureTrialImage?(): Promise<void>;
   /** GY-3304: the host's heavy-work drain (`master drain`), or null; while it stands no new merge, revert or batch-gate trial starts. Absent, never drained. */
   drain?(): HeavyDrain | null;
   /** GY-3120: how many queued heads are trialled at once, each alone on the current tip (`run.mergeWriter.parallel`); absent, one. */
@@ -88,6 +91,8 @@ export interface MergeWriterReads extends MergePorts {
   /** GY-3159: stops a detached trial run nobody will read; best effort. */
   stopTrialRun?(ref: { directory: string }): void;
 }
+/** GY-3328: the attention row a trial host missing its trial image raises; master status shows it while it stands. */
+export const trialImageKey = 'merge-writer:trial-image';
 /** The idempotency key one recorded step keeps across retries. */
 export { mergeRecordKey } from '../merge-writer/executor.js';
 
@@ -689,6 +694,7 @@ function mergeFlightTrials(reads: MergeWriterReads, state: DaemonState, persist:
       handle.cancel(`the base tip moved under ${item.key}'s landing, so the adopted trial of ${handle.mergeSha.slice(0, 12)} no longer names its merge commit`);
     }
     if (!launch) return reads.trial(mergeSha, files, item, baseTip, onStep, onTiming, heads, share, signal, timeoutMs);
+    await reads.ensureTrialImage?.();
     const launched = launch({ key: item.key, head: heads?.[0]?.head ?? mergeSha, mergeSha,
       baseTip: baseTip?.toLowerCase() ?? null, changedFiles: [...files], proofs: criterionProofs(item), e2eProofs: e2eProofsOf(item),
       reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeoutMs, reads.cores), ...(share === 1 && reads.cores ? { cores: reads.cores } : {}) });
@@ -879,6 +885,10 @@ export async function mergeWriterStep(cycle: Cycle) {
             const counted = countTrialTimeout(writer, { key: itemKey, id, head }, at(), timeoutFiles(error), writer.queue.some(entry => entry.key !== itemKey));
             action('failed', counted.reason ? `Merge of ${itemKey} head ${head} timed out its trial ${counted.count} times while other heads passed or waited (${error.message}); the head is refused once this cycle has settled the intent its trial left open, and returns to a worker`
               : `Merge of ${itemKey} head ${head} timed out in its trial (${error.message}); a timeout measures the host, not the merge, so the head stays queued in its place and is tried again`);
+          } else if (trialImageMissingFault(error)) {
+            // GY-3328: the host lacks the trial image and could not provision it: no verdict on the head, one attention line until a trial runs again.
+            action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
+            storeAction(state, trialImageKey, { kind: 'attention', work: null, principal: null, state: 'failed', detail: trialImageMissingFault(error)!.slice(0, 1900), attempts: (state.actions[trialImageKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
           } else if (trialOverloadFault(error)) {
             action('failed', `Merge of ${itemKey} head ${head} stopped on ${message(error)}; no rework; the same head retries until three overloaded trials raise a blocker to the master`);
             const attentionKey = `trial-overload:${itemKey}:${head}`;
@@ -910,6 +920,7 @@ export async function mergeWriterStep(cycle: Cycle) {
         }
         const { outcome } = result;
         settledNow.add(itemKey);
+        if (state.actions[trialImageKey]?.state === 'failed') delete state.actions[trialImageKey];
         if (outcome.outcome === 'merged' || outcome.outcome === 'reconciled') {
           writer.lastMergeAt = at();
           // GY-2079: this head's trial passed — the timed-out heads' evidence that the host completes trials.
@@ -988,7 +999,10 @@ export async function mergeWriterStep(cycle: Cycle) {
   // trial started now would die in that restart and run again (12 of 17 merges on 2026-10-18 lost one so).
   // GY-3182: a slot free beside running flights starts the next due head now, without waiting for them
   // to settle; the heads they carry are out of the queue and their open intents out of the reconcile.
-  const parallel = trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory));
+  // GY-3401: at the CPU temperature limit, half the cap; the figures ride the CPU reading to master status and the Workers page.
+  const fullCap = trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory));
+  const parallel = trialCapNow(state, fullCap);
+  if (state.cpuPressure) state.cpuPressure.trialCap = { now: parallel, full: fullCap };
   const gateSlots = batchGateBusySlots(state);
   const busy = new Set([...live].flatMap(flight => flight.keys ?? [flight.key]));
   if (busy.size + gateSlots < parallel && ![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.unconfirmed?.length
@@ -1051,10 +1065,10 @@ export async function mergeWriterStep(cycle: Cycle) {
       // At the cap of unconfirmed reworks nothing new starts: the plane is not taking the writer's decisions.
       const owed = queue.blockedBy ? null : snapshot.work.find(entry => entry.id === runnable[0]?.id) ?? null;
       const next = writer.reworks.length >= mergeWriterKeptReworks ? null : owed;
-      // GY-3122: below the disk floor no new trial starts; one in flight settles. GY-3348: so does
-      // a saturated CPU — the trial would time out into rework, the episode this reading answers.
+      // GY-3122: below the disk floor no new trial starts; one in flight settles. A saturated or hot
+      // CPU lowers `parallel` above instead (GY-3348, GY-3401).
       // GY-3304: nor while the host's heavy work is drained; the queue keeps every head and its gates.
-      const due = next?.candidate && !state.diskHeadroom && !cpuPressureHeld(state) && !reads.drain?.() && (reads.admit?.() ?? true) ? next : null;
+      const due = next?.candidate && !state.diskHeadroom && !reads.drain?.() && (reads.admit?.() ?? true) ? next : null;
       // GY-3120: the first `parallel` heads in queue order are trialled at once, each alone on the current tip; the flight is named by the first.
       // GY-3182: a new flight fills only the slots the running flights leave free.
       const heads = runnable.map(entry => queue.due.find(work => work.id === entry.id)).filter((work): work is Work => !!work).slice(0, parallel - busy.size - gateSlots);

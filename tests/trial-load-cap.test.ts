@@ -38,7 +38,7 @@ async function machine(label: string) {
   };
   const launch = (load: { cap?: number; order?: number } = {}) => {
     const [program, ...words] = trialContainerLaunch({ image: 'graphyard-trial:local', mounts: [[base, '/scratch', false]], network: 'none',
-      load: { slots: join(base, 'slots'), cap: load.cap ?? 2, order: load.order ?? trialStartOrder.merge, hotCelsius: 95, floorBytes: 30e9, hwmon, pressureBoundSeconds: 600, waitBoundSeconds: null } });
+      load: { slots: join(base, 'slots'), cap: load.cap ?? 2, order: load.order ?? trialStartOrder.merge, hotCelsius: 95, floorBytes: 30e9, hwmon, pressureBoundSeconds: 600 } });
     const child = spawn(program!, [...words, 'sleep', '600'], { cwd: base, env: { PATH: `${bin}:/usr/bin:/bin` }, stdio: ['ignore', 'ignore', 'pipe'] });
     let said = '';
     child.stderr!.on('data', chunk => { said += chunk; });

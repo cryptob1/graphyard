@@ -1,0 +1,15 @@
+{
+  "id": "trial-timing-tests-under-load",
+  "title": "Hung-file and serve-output trials pass on a busy host",
+  "description": "Run both regressions with four CPU burners per available core (96 on a 24-core host). The hung file must fail by name while the finishing file passes; both serve failures must keep all output and remove read-only scratch. Burners are stopped when the tests finish, including failures.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "trial timing regressions with every core saturated",
+      "run": "python3 - <<'PYLOAD'\nimport os, signal, subprocess\ndef stop(signum, frame):\n    raise SystemExit(1)\nsignal.signal(signal.SIGTERM, stop)\nburners = []\ntry:\n    for core in sorted(os.sched_getaffinity(0)):\n        for _ in range(4):\n            burners.append(subprocess.Popen(['taskset', '-c', str(core), 'sh', '-c', 'while :; do :; done']))\n    print(f'Running with {len(burners)} CPU burners', flush=True)\n    result = subprocess.run(['node', '--import', 'tsx', 'tests/helpers/run-tests.ts', '--test-name-pattern=trial-hung-test-fails-fast|e2e:trial-serve-output-kept', 'tests/trial-merge.test.ts', 'tests/trial-serve-output-kept.test.ts'])\nfinally:\n    for burner in burners:\n        burner.kill()\n    for burner in burners:\n        burner.wait()\nraise SystemExit(result.returncode)\nPYLOAD",
+      "timeoutSeconds": 1800
+    }
+  ]
+}

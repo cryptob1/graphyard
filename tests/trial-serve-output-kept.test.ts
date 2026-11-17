@@ -23,6 +23,8 @@ const printer = (exit: boolean) => `for (let i = 1; i <= 100; i++) console.log('
 // The build leaves a read-only tree in the trial's scratch, as Go's module cache does.
 const readOnlyBuild = 'mkdir -p "$TMPDIR/cache/mod/sub" && echo x > "$TMPDIR/cache/mod/sub/file" && echo y > "$TMPDIR/cache/mod/file" && chmod 0444 "$TMPDIR/cache/mod/sub/file" "$TMPDIR/cache/mod/file" && chmod 0555 "$TMPDIR/cache/mod/sub" "$TMPDIR/cache/mod" "$TMPDIR/cache"';
 
+// Leave startup and the full trial room on a saturated host; the output and cleanup
+// assertions, rather than a short wall-clock race, are the regression (GY-3386).
 async function trialOf(exit: boolean) {
   const scratch = await temporaryDirectory('trial-serve-output', tmpdir());
   const root = join(scratch, 'repo');
@@ -30,7 +32,7 @@ async function trialOf(exit: boolean) {
   const write = (path: string, content: string) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), content); };
   gitIn(root, 'init', '-q', '-b', 'main');
   write('package.json', JSON.stringify({ name: 'fixture', scripts: { build: readOnlyBuild, test: 'node --eval 0' } }));
-  write('graphyard.json', JSON.stringify({ e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'node serve.js', url: `http://127.0.0.1:${port}`, readySeconds: 3 } } }));
+  write('graphyard.json', JSON.stringify({ e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'node serve.js', url: `http://127.0.0.1:${port}`, readySeconds: 30 } } }));
   write('serve.js', printer(exit));
   write('e2e/cases/home.json', JSON.stringify(homeCase));
   gitIn(root, 'add', '-A'); gitIn(root, 'commit', '-q', '-m', 'base');
@@ -40,7 +42,8 @@ async function trialOf(exit: boolean) {
   const runDirectory = join(scratch, 'run'), temporaryRoot = join(scratch, 'tmp');
   mkdirSync(runDirectory); mkdirSync(temporaryRoot);
   const run = await runMergeTrial({ root, base: join(scratch, 'managed'), mergeSha: merged.mergeSha, changedFiles: ['serve.js'], proofs: [], e2eProofs: ['e2e:home'], proofFiles: [],
-    timeoutMs: 180_000, key: 'GY-3343', environment: { PATH: process.env.PATH!, HOME: process.env.HOME! }, retries: 0, runDirectory, temporaryRoots: [temporaryRoot] });
+    // The non-answer is intentional; host overload must not replace the serve verdict.
+    cpu: () => null, timeoutMs: 600_000, key: 'GY-3343', environment: { PATH: process.env.PATH!, HOME: process.env.HOME! }, retries: 0, runDirectory, temporaryRoots: [temporaryRoot] });
   return { run, runDirectory, temporaryRoot };
 }
 
@@ -65,7 +68,7 @@ function assertNoLeftover(run: Awaited<ReturnType<typeof trialOf>>['run'], tempo
 
 test('e2e:trial-serve-output-kept — a serve command that never answers keeps its output and the read-only scratch goes', async () => {
   const { run, runDirectory, temporaryRoot } = await trialOf(false);
-  assertKept(run, runDirectory, /did not answer .* within 3s/);
+  assertKept(run, runDirectory, /did not answer .* within 30s/);
   assertNoLeftover(run, temporaryRoot);
 });
 

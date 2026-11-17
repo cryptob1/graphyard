@@ -8,14 +8,15 @@ import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { standingStepFailures, workerGrowthKey, masterLaunchKey, masterLaunchBackoffAfter } from '../daemon/cycle.js';
 import { fetchRefusalKey } from '../daemon/cycle-batch-gate.js';
-import { cpuPressureHeld, cpuWaitingLine } from '../daemon/cpu-pressure.js';
-import { profileHealth } from '../daemon/sessions.js';
+import { cpuWaiting } from '../daemon/cpu-pressure.js';
+import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
 import { heavyDrainLine, heavyJobsDirectory, readHeavyDrain } from '../master/verification-slots.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
-import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
+import { mergeWriterSummary, trialImageKey } from '../daemon/cycle-merge-writer.js';
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
-import { gateRecordPath, gateSummary, readGateRecord } from '../batch-gate.js';
+import { gateRecordPath, gateHoldAttention, gateSummary, readGateRecord } from '../batch-gate.js';
+import { thisWeekReport } from '../project-memory.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage, waitingReason } from '../model/plain-stage.js';
@@ -32,9 +33,9 @@ import { blockerEscalationMinutes, parkedOnHuman } from '../model/human-request.
 import { blockerSince } from '../model/work.js';
 import { formatAge } from '../model/duration.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
-import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
 import { isPlaceholderServe, placeholderServeRefusal } from '../model/onboarding-work.js';
-import { backedOffProfiles, readDispatchCursor } from '../dispatch/cursor.js';
+import { backedOffProfiles, readDispatchCursor, type DispatchCursor } from '../dispatch/cursor.js';
+import { liveReviewRequest } from '../model/dispatch.js';
 
 /** GY-3105: an item's whole non-routine ledger, oldest first, paged by cursor to the end; null when any page cannot be read. */
 export async function itemLedger(masterApi: (path: string) => Promise<any>, id: string): Promise<SpeedEvent[] | null> {
@@ -144,11 +145,19 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       events: await itemLedger(masterApi, item.id) })));
   const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000, session?.session ?? null);
   // GY-3208: while onboarding's placeholder is the declared serve, no case exercises the application.
+  // GY-3387: judged from graphyard.json at main's tip, not the checkout's working tree, which can lag main.
   let placeholder = false;
-  try { placeholder = isPlaceholderServe(checkoutRepositoryPolicy(root).e2e.serve); } catch { /* an unparseable graphyard.json declares no serve */ }
+  try { placeholder = !!report.main && isPlaceholderServe(JSON.parse(String(await run('git', ['-C', root, 'show', `${report.main}:graphyard.json`]))).e2e?.serve); } catch { /* main holds no parseable graphyard.json: no serve declared */ }
   // GY-3235: a profile skipped after failing its launch probe twice, with the cause, while its backoff stands.
-  const backedOff = backedOffProfiles(await readDispatchCursor(root, master).catch(() => ({ profileBackoff: {} })), now)
+  const cursor = await readDispatchCursor(root, master).catch(() => null);
+  const backedOff = backedOffProfiles(cursor ?? { profileBackoff: {} }, now)
     .map(entry => ({ subject: `${entry.role} profile ${entry.profile}`, text: `Backed off until ${entry.until}, the next profile launches instead: ${entry.cause}`, next: 'Grant the path the launch probe names; the profile is tried again once its backoff ends' }));
+  // GY-3413: an item whose worker launch failed the same way twice waits out its backoff, one line naming the reason and the retry.
+  const launchFailures = (state ? repeatedLaunchFailures(state, now) : []).flatMap(entry => {
+    const item = open.find(candidate => candidate.id === entry.id);
+    return item ? [{ subject: item.key, text: `${item.key}'s worker launch failed ${entry.failures} times with the same reason, so it is not relaunched until ${entry.until}: ${entry.reason}`,
+      next: `Repair the cause the reason names; the loop launches ${item.key} again once its backoff ends` }] : [];
+  });
   const reworked = reworkAttention(open);
   // GY-3331: a product review that could not run, one line per item — the fault is the launch's
   // or the reviewer's own environment, retried on another eligible reviewer, never the worker's.
@@ -163,6 +172,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const drain = readHeavyDrain(heavyJobsDirectory());
   const drained = drain ? [{ subject: 'heavy work', text: heavyDrainLine(drain), next: 'graphyard master resume once the quiet window is over' }] : [];
   const growth = state?.actions[workerGrowthKey]?.state === 'failed' ? [{ subject: 'worker pool', text: state.actions[workerGrowthKey]!.detail, next: 'Fix the cause named; the next loop cycle adds the missing worker profiles and clears this' }] : [];
+  // GY-3328: the trial host lacks the trial image and could not provision it, until a trial runs again.
+  const trialImageFault = state?.actions[trialImageKey]?.state === 'failed' ? [{ subject: 'trial image', text: state.actions[trialImageKey]!.detail, next: 'Fix Docker on the trial host as the error names; the next merge trial provisions the image again and clears this' }] : [];
   // GY-3336: the remote refusing the fetch of the base branch — one line quoting the remote's
   // refusal and the fix — while the loop's backoff stands.
   const fetchRefused = state?.actions[fetchRefusalKey]?.state === 'failed' ? [{ subject: 'the repository', text: state.actions[fetchRefusalKey]!.detail, next: 'Authorise the merge writer\'s access as the line names; the loop fetches again once its backoff passes and clears this' }] : [];
@@ -181,10 +192,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     text: `${message.from} wrote ${formatAge(message.at, now)} ago: ${message.text}`, next: master.peers?.some(peer => peer.name === message.from)
       ? `Act on it, then graphyard master send ${message.from} --reply ${message.id} TEXT (or master reply ${message.id} TEXT to dismiss it without sending)` : `Act on it, then graphyard master reply ${message.id} TEXT` }));
   const stepFailureAttention = standingStepFailures(state ?? { actions: {} }).map(detail => ({ subject: 'the master loop', text: detail, next: 'Read the loop journal for the failing step and repair its cause; the alert clears on the first cycle the step succeeds' }));
+  // GY-3383: the gate record once — a held batch gate is one attention line naming the hold and its reason.
+  const gateRecord = readGateRecord(gateRecordPath(root));
+  const heldGateAttention = gateHoldAttention(gateRecord, now);
   return {
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialFloorAttention(), ...stopped, ...reworked, ...couldNotRunReviews, ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...launchFailures, ...reworked, ...couldNotRunReviews, ...(cursor ? reviewLaunchAttention(open, cursor, now) : []), ...backedOff, ...unspecifiedModelAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...heldGateAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -201,11 +215,11 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     diskHeadroom: state?.diskHeadroom ?? null,
     heavyDrain: drain,
     // GY-3348: the host's CPU as the loop last read it — pressure (avg60) and steal percent, the
-    // same two figures the Workers page shows — with the one waiting line while avg60 is over the
-    // ceiling and launches are held.
+    // same figures the Workers page shows, with the hottest CPU sensor (GY-3373) — and the one
+    // waiting line while launches are held; GY-3401: each new session's test budget and the trial cap.
     cpuPressure: state?.cpuPressure
-      ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal,
-        waiting: cpuPressureHeld(state) ? cpuWaitingLine(state.cpuPressure.avg60) : null }
+      ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal, celsius: state.cpuPressure.celsius,
+        waiting: cpuWaiting(state), testBudget: state.cpuPressure.testBudget, trialCap: state.cpuPressure.trialCap }
       : null,
     // GY-3190: the latest daily report of what the loop's sweeps stopped or removed, and the disk Graphyard's leftovers hold.
     leftovers: state?.leftovers.report ?? null,
@@ -222,7 +236,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       serveRevert: serveRevert?.held ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
     // GY-3119: the batch gate on main — the verified commit that serves, the gate in flight with its current step, the last run's outcome with its reason or failing check (GY-3141), a held batch and the revert rate over the last 20 merges.
-    batchGate: gateSummary(readGateRecord(gateRecordPath(root))),
+    batchGate: gateSummary(gateRecord),
+    // GY-3399: the week's reverts beside the week's gates removed (lessons turned into code), with their items.
+    thisWeek: await thisWeekReport(root, now),
     // GY-3146: what the latest verified batch changed and how to try it.
     releaseNote: latestReleaseNote(releaseNotesPath(root)),
     // GY-3285: worker sessions running of the number the registry worker role allows (master workers N sets it).
@@ -230,6 +246,20 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     sessions,
     freeWorkers: health.filter(entry => entry.healthy).map(entry => entry.profile.name),
   };
+}
+/**
+ * GY-3421: an item whose review request the loop could not launch — every launch refused, its
+ * attempts spent, or reviewer capacity exhausted — one line naming the item, why no reviewer is
+ * eligible and what would make one eligible.
+ */
+export function reviewLaunchAttention(open: readonly Work[], cursor: Pick<DispatchCursor, 'failures' | 'abandoned' | 'capacity'>, now: number) {
+  const capacity = cursor.capacity.review && Date.parse(cursor.capacity.review.recheckAt) > now ? cursor.capacity.review : null;
+  return open.flatMap(item => {
+    const request = liveReviewRequest(item);
+    const reason = request && ((cursor.abandoned[request.id] ?? cursor.failures[request.id])?.reason ?? capacity?.reason);
+    return reason ? [{ subject: item.key, text: `${item.key}'s review of ${request.sha.slice(0, 12)} has no reviewer: ${reason}`,
+      next: `Make a reviewer account eligible — log it in, wait for its reset, or add one to the reviewer role (graphyard master registry role set reviewer ACCOUNT[,ACCOUNT…] --reason R) — then graphyard master review ${item.key}` }] : [];
+  });
 }
 /** GY-3302: each enabled account serving a role whose model names no concrete id runs its runtime's default, perhaps a free model. */
 export const unspecifiedModelAttention = (fleet: Pick<FleetView, 'accounts'> | null) => (fleet?.accounts ?? []).filter(account => account.enabled && account.roles.length).flatMap(account => {

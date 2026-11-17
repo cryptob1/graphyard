@@ -651,7 +651,7 @@ test('unit:revert-only-the-failing-item — the production filing route sends th
   const sent: (string | null)[] = [];
   const fetcher = (async (_url: string, init: RequestInit) => { sent.push(new Headers(init.headers).get('Idempotency-Key')); return new Response(JSON.stringify({ key: 'GY-3003' })); }) as unknown as typeof fetch;
   const effects = daemonEffects(root, config, { snapshot: async () => ({ work: [], now: '' }), mutate: async () => ({}), fetcher });
-  const input = { title: 'Re-land GY-1', type: 'feature', priority: 1, description: 'd', criteria: [], dependencies: [], reason: 'r' } as RelandInput;
+  const input = { title: 'Re-land GY-1', type: 'feature', priority: 1, description: 'd', why: 'w', simplest: 's', criteria: [], dependencies: [], reason: 'r' } as RelandInput;
   const answers = [await effects.mergeWriter!.createWork!(input, 'serve-reland:abc'), await effects.mergeWriter!.createWork!(input, 'serve-reland:abc')];
   assert.deepEqual(sent, ['serve-reland:abc', 'serve-reland:abc']);
   assert.deepEqual(answers, [{ key: 'GY-3003' }, { key: 'GY-3003' }]);

@@ -1,0 +1,16 @@
+{
+  "id": "heat-guard-ignores-spikes",
+  "title": "A core's brief spike holds no launch: master status shows the 60 s package average",
+  "description": "GY-3426: with a fixture hwmon whose core sensor spikes to 99C for one reading while the package stays near 61C, a minute of loop cycles leaves master status showing the averaged package temperature (61C), the full trial cap and no launches waiting — where the GY-3416 guard compared the instant spike to the limit and held every launch.",
+  "tags": ["dispatch"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "master status shows the averaged package temperature and no launches waiting",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/heat-guard-ignores-spikes.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

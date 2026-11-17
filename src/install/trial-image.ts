@@ -1,8 +1,9 @@
 import { rm } from 'node:fs/promises';
-import type { AdapterContext } from './adapters.js';
+import { fileURLToPath } from 'node:url';
+import { publishedSourceImages, type AdapterContext } from './adapters.js';
 import type { PlanAction } from './types.js';
-import { pulledTrialImageFile, trialContainerImage } from '../merge-writer/trial-container.js';
-import { shellQuote } from './transport.js';
+import { pulledTrialImageFile, trialContainerImage, trialImage } from '../merge-writer/trial-container.js';
+import { localTransport, shellQuote } from './transport.js';
 import { appArmorEnabled, trialAppArmorLoadCommand, trialAppArmorProfile, trialAppArmorProfilePath, trialAppArmorProfileText } from '../merge-writer/trial-apparmor.js';
 
 /** GY-3188: trial images build on Graphyard's own builder, so its cache is pruned without touching another project's. */
@@ -17,7 +18,7 @@ export const trialImagePlan = (ctx: AdapterContext, published: string | null): P
     [`docker buildx inspect ${trialBuilder} >/dev/null 2>&1 || docker ${trialBuilderCreateArgs.join(' ')}`, ['docker', ...trialImageBuildArgs(ctx.sourceRoot)].map(shellQuote).join(' ')].join('; ')),
 });
 /** Pulls the published trial image and names it for the release tree's trials (trial-container.ts `trialImage`); builds it here otherwise. */
-export const provisionTrialImage = async (ctx: AdapterContext, published: string | null) => {
+export const provisionTrialImage = async (ctx: Pick<AdapterContext, 'sourceRoot' | 'transport'>, published: string | null) => {
   const marker = pulledTrialImageFile(ctx.sourceRoot);
   if (published && (await ctx.transport.exec('docker', ['image', 'pull', published], { allowFailure: true, timeout: 1_800_000 })).code === 0) return ctx.transport.putFile(marker, `${published}\n`, 0o644);
   await rm(marker, { force: true });
@@ -38,3 +39,24 @@ export const provisionTrialAppArmor = async (ctx: AdapterContext, enabled = appA
     throw new Error(`AppArmor is enabled on this host, and merge trials need the ${trialAppArmorProfile} profile loaded, which needs root (${error instanceof Error ? error.message : String(error)}). Run: ${trialAppArmorLoadCommand}; then rerun the installer`);
   }
 };
+
+/** GY-3328: the trial image could not be provisioned on this host — the trial host's fault, never a head's: no verdict, no rework. */
+export const trialImageMissingPrefix = 'Trial-host fault: the trial image ';
+export const trialImageMissingFault = (error: unknown): string | null => {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.startsWith(trialImageMissingPrefix) ? message : null;
+};
+let provisioning: Promise<void> | null = null;
+/**
+ * GY-3328: the image trials run is provisioned here when this host lacks it (a new host, a pruned
+ * cache) — pulled, else built, by the install's own code. Concurrent callers wait on one provision.
+ */
+export function ensureTrialImage(root = fileURLToPath(new URL('../..', import.meta.url))): Promise<void> {
+  if (process.env.GRAPHYARD_TRIAL_IMAGE) return Promise.resolve();
+  return provisioning ??= (async () => {
+    const transport = localTransport(), image = trialImage(root);
+    if ((await transport.exec('docker', ['image', 'inspect', image], { allowFailure: true })).code === 0) return;
+    try { await provisionTrialImage({ sourceRoot: root, transport }, publishedSourceImages(root)?.trial ?? null); }
+    catch (error) { throw new Error(`${trialImageMissingPrefix}${image} is missing on this host and could not be provisioned: ${error instanceof Error ? error.message : String(error)}`); }
+  })().finally(() => { provisioning = null; });
+}

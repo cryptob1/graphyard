@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { bootstrapGate, catalogBudgetMs, catalogFits, diagnosticsIntervalMs, gateCauses, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
+import { bootstrapGate, catalogBudgetMs, catalogFits, diagnosticsIntervalMs, gateCauses, gateHoldAttention, gateHoldCoolOffMs, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, timeoutHold, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
 import { appendReleaseNote, latestReleaseNote, readReleaseNotes, releaseNote, releaseNotesPath } from '../src/release-notes.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import { batchGateStep } from '../src/daemon/cycle-batch-gate.js';
@@ -286,6 +286,7 @@ test('integration:main-batch-gate-failures — smoke, bound and core cases must 
     assert.deepEqual(outcome, { outcome: 'reverted', tip, check: 'e2e:case-3', culprit: 'GY-3', revertSha: `${'e'.repeat(39)}1` });
     assert.deepEqual(runs.slice(2).map(entry => [entry.commit, entry.checks]), [[sha(2), ['e2e:case-3']], [sha(3), ['e2e:case-3']]], 'only the failing check, on the prefixes in merge order');
     assert.deepEqual(reverted, ['GY-3']);
+    assert.deepEqual(record.reverts?.map(entry => entry.item), ['GY-3'], 'the revert is kept with its time for the week\'s count (GY-3399)');
     assert.equal(record.verified, verified, 'nothing is verified yet');
     // The recut (main now holds the revert) passing verifies it, so the other items ship.
     const recut = gatePorts(batch, () => false);
@@ -317,6 +318,85 @@ test('integration:main-batch-gate-failures — smoke, bound and core cases must 
     assert.equal(record.verified, verified, 'the last verified commit stays served');
     assert.match(gateCauses(record)[0]!.detail, /timed out twice/);
   }
+});
+
+test('e2e:batch-gate-timeout-retry — a gate held for timing out twice on a tip reruns that tip on its own once its cool-off passes, without main moving, and while held master status attention names the hold and its reason; a gate held for a failing case still waits for main to move (GY-3383)', async () => {
+  const verified = sha(1), batch = [landing(2), landing(3)], tip = sha(3);
+  let clock = Date.parse('2026-11-15T06:00:00Z');
+
+  // Two timeouts on the same tip hold it: the host, not the change, is at fault.
+  {
+    const world = gatePorts(batch, () => false, { clock });
+    world.ports.now = () => clock;
+    let slow = true;
+    const realRun = world.ports.run!;
+    world.ports.run = async (commit, checks, files, timeoutMs) => { if (slow) clock += gateLimitMs + 1; return realRun(commit, checks, files, timeoutMs); };
+    const record = bootstrapGate(repository, verified);
+    assert.equal((await runGate(world.ports, record)).outcome, 'timeout');
+    assert.equal((await runGate(world.ports, record)).outcome, 'held');
+    assert.ok(timeoutHold(record.held), 'the hold says it timed out twice');
+
+    // Within the cool-off the gate stays idle, and master status attention names the hold and its reason.
+    clock += gateHoldCoolOffMs - 1;
+    assert.equal((await runGate(world.ports, record)).outcome, 'idle', 'the held tip waits out its cool-off');
+    const attention = gateHoldAttention(record, clock);
+    assert.equal(attention.length, 1, 'one attention line while the gate is held');
+    assert.equal(attention[0]!.subject, 'the batch gate');
+    assert.match(attention[0]!.text, new RegExp(`held on ${tip.slice(0, 12)} \\(for 29m\\)`));
+    assert.match(attention[0]!.text, /timed out twice/, 'the line carries the hold\'s reason');
+    assert.match(attention[0]!.next, /cool-off/);
+
+    // Past the cool-off, with main unmoved, the gate reruns the held tip on its own and verifies it.
+    clock += 2;
+    slow = false;
+    const runs = world.runs.length;
+    const outcome = await runGate(world.ports, record);
+    assert.equal(outcome.outcome, 'verified');
+    assert.equal(record.verified, tip, 'the held tip is verified without main moving');
+    assert.equal(record.held, null, 'the expired hold is cleared');
+    assert.equal(record.attempt.timeouts, 0, 'the rerun starts with a fresh attempt');
+    assert.ok(world.runs.length > runs, 'the gate reran its checks on the held tip');
+    assert.deepEqual(gateHoldAttention(record, clock), [], 'a cleared hold raises no attention');
+  }
+
+  // A hold for a failing case never reruns its tip: it waits for main to move.
+  {
+    const world = gatePorts(batch, (_, check) => check === 'e2e:case-3', { clock });
+    world.ports.now = () => clock;
+    const record = bootstrapGate(repository, verified);
+    assert.equal((await runGate(world.ports, record)).outcome, 'reverted');
+    assert.equal((await runGate(world.ports, record)).outcome, 'held');
+    assert.ok(!timeoutHold(record.held), 'a failing-case hold is not a timeout hold');
+    clock += gateHoldCoolOffMs * 4;
+    assert.equal((await runGate(world.ports, record)).outcome, 'idle', 'past any cool-off, a failing-case hold still waits for main');
+    const attention = gateHoldAttention(record, clock);
+    assert.equal(attention.length, 1);
+    assert.match(attention[0]!.text, /still fails e2e:case-3/, 'the line carries the failing check');
+    assert.match(attention[0]!.next, /moves main off the held tip/);
+    // Main moves: the hold clears and the new tip is gated.
+    world.ports.fetch = async () => sha(9);
+    world.ports.landings = async () => [landing(9)];
+    assert.equal((await runGate(world.ports, record)).outcome, 'verified');
+    assert.equal(record.verified, sha(9), 'the moved tip is gated and verified');
+  }
+});
+
+test('integration:batch-gate-revert-fallback — a case a batch landing added is searched from that landing, since earlier prefixes lack it, and when the culprit\'s revert does not apply the gate reverts the landing that added the case instead of holding, and master status says so (GY-3409)', async () => {
+  const verified = sha(1), batch = [landing(2), landing(3), landing(4)];
+  // GY-3 adds case-3; GY-4 breaks it. The trial fails a case a commit does not hold, so sha(2) fails it too.
+  const { ports, reverted } = gatePorts(batch, (commit, check) => check === 'e2e:case-3' && commit !== sha(3));
+  ports.catalog = async commit => [sha(3), sha(4)].includes(commit) ? ['case-3'] : [];
+  const revert = ports.revert;
+  ports.revert = async (culprit, gated, check) => culprit.item.key === 'GY-4'
+    ? { held: `the revert of GY-4's merge ${culprit.sha.slice(0, 12)} does not apply cleanly` }
+    : revert(culprit, gated, check);
+  const record = bootstrapGate(repository, verified);
+  const outcome = await runGate(ports, record);
+  assert.equal(outcome.outcome, 'reverted', JSON.stringify(outcome));
+  assert.deepEqual(reverted, ['GY-3'], 'GY-2, before the case existed, is never blamed; GY-3, which added it, is reverted when GY-4\'s revert does not apply');
+  assert.equal(record.held, null, 'no hold');
+  const reason = gateSummary(record)!.lastOutcome!.reason!;
+  assert.match(reason, /^reverted GY-3 for failing e2e:case-3 \(the revert of GY-4's merge .* does not apply cleanly; reverted GY-3, which added e2e:case-3, instead\)$/);
 });
 
 test('integration:main-batch-gate-failures — on real git, the culprit\'s merge is reverted on main through the revert-and-reland path and its re-land filed, the other merges stay', async () => {

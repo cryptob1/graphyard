@@ -148,7 +148,8 @@ test('unit:runtime-canary-and-backoff — launch failures back off per runtime a
     at += wait + 1;
   }
   assert.deepEqual(waits, [60_000, 120_000, 240_000, 480_000, 960_000, 1_800_000, 1_800_000]);
-  assert.equal(Object.keys(run.state.launchBackoff).length, 1, 'nine profiles of one runtime are one back-off');
+  // GY-3413: the repeated reason also holds the item on every runtime (any:x), for the same window.
+  assert.deepEqual(Object.keys(run.state.launchBackoff), ['opencode:x', 'any:x'], 'nine profiles of one runtime are one back-off');
 
   // Another runtime still launches the item, with the backed-off runtime's accounts excluded; other items are unaffected.
   const mixed = harness([work('x', 'GY-10'), work('y', 'GY-11')]);

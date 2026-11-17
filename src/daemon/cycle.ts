@@ -39,12 +39,13 @@ import { pinnedInstall, repinRuntime, type AgentRegistry, type CanaryOffer } fro
 import { type DaemonEffects, record } from './effects.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
 import { batchGateStep } from './cycle-batch-gate.js';
+import { lessonsToCode } from './lessons-to-code.js';
 import { workerLaunchHealth, earlyExitKey } from './worker-launch-health.js';
 import { actionStallDelay, actionStallThreshold } from '../model/action-progress.js';
 import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
-import { cpuPressureHeld, cpuPressureStep, cpuWaitingLine } from './cpu-pressure.js';
+import { cpuPressureStep, cpuWaiting } from './cpu-pressure.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
 import { controlPlaneStep } from './control-plane.js';
@@ -229,6 +230,8 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
     // GY-3274: the lessons and product brief the master session recorded straight to the file are
     // adopted from it — the file is their truth — before the cycle's own answers and merges join them.
     if (effects.recordedMasterMemory) state.projectMemory = reconcileMasterMemory(state.projectMemory, await effects.recordedMasterMemory());
+    // GY-3399: enforceable lessons become items, and a delivered one's lesson is removed.
+    if (!config.forPerson) await lessonsToCode(state.projectMemory, read.snapshot.work, clock, effects.mergeWriter?.createWork, log);
     state.projectMemory = await syncProjectMemory({ existing: state.projectMemory, work: read.snapshot.work, now: clock });
     // GY-3101: the stalled-yard alert, beside the persist it survives: the loop tells the operator directly when queued work can neither start nor merge.
     if (!config.forPerson) await yardAlertStep(cycle);
@@ -482,6 +485,8 @@ async function closeStep(cycle: Cycle) {
   // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new
   // launches while it is saturated — before anything of this cycle starts one.
   await cpuPressureStep(cycle);
+  // GY-3407: every host is read for the Workers page; one that does not answer reads away until it does.
+  if (cycle.effects.hostReadings) cycle.state.hosts = await cycle.effects.hostReadings(cycle.state.hosts).catch(error => { cycle.log(`[graphyard-master] the host readings failed: ${message(error)}`); return cycle.state.hosts; });
 }
 
 /**
@@ -614,12 +619,12 @@ async function dispatchStep(cycle: Cycle) {
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     launcher.submit(key, [], async sink => { await resubmitFinishedHead(cycle, item, finished, sink); });
   }
-  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) no new worker,
+  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) or too hot (GY-3373) no new worker,
   // reviewer or trial starts: one status line names the figure, and running sessions are never
   // stopped. The first cycle below it launches again on its own.
-  const cpuWaiting = cpuPressureHeld(state) ? cpuWaitingLine(state.cpuPressure!.avg60) : undefined;
+  const cpuWaitingLine = cpuWaiting(state) ?? undefined;
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
-  if (!state.diskHeadroom && !cpuWaiting && !refusedRoles.has('worker')) for (const item of claimable) {
+  if (!state.diskHeadroom && !cpuWaitingLine && !refusedRoles.has('worker')) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
     // GY-3104: a third equal failure holds the item for the master's decision.
@@ -665,7 +670,7 @@ async function dispatchStep(cycle: Cycle) {
     try { await effects.askHumanProof(item, proof); await note(cycle, key, 'judgement', item.key, 'done', `Asked a person for ${proof} on ${item.candidate!.sha.slice(0, 12)}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not ask a person for ${proof} on ${item.key}: ${message(error)}`); }
   }
-  await effects.dispatchTick?.(snapshot, cpuWaiting);
+  await effects.dispatchTick?.(snapshot, cpuWaitingLine);
   await masterSession(cycle, open);
 }
 

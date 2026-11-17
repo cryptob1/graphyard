@@ -244,7 +244,7 @@ test('integration:trial-hung-test-fails-fast — a hung file fails by name while
   for (const name of ['run-tests.ts', 'bounded-tests.mjs']) copyFileSync(fileURLToPath(new URL(`./helpers/${name}`, import.meta.url)), join(trial.root, 'tests/helpers', name));
   const hung = 'tests/hung.test.ts', slow = 'tests/slow.test.ts';
   writeFileSync(join(trial.root, hung), "import { test } from 'node:test'; test('hung', async () => { await new Promise(() => { setInterval(() => {}, 1000); }); });\n");
-  writeFileSync(join(trial.root, slow), "import { test } from 'node:test'; test('slow', async () => { await new Promise(resolve => setTimeout(resolve, 500)); });\n");
+  writeFileSync(join(trial.root, slow), "import { test } from 'node:test'; test('slow', async () => { await new Promise(resolve => setTimeout(resolve, 50)); });\n");
   // The subject is the bound and its verdict, not this repository's own build: a trial host loaded
   // enough to run six trials spent most of this trial's deadline building the scratch tree, leaving
   // the runner this regression exercises too little of it (GY-3366's trial), so the scratch builds nothing.
@@ -255,14 +255,17 @@ test('integration:trial-hung-test-fails-fast — a hung file fails by name while
   let testRuns = 0;
   const result = await runTrial({
     ...trial, mergeSha: gitIn(trial.root, 'rev-parse', 'HEAD'), changedFiles: [hung, slow],
-    timeoutMs: 120_000, retries: 0, groupSize: 2, cores: 2,
+    timeoutMs: 600_000, retries: 0, groupSize: 2, cores: 2,
+    // This timeout is deliberate, even under real CPU load: keep its named verdict
+    // instead of classifying it as host overload. CPU attribution has its own tests.
+    cpu: () => null,
     run: async (command, args, options) => {
       if (args.includes('tests/helpers/run-tests.ts')) {
         testRuns++;
         assert.ok(args.includes('--file-timeout=300000'), 'production bounds each file at five minutes');
-        // Exercise the real runner, reporter and trial verdict with a shortened clock that still
-        // leaves a loaded host's file start-up room inside the slow file's own bound.
-        args = args.map(arg => arg === '--file-timeout=300000' ? '--file-timeout=10000' : arg);
+        // Keep the real timeout and named verdict, with a minute for child startup on a
+        // saturated host. The finishing fixture waits only 50 ms (GY-3386).
+        args = args.map(arg => arg === '--file-timeout=300000' ? '--file-timeout=60000' : arg);
       }
       // This regression exercises test processes, not the separately tested container boundary.
       // All executed code belongs to this repository or the two fixtures above.
@@ -276,7 +279,7 @@ test('integration:trial-hung-test-fails-fast — a hung file fails by name while
   assert.match(result.logTail, /hung\.test\.ts/);
   // The file bound ended the hung file, not the overall deadline (which would leave no verdict):
   // no wall-clock limit here, so a hot or busy host cannot fail it (GY-3374).
-  assert.match(result.logTail, /test file timed out after 10000ms/);
+  assert.match(result.logTail, /test file timed out after 60000ms/);
   assert.deepEqual(result.retried ?? [], [], 'a named failure is a verdict, not a no-verdict retry');
 });
 
