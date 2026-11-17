@@ -21,7 +21,7 @@ function fleet(at: string) {
     roles: [{ name: 'reviewer', accounts: ['claude-a', 'muse'], concurrency: 2 }], reason: 'fixture',
   }, { actor: 'operator', at }).registry;
 }
-const quota = (loggedIn: boolean | null, identity?: string | null) => ({ loggedIn, state: 'available' as const, usage: [], resetsAt: null, ...(identity === undefined ? {} : { identity }) });
+const quota = (loggedIn: boolean | null, identity?: string | null) => ({ loggedIn, state: 'available' as const, usage: [], resetsAt: null, reason: null as string | null, ...(identity === undefined ? {} : { identity }) });
 
 test('integration:reviewer-credential-failure-holds — a reviewer session ending on missing credentials holds that account, the next review runs on another account, and a new login or passing probe lifts the hold', () => {
   const at = new Date().toISOString(), now = Date.parse(at);
