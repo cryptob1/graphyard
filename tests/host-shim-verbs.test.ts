@@ -76,3 +76,11 @@ socket.on('error', error => done(error.code)); socket.on('timeout', () => done('
     assert.match(mounts[0]!, new RegExp(`^type=bind,src=${hosts.home('box')}/\\.graphyard/runs/trial-\\w+,dst=`), 'only the run directory is mounted');
   } finally { await session.close(); listening.close(); }
 });
+
+// GY-3456: the production refusal named this exact valid command. Keep the installed script's
+// dispatch and warm-image validation exercised together, without opening any extra verb/image.
+test('integration:remote-ssh-confined — the prepared shim accepts the reported prepare-run warm-image command', () => {
+  const result = shim('prepare-run 4a46888f-graphyard b14b433253349f3fa4dd97f9893b49f9622c7d33 graphyard-warm:98f889ed5f9e-961b8cf1ad0e');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^need-pack -/);
+});

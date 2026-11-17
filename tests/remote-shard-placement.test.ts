@@ -114,6 +114,7 @@ for (const file of readFileSync(at('--files-from'), 'utf8').split('\\n').filter(
     assert.ok(timings.some(step => /^tests: shard \d+ on gy-compute@box$/.test(step)), `a shard was placed on the host: ${timings.join(', ')}`);
     assert.match(result.logTail ?? '', /\[remote\] host gy-compute@box dropped a shard: .*box shard output before it died.*; its shard runs on another host/s, 'the log tail is kept');
     const [record] = readRemoteShardRuns(root);
+    assert.match(remoteShardSummary(readRemoteShardRuns(root))!.hosts.at(-1)!.reason ?? '', /box shard output before it died/);
     assert.equal(record!.remote, 0, 'every shard finally ran on this machine');
     assert.deepEqual(remoteShardSummary(readRemoteShardRuns(root))!.hosts.map(host => [host.name, host.state]), [['vishrog', 'ready'], ['gy-compute@box', 'away']]);
   } finally { if (previous === undefined) delete process.env.GRAPHYARD_TRIAL_IMAGE; else process.env.GRAPHYARD_TRIAL_IMAGE = previous; }
