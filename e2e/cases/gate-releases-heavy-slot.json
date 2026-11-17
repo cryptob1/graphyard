@@ -1,0 +1,15 @@
+{
+  "id": "gate-releases-heavy-slot",
+  "title": "A batch gate that times out gives its host heavy-job slot back",
+  "description": "Runs the real gate and loop cycle over a host heavy-job budget of two, one slot held by another project's suite: the gate's first run times out while its trial image build is still settling, its slot is freed at once so the retry verifies main, and in the next cycle the queued merge trial takes the freed slot while master status names no batch-gate holder (GY-3449).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a timed-out gate frees its slot for the queued merge trial within one cycle",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:gate-releases-heavy-slot tests/gate-releases-heavy-slot.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

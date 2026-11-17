@@ -11,6 +11,7 @@ import { runtimeAdapters } from '../src/master/runtimes.js';
 import { accountLaunch, dispatchWork, loadMasterConfig, setupMaster, workAttentionOwner, type WorkerProfile } from '../src/master.js';
 import { environmentBlocked, environmentBlocker, environmentFailure, grantWorkerPaths, runtimeSandboxes, verifyWorkerSandbox, WorkerSandboxError, workerPaths, writablePaths, type SandboxExec } from '../src/worker-sandbox.js';
 import type { Work } from '../src/model.js';
+import { sessionSlotsGrant } from '../src/master/harness.js';
 import { recordedRuns } from './helpers/headless-runs.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { registryFixture } from './helpers/registry-fixture.js';
@@ -137,7 +138,8 @@ test('integration:unwritable-workspace-fails-launch — a sandbox that denies th
     // The same launch in a sandbox that honours the grant starts, and its run carries the grant.
     sandboxCalls.length = 0;
     const started = await dispatchWork(fixture.main, fixture.item, fixture.profile, { allWork: [fixture.item], prepare, release, headless: worker.exec, sandbox: codexLikeSandbox(sandboxCalls), probe: fixture.probe });
-    assert.deepEqual(started.sandbox?.verified, writablePaths(workerPaths(fixture.worktree)));
+    // GY-3290: the host heavy-job lock directory is the one path the budget adds to the session's writable roots.
+    assert.deepEqual(started.sandbox?.verified, [...writablePaths(workerPaths(fixture.worktree)), ...sessionSlotsGrant()]);
     const [run] = worker.runs;
     assert.equal(run!.runtime, 'codex');
     assert.ok(addedDirectories(run!.args.slice(6), fixture.worktree).includes(fixture.gitDir), `the session is started with the admin directory granted: ${run!.args.join(' ')}`);

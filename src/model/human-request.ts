@@ -2,8 +2,7 @@ import type { z } from 'zod';
 import type { humanChoiceSchema } from '../model-boundary/human-request.js';
 import { hostDoableAsk, hostDoableRefusal, HostDoableAsk, parkRefusal as classifiedParkRefusal } from './park-refusal.js';
 import type { HumanAnswer } from './human-answer.js';
-import { blockerSince, type Work } from './work.js';
-import { formatAge } from './duration.js';
+import { type Work } from './work.js';
 import { humanProofRows } from './human-proof.js';
 // ------------------------------------------------------------
 // Decisions only a human may make, as typed state (GY-89).
@@ -164,6 +163,9 @@ export function openHumanRequests(work: readonly { id: string; key: string; titl
 // The human surface (GY-102). Every action the server takes from the operator's own credential is a rule here — what the server refuses an agent
 // identity, and how to find its open instances. The page, the CLI list and `GET /api/human-requests` render this table and
 // nothing else, so a rule added here is listed for the human without a second change, and none is silently absent.
+// GY-3394: the surface is the owner's alone — the three decisions and the person's own real-world
+// checks. Everything an agent identity may run stays off it, blockers included: those are the
+// Master's (the Master page and master status attention carry them).
 
 /** A session as a rule judges it: the identity, the role it holds, and the kind of session it declared. */
 export interface HumanOnlyActor { id?: string; role?: string | null; sessionKind?: string | null }
@@ -200,41 +202,15 @@ export const humanProofRule: HumanOnlyRule = {
   open: (subject, now) => humanProofRows(subject.work, parkRule.refuse({ id: 'an agent identity', role: 'operator-agent', sessionKind: 'ai' })!, now),
 };
 
-/**
- * GY-3280: how long a recorded worker blocker waits with no master action before the dashboard
- * raises it on Needs you for the owner. The master session is prompted the cycle the blocker lands
- * and the attention line names it on every `master status`; past this bound with the blocker still
- * standing, nobody but the owner is left to nudge.
- */
-export const blockerEscalationMinutes = 30;
-/** The Needs you rows of one item's escalated blocker (GY-3280): the blocker text, how long it has waited, and the unblock that clears it. */
-export function blockerEscalationRows(work: Work, refusal: string, now: number): HumanRequestRow[] {
-  const since = blockerSince(work);
-  if (!work.blocker || parkedOnHuman(work) || since === null || now - since < blockerEscalationMinutes * 60_000) return [];
-  return [{
-    rule: 'blocker-escalation', work: work.key, id: work.id, title: work.title,
-    request: { id: `blocker:${work.id}`, kind: 'blocker-escalation', epoch: work.epoch, at: new Date(since).toISOString(), requestedBy: 'the item\'s worker',
-      ask: `A worker's blocker has waited ${formatAge(since, now)} with no master action`,
-      needed: work.blocker, reason: `Recorded by ${work.key}'s worker; the master session is prompted at once and master status carries it as attention`,
-      why: `The master agent clears blockers itself; after ${blockerEscalationMinutes} minutes it has not, so you are the one to act.` },
-    waitedMs: Math.max(0, now - since), decision: 'an unresolved worker blocker', refusal,
-    answer: { cli: `graphyard master unblock ${work.key} REASON`, decline: `graphyard master unblock ${work.key} REASON`, dashboard: 'Work → Needs you', api: `POST /api/work/${work.key}/unblock`,
-      post: { command: 'unblock', body: { expectedRevision: work.revision }, field: 'reason', submit: `Unblock ${work.key} with this reason…`, decline: null } },
-  }];
-}
-/** A worker blocker the master has not cleared for `blockerEscalationMinutes` (GY-3280): raised on Needs you for the owner, cleared by any unblock. */
-export const blockerEscalationRule: HumanOnlyRule = {
-  kind: 'blocker-escalation',
-  refuse: actor => actor.role !== 'admin' ? 'The master session clears a blocker itself, so this Needs you alert is the owner\'s alone'
-    : declaredKind(actor) !== 'human' ? `A blocker escalation is acted on from the operator\'s own human session; ${actor.id} is ${declaredKind(actor)}` : null,
-  open: (subject, now) => blockerEscalationRows(subject.work, blockerEscalationRule.refuse({ id: 'an agent identity', role: 'operator-agent', sessionKind: 'ai' })!, now),
-};
+// GY-3280 once raised a worker blocker nobody cleared for 30 minutes here, for the owner. The
+// owner direction of 2026-11-15 (GY-3394) retires that: a blocker is the Master's, however long it
+// has stood — it stays on the Master page and in master status attention, never on Needs you.
 
 /**
  * Every rule, in the order the surface lists them. Enforcement reads this table and so does the
  * page: adding a rule here is the one change a new human-only action needs.
  */
-export const humanOnlyRules: HumanOnlyRule[] = [parkRule, humanProofRule, blockerEscalationRule];
+export const humanOnlyRules: HumanOnlyRule[] = [parkRule, humanProofRule];
 export const humanOnlyRule = (kind: string, rules: readonly HumanOnlyRule[] = humanOnlyRules) => rules.find(rule => rule.kind === kind) ?? null;
 /**
  * Why this session may not answer a row of that rule, or null when it may. A rule this reader

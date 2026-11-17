@@ -114,7 +114,7 @@ const until = (iso: string | null) => iso ? ` until ${iso}` : '';
  * refuses until the retest's fresh result is folded.
  */
 export function accountIneligibility(registry: AgentRegistry, account: FleetAccount, now: number, host?: string | null,
-  options: { expiredSmokeRetestable?: boolean } = {}): string | null {
+  options: { expiredSmokeRetestable?: boolean; hostSessions?: { install: string; at: string }[] } = {}): string | null {
   if (!account.enabled) return `${account.name} is disabled`;
   if (!registry.runtimes.some(runtime => runtime.name === account.runtime)) return `${account.name} runs ${account.runtime}, which is not a registered runtime`;
   if (!registry.models.some(model => model.name === account.model)) return `${account.name} runs ${account.model}, which is not a registered model`;
@@ -139,7 +139,11 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   const twin = exhaustedTwin(registry, account, now);
   if (twin) return `${account.name} quota is exhausted${until(twin.quota.resetsAt)}: it is the same provider login as ${twin.name}, whose quota is ${twin.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${twin.quota.reason ? ` (${twin.quota.reason})` : ''}`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
-  if (account.maxSessions !== null && running >= account.maxSessions) return `${account.name} is at its session limit (${running} of ${account.maxSessions} live)`;
+  // GY-3333: sessions other installs on this host hold on the same login home count toward the
+  // account's own limit — one home serves at most its maxSessions sessions across every install.
+  const foreign = options.hostSessions ?? [], holders = [...new Set(foreign.map(session => session.install))];
+  if (account.maxSessions !== null && running + foreign.length >= account.maxSessions)
+    return `${account.name} is at its session limit (${running + foreign.length} of ${account.maxSessions} live${foreign.length ? `, ${foreign.length} held by ${holders.length === 1 ? `the Graphyard install ${holders[0]}` : `the Graphyard installs ${holders.join(' and ')}`}` : ''})`;
   return null;
 }
 
@@ -231,7 +235,7 @@ export const roleLimit = (role: { name: string; accounts: readonly string[]; con
  * registry account the role can run on serves, the choice naming the failover (GY-3092); the role
  * is refused only when no account in the registry can serve it.
  */
-export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude' | 'group' | 'work'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
+export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude' | 'group' | 'work' | 'hostSessions'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
   const role = registry.roles.find(entry => entry.name === request.role && fleetRoles.includes(entry.name));
   if (!role) return { account: null, reason: `role ${request.role} is not configured in the agent registry`, skipped: [] };
   if (!role.accounts.length) return { account: null, reason: `role ${request.role} names no account`, skipped: [] };
@@ -257,8 +261,10 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
   const own = diverse ? order : planSpreadOrder(registry, order), trial = [...own.filter(name => expiring.has(name)), ...own.filter(name => !expiring.has(name))];
   for (const [, name] of [...trial, ...fleetOrder(registry, role, request.prefer ?? null)].entries()) {
     const account = registry.accounts.find(entry => entry.name === name);
+    // GY-3333: the live sessions other installs on this host hold on the account count toward its limit.
+    const foreign = request.hostSessions?.filter(entry => entry.account === name) ?? [];
     // An unsupported runtime stored before the refusal existed is passed over with its reason, never launched.
-    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) ?? roleRuntimeRefusal(registry, account, role.name) ?? roleUnsupported(registry, role, name) : `${name} is not a registered account`;
+    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host, { hostSessions: foreign }) ?? roleIneligibility(account, role.name, now) ?? roleRuntimeRefusal(registry, account, role.name) ?? roleUnsupported(registry, role, name) : `${name} is not a registered account`;
     const differs = !!diverse && !!account && accountProvider(registry, account) !== diverse.provider;
     if (refusal) {
       skipped.push({ account: name, reason: refusal });

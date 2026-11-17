@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { detachedLaunch, processIdentity, readRunMeta, runAlive, runContainment, runEnvironment, runFiles, signalRun, type RunMeta } from '../runner/pi.js';
 import { setTrialAttempts, TrialCancelledError, TrialTimeoutError, TrialRunnerError, type TrialNoVerdict } from './trial.js';
 import { harnessModules } from './trial-container.js';
+import { heldJobEnvironment } from '../master/verification-slots.js';
 import type { MergeTrialRun } from './executor.js';
 
 /** Where a loop's detached trial runs live: `<coordinator root>/.graphyard/trial-runs`, beside the deploy record it already keeps there. */
@@ -117,7 +118,7 @@ export function launchTrialRun(input: { runsRoot: string; spec: TrialRunSpec; sp
   const launch = detachedLaunch(directory, id, command, args, containment, [], selfBoundSeconds(spec.timeoutMs));
   if (!failure) {
     try {
-      const child = (input.spawn ?? spawn)(launch.file, launch.args, { env: runEnvironment(process.env), stdio: ['ignore', 'ignore', 'ignore'], detached: true });
+      const child = (input.spawn ?? spawn)(launch.file, launch.args, { env: runEnvironment(process.env, heldJobEnvironment()), stdio: ['ignore', 'ignore', 'ignore'], detached: true });
       child.on('error', error => { failure = `${command} could not be started: ${error.message}`; });
       child.unref();
       meta = { ...meta, pid: child.pid ?? null, identity: child.pid ? processIdentity(child.pid) : null };
