@@ -73,18 +73,20 @@ export interface AcquireOptions {
 
 /**
  * GY-3304: the host's heavy-work drain — `master drain REASON` writes it beside the slots, `master resume`
- * removes it. While it stands no new heavy job starts on the host: merge trials, revert trials, the
+ * removes it. GY-3445: it sits in its own `drain/` folder, which only the master session's confinement
+ * leaves writable; every other session that takes slots reads it. While it stands no new heavy job starts on the host: merge trials, revert trials, the
  * batch gate, declared checks, host worker verification and sessions' own suites and type checks wait;
  * jobs already running finish, and claims, heartbeats and status go on. A file, so a restart keeps it.
  */
 export interface HeavyDrain { reason: string; requestedBy: string; at: string }
-export const heavyDrainFile = (directory: string) => join(directory, 'drain.json');
+export const heavyDrainDirectory = (directory: string) => join(directory, 'drain');
+export const heavyDrainFile = (directory: string) => join(heavyDrainDirectory(directory), 'drain.json');
 export function readHeavyDrain(directory: string): HeavyDrain | null {
   try { const drain = JSON.parse(readFileSync(heavyDrainFile(directory), 'utf8')); return typeof drain?.reason === 'string' ? drain : null; } catch { return null; }
 }
 export function requestHeavyDrain(directory: string, reason: string, requestedBy: string, now = new Date()): HeavyDrain {
   const drain: HeavyDrain = { reason: reason.slice(0, 500), requestedBy, at: now.toISOString() }, pending = `${heavyDrainFile(directory)}.${randomUUID()}`;
-  mkdirSync(directory, { recursive: true });
+  mkdirSync(heavyDrainDirectory(directory), { recursive: true });
   writeFileSync(pending, JSON.stringify(drain));
   renameSync(pending, heavyDrainFile(directory));
   return drain;
