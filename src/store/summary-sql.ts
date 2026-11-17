@@ -43,6 +43,7 @@ const recentSessions = (sessions: string) => `(SELECT COALESCE(jsonb_agg(s.entry
  */
 export const settledSummariesSql = `SELECT d.number, (d.summary ${summaryOmitted.map(field => `- '${field}'`).join(' ')})
     || jsonb_build_object('sessions', ${recentSessions('h.sessions')}, 'completedActions', (SELECT count(*) FROM jsonb_array_elements(${array('h.history')}) AS r(entry) WHERE r.entry->>'result' = 'done'), 'summary', true)
+    || CASE WHEN d.summary ? 'summary' THEN jsonb_build_object('plainSummary', d.summary->>'summary') ELSE '{}'::jsonb END
     || CASE WHEN jsonb_typeof(h.pipeline) = 'object' THEN jsonb_build_object('pipeline', ${compactPipeline('h.pipeline')}) ELSE '{}'::jsonb END AS document
   FROM (SELECT i.number, i.id, ${detoasted('i.summary')} AS summary FROM work_index i WHERE i.settled OFFSET 0) d
   CROSS JOIN LATERAL (SELECT x.document->'pipeline' AS pipeline, x.document->'sessions' AS sessions, x.document->'actionQueue'->'history' AS history

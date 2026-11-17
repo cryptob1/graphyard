@@ -14,6 +14,7 @@ import { gateFiledItem } from '../src/daemon/cycle-batch-gate.js';
 import { baseFailureItem } from '../src/model/base-failure.js';
 import { onboardingWorkRequest } from '../src/model/onboarding-work.js';
 import { postMergeFollowUp } from '../src/model/post-merge-review.js';
+import { tasteFollowUp } from '../src/engine/commands/taste.js';
 import { relandItemFor } from '../src/merge-writer/serve-revert.js';
 import { workCommands } from '../src/cli/work.js';
 
@@ -58,6 +59,7 @@ test('item-why-and-simplest: every built-in creator supplies both sentences, and
     'base failure filing': baseFailureItem({ check: 'test', test: 't', baseSha: 'b'.repeat(40), blocks: [], jobId: null, url: null } as never, 'main'),
     'onboarding filing': onboardingWorkRequest('c'.repeat(40), null, 'first'),
     'post-merge follow-up': postMergeFollowUp(delivered, 'd'.repeat(40), { text: 'A defect', path: null, line: null, paths: [] } as never, 0),
+    'taste send-back follow-up': tasteFollowUp(delivered, 'The note is the reason', 'owner', '2026-01-01T00:00:00.000Z'),
     're-land': relandItemFor(delivered, { serve: 'e'.repeat(40), failingCase: 'create-work-item', failingStep: null, failingReason: null, mergeSha: 'f'.repeat(40), baseBranch: 'main' }),
   };
   for (const [creator, body] of Object.entries(filed)) assert.equal(whyAndSimplestRefusal(body), null, `${creator} supplies why and simplest`);

@@ -2,6 +2,7 @@ import Replay from '../components/work-replay';
 import { isClosed, type Work } from '../../src/model';
 import { mayChangePriority } from '../components/priority';
 import WorkCard from '../components/work-card';
+import TasteFeed from '../components/taste';
 import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../../src/model/duration';
@@ -40,7 +41,7 @@ export function WorkPage(dashboard: Dashboard) {
  * ones the control plane's production observation reports unserved — none where production serves
  * the newest merge, and none claimed where nothing observes production.
  */
-export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, action, busy, api }: Dashboard) {
+export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, action, busy, api, token }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const match = (w: Pick<Work, 'key' | 'title'>) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase());
   const release = releaseView(status);
@@ -97,6 +98,10 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
         <span><strong>{recent.length} shipped this week.</strong>{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span> <span data-title>{latest.title}</span></button> · {plainStage(latest, now, release, serve)} · {formatAge(new Date(mergedAt(latest)).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}{liveFailingLine(serve) && <span className="danger-text" data-live-failing> {liveFailingLine(serve)}.</span>}</span>
         <button type="button" className="text-button push" onClick={() => setView('shipped')}>Shipped →</button>
       </div>
+      {/* GY-3393: what shipped and awaits the owner's taste, with its evidence; tasting gates nothing. The fold
+          sits after the shipped line so its folded cards never precede the page's visible text in the DOM —
+          a case's text lookup finds the visible words first. */}
+      <TasteFeed work={work} status={status} token={token} observedAt={now} busy={busy} action={action} setSelected={setSelected}/>
     </>}
     <Replay api={api} onOpen={setSelected}/>
   </>;
