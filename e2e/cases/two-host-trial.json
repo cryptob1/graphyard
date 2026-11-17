@@ -4,7 +4,7 @@
   "description": "The hard-math benchmark as a merge trial on two hosts: this machine, and this same machine reached over a real OpenSSH server at 127.0.0.1 whose only key runs graphyard-host-shim with its own host folders. The commit is packed into that host's mirror, the warm image loaded there and the trial launcher run over SSH. Shards split across both hosts, the verdict and the oracle-checked answers equal a one-host run, and logs come back. Killing that host's SSH mid-shard re-queues the shard here with no fault. Over that key a plain shell, another user's files and docker run with the root filesystem are refused, and a shard reaches no private address, the tailnet or the host.",
   "tags": ["trial"],
   "target": "any",
-  "required": false,
+  "required": true,
   "steps": [{
     "kind": "command",
     "name": "Run the hard-math trial on one host, then on two, then kill the second mid-shard",
