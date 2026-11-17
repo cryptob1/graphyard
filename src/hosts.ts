@@ -83,7 +83,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "/run/user/$uid/bus" ] && break; sleep 1;
 sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" dockerd-rootless-setuptool.sh install
 # Tailscale SSH on port 22 ignores authorized_keys, so the shim: give $user its own OpenSSH on port ${computePort}.
 if tailscale debug prefs 2>/dev/null | grep -q '"RunSSH": *true'; then
-  sshd=$(command -v sshd || echo /usr/sbin/sshd)
+  sshd=$(command -v sshd) || { echo "Install the OpenSSH server (sshd), then run this again." >&2; exit 1; }
   ssh-keygen -A
   cat > /etc/ssh/sshd_graphyard_config <<GRAPHYARD_SSHD
 Port ${computePort}
