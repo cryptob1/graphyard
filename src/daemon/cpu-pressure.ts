@@ -10,7 +10,10 @@
 // run as they always did, and nothing running is ever stopped.
 // GY-3373: the hottest CPU sensor rides the same reading. Pressure alone missed a host at 98C with
 // avg60 near 20, where every trial start waited on heat while the loop kept launching agents; so
-// launches wait from the trial guard's own limit minus 5C. Where no sensor is readable, no heat holds.
+// launches wait at the trial guard's own heat limit. GY-3416: that limit is min(trialHotCelsius,
+// the sensor's own crit-3) — a laptop whose sensors read 95-98C against a 102C crit-3 cooked with no
+// launch ever held — and trials halve their cap from 5C under it, so concurrency restores on its own
+// as the reading falls. Where no sensor is readable, no heat holds.
 import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { DaemonState } from './state.js';
@@ -20,8 +23,10 @@ import { sessionTestBudget } from '../runner/registry.js';
 
 /** The one constant, no setting: while 'some avg60' reads above this, no new worker, reviewer or trial starts. */
 export const cpuPressureCeiling = 85;
-/** GY-3373: launches wait while the hottest CPU sensor reads this or more, before the trial guard itself refuses a start. */
-export const launchHotCelsius = trialHotCelsius - 5;
+/** GY-3416: launches wait while the hottest CPU sensor reads this or more — the trial guard's own heat limit. */
+export const launchHotCelsius = trialHotCelsius;
+/** GY-3401, GY-3416: from 5C under the limit the trial cap halves, before any launch waits. */
+export const trialHalfCelsius = trialHotCelsius - 5;
 
 /** The one status line master status carries while launches wait — heat first, then pressure — or null when nothing holds them. */
 export function cpuWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | null {
@@ -31,8 +36,8 @@ export function cpuWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | nu
   return null;
 }
 export const cpuPressureHeld = (state: Pick<DaemonState, 'cpuPressure'>) => cpuWaiting(state) !== null;
-/** GY-3401: whether the hottest CPU sensor sits at the launch guard's limit. */
-export const cpuHot = (state: Pick<DaemonState, 'cpuPressure'>) => (state.cpuPressure?.celsius ?? -Infinity) >= launchHotCelsius;
+/** GY-3401, GY-3416: whether the hottest CPU sensor sits at the trial halving limit. */
+export const cpuHot = (state: Pick<DaemonState, 'cpuPressure'>) => (state.cpuPressure?.celsius ?? -Infinity) >= trialHalfCelsius;
 /**
  * GY-3401: the merge writer's trial cap this cycle. A hot CPU no longer stops every trial: trials
  * running finish, and no new one starts beyond half the cap until the reading falls below the limit.

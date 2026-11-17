@@ -1,0 +1,13 @@
+{
+  "id": "opencode-unauthenticated-account",
+  "title": "An OpenCode account OpenCode lists no provider for is logged out, skipped for review, and a failing run names OpenCode's error",
+  "description": "With a stand-in OpenCode 2.x on PATH and two OpenCode reviewer accounts that both hold an opencode/auth.json: the one opencode auth list shows no authenticated provider for reads as logged out on the Workers page and is passed over, the review is chosen on the other, and a headless run that exits 1 with its error as a JSON event on stdout fails naming that error, not only its exit code.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "unauthenticated OpenCode account",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/opencode-unauthenticated-account.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

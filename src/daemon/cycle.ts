@@ -482,6 +482,8 @@ async function closeStep(cycle: Cycle) {
   // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new
   // launches while it is saturated — before anything of this cycle starts one.
   await cpuPressureStep(cycle);
+  // GY-3407: every host is read for the Workers page; one that does not answer reads away until it does.
+  if (cycle.effects.hostReadings) cycle.state.hosts = await cycle.effects.hostReadings(cycle.state.hosts).catch(error => { cycle.log(`[graphyard-master] the host readings failed: ${message(error)}`); return cycle.state.hosts; });
 }
 
 /**

@@ -85,6 +85,20 @@ export const spawnHeadless: HeadlessExec = async (command, args, options) => {
 };
 
 /**
+ * GY-3414: what a run that exited with nothing on its standard error said on its standard output:
+ * the message of its last JSON `error` event (OpenCode's `--format json` prints `Free usage limit
+ * reached` there, and the wrapper's `bwrap exited with code 1` alone named no cause), or its last
+ * plain line.
+ */
+const runtimeError = (stdout: string): string => {
+  for (const line of stdout.trim().split('\n').reverse().map(entry => entry.trim()).filter(Boolean)) {
+    let event: any;
+    try { event = JSON.parse(line); } catch { return line.slice(0, 400); }
+    if (event?.type === 'error') return String(event.error?.message ?? event.error?.data?.message ?? event.message ?? line).slice(0, 400);
+  }
+  return '';
+};
+/**
  * Wait on a detached child from its run directory, whoever started it: its standard output once it
  * exits 0; a throw on any other exit, on its bound (it is killed), on `signal` (it is stopped), or
  * when its process is gone without an exit. `detached` stops the wait and leaves the child running.
@@ -98,7 +112,8 @@ export function awaitHeadlessRun(directory: string, options: { signal?: AbortSig
       if (exit !== null) {
         const stdout = (readText(files.stdout) ?? '').slice(-outputLimit), stderr = (readText(files.stderr) ?? '').slice(-4000);
         if (exit === '0') return resolve(stdout);
-        return reject(Object.assign(new Error(`${command} ${exit === 'spawn' ? 'could not be started' : `exited with code ${exit}`}${stderr.trim() ? `: ${stderr.trim().slice(-400)}` : ''}`), { output: `${stdout.slice(-4000)}\n${stderr}` }));
+        const said = stderr.trim().slice(-400) || runtimeError(stdout);
+        return reject(Object.assign(new Error(`${command} ${exit === 'spawn' ? 'could not be started' : `exited with code ${exit}`}${said ? `: ${said}` : ''}`), { output: `${stdout.slice(-4000)}\n${stderr}` }));
       }
       const failed = options.failure?.();
       if (failed) return reject(new Error(failed));
