@@ -222,17 +222,27 @@ export const lostRun = (record: { state: string; resolution?: string | null }) =
 export const killedRun = (result: RunRecord['result'] | null | undefined) => !!result && !result.ok && result.reason === 'exit' && /\b(?:on SIG(?:TERM|KILL)|with code (?:143|137))\b/.test(result.detail);
 /** Whether a process is alive: signal 0 probes it, and a probe refused for permission means it exists. */
 export const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
+/**
+ * GY-3428. A session that failed within this bound of its launch never got its runtime going — the
+ * runtime could not start, its sandbox refused to start, or it exited at once on its provider's
+ * quota — and judged nothing. Such a failure is the runtime's, not the request's: it neither counts
+ * toward `sessionRetryLimit` nor widens the wait, so a runtime broken for everyone cannot spend a
+ * request's attempts; `requestAttemptLimit` still bounds every session the request has.
+ */
+export const runtimeStartBoundMs = 60_000;
+export const runtimeStartFailure = (record: { state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }) =>
+  retriedStates.includes(record.state) && !neverStarted(record) && !lostRun(record) && !!record.closedAt && Date.parse(record.closedAt) - Date.parse(record.requestedAt) < runtimeStartBoundMs;
 export function sessionRetry(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], requestId: string, now: number) {
   const launched = records.filter(record => record.requestId === requestId);
   const last = launched.at(-1);
-  const unstarted = launched.filter(neverStarted), lost = launched.filter(lostRun);
-  // `started` is the attempts counted against the limit: a lost run reached no verdict to count.
-  const started = launched.length - unstarted.length - lost.length;
+  const unstarted = launched.filter(neverStarted), lost = launched.filter(lostRun), runtimeFailed = launched.filter(runtimeStartFailure);
+  // `started` is the attempts counted against the limit: a lost run reached no verdict to count, nor did a runtime that never started.
+  const started = launched.length - unstarted.length - lost.length - runtimeFailed.length;
   const report = { requestId, attempts: launched.length, started, neverStarted: unstarted.length, lost: lost.length, limit: sessionRetryLimit, unstartedLimit: unstartedRetryLimit, last: last ? { state: last.state, resolution: last.resolution ?? null } : null };
   if (!last) return { ...report, launch: true, settled: false, nextAt: null, exhausted: false };
   if (!retriedStates.includes(last.state)) return { ...report, launch: false, settled: true, nextAt: null, exhausted: false };
   if (started >= sessionRetryLimit || unstarted.length >= unstartedRetryLimit || launched.length >= requestAttemptLimit) return { ...report, launch: false, settled: false, nextAt: null, exhausted: true };
-  const nextAt = Date.parse(last.closedAt ?? last.requestedAt) + (lostRun(last) ? 0 : neverStarted(last) ? sessionRetryBaseMs : sessionRetryDelay(started));
+  const nextAt = Date.parse(last.closedAt ?? last.requestedAt) + (lostRun(last) ? 0 : neverStarted(last) || runtimeStartFailure(last) ? sessionRetryBaseMs : sessionRetryDelay(started));
   return { ...report, launch: now >= nextAt, settled: false, nextAt: new Date(nextAt).toISOString(), exhausted: false };
 }
 

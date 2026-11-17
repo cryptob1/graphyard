@@ -291,7 +291,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       }
       return true;
     }
-    if (retry.launch) return true;
+    // A request abandoned before is launched again (GY-3428: its runtime failures no longer count), so its attention is withdrawn.
+    if (retry.launch) { delete cursor.abandoned[request.id]; return true; }
     const last = `${role} session attempt ${retry.attempts} ${retry.last!.state}: ${retry.last!.resolution ?? 'no reason recorded'}`;
     if (retry.exhausted) {
       if (runtimeRelaunch(kind, item, request, records)) return true;
