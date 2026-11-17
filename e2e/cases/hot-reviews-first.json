@@ -1,0 +1,16 @@
+{
+  "id": "hot-reviews-first",
+  "title": "When hot, reviews and trials launch first",
+  "description": "With a fixture CPU temperature of 82C (60 s package average), the loop starts no new implementation session while a review and a queued trial launch, and master status shows the implementation hold; at 86C nothing new starts; below 80C implementation launches again; with free capacity and both kinds ready, reviews and trials launch before workers.",
+  "tags": ["dispatch"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "at 82C implementation launches wait while a review launches, as master status shows",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/hot-reviews-first.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

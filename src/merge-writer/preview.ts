@@ -1,4 +1,5 @@
 // Concern: item previews (GY-1902) — a change checked out, served by `serveHead` and its declared E2E cases run against it, kept served for its link. (GY-3032 retired the per-merge preview: the merge trial runs the bound cases against its served head.)
+import { withHeavyJob } from '../master/verification-slots.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm } from 'node:fs/promises';
@@ -223,13 +224,18 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
         withheld, withheld.map(entry => entry.case));
       const home = join(directory!, 'home'), environment = { ...previewEnvironment(home, input.hostEnvironment), ...options.variables };
       await mkdir(environment.TMPDIR, { recursive: true });
-      const serving = serveHead(checkout, input.application, { sha: input.mergeSha, env: environment, budgetMs: input.timeoutMs, signal, shell: input.shell, scratch: join(directory!, 'compose'),
-        project: input.compose?.project, bounds: input.compose?.bounds, docker: input.compose?.docker, fetcher: input.fetcher, variables: options.variables, hostEnvironment: input.hostEnvironment });
-      // Whatever started is closed with the preview, even while it still comes up.
-      served = { url: null, close: serving.close };
       let origin: string;
-      try { origin = await serving.ready; } catch (error) { cancelled(); return verdict('fail', error instanceof Error ? error.message : String(error), [], ['build']); }
-      served.url = origin;
+      // GY-3290: the build is one heavy job of the host budget; the preview it leaves running holds no slot.
+      try {
+        origin = await withHeavyJob(`preview build ${input.mergeSha.slice(0, 12)}`, () => {
+          const serving = serveHead(checkout, input.application, { sha: input.mergeSha, env: environment, budgetMs: input.timeoutMs, signal, shell: input.shell, scratch: join(directory!, 'compose'),
+            project: input.compose?.project, bounds: input.compose?.bounds, docker: input.compose?.docker, fetcher: input.fetcher, variables: options.variables, hostEnvironment: input.hostEnvironment });
+          // Whatever started is closed with the preview, even while it still comes up.
+          served = { url: null, close: serving.close };
+          return serving.ready;
+        }, { signal });
+      } catch (error) { cancelled(); return verdict('fail', error instanceof Error ? error.message : String(error), [], ['build']); }
+      served!.url = origin;
       cancelled();
       let report: E2eReport | null = null;
       // The cases come from the change itself, so they run with a token minted for this preview, never the UAT principal's, and never read the install's secrets; the runner keeps their requests on the served origin.
