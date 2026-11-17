@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { workerVerificationPump, moveBranchToHead } from './worker-verification.js';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -41,6 +41,7 @@ import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
 import { liveRuns } from '../runner/registry.js';
+import { sessionScopes } from '../session-share.js';
 import { runLogTail } from '../headless-session.js';
 import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
@@ -226,6 +227,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const read = (path: string) => readFile(path, 'utf8').then(text => text, () => null);
       return { pressure: await read('/proc/pressure/cpu'), stat: await read('/proc/stat'), celsius: await cpuCelsius() };
     },
+    // GY-3438: each session's scope as its cgroup counts it; a headless run is named by the session it holds.
+    sessionScopes: () => sessionScopes(),
+    sessionName: unit => liveRuns().find(entry => entry.run.directory && `graphyard-run-${basename(entry.run.directory)}.scope` === unit)?.name,
     // GY-3407: the read runs beside the cycle, so a host taking its SSH timeout never slows the loop; the cycle takes the latest finished one.
     hostReadings: async previous => {
       hostsReading ??= readHostReadings(previous, { run }).then(readings => { hostsLatest = readings; }, () => {}).finally(() => { hostsReading = null; });

@@ -25,9 +25,11 @@ export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
  */
 export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
-export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string; cpu?: LoopCpu; hosts?: LoopHost[] }
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string; cpu?: LoopCpu; hosts?: LoopHost[]; sessions?: LoopSession[] }
 /** The host's CPU as the loop last read it (GY-3348): 'some avg60' from /proc/pressure/cpu, the steal percent from /proc/stat and the hottest sensor (GY-3373), with GY-3416's launches-waiting word. */
 export interface LoopCpu { avg60: number | null; steal: number | null; celsius?: number | null; testBudget?: number | null; trialCap?: { now: number; full: number } | null; waiting?: boolean | null }
+/** One live agent session as the loop last read its cgroup (GY-3438): its use, its caps, and since when it has sat at its cap. */
+export interface LoopSession { session: string; cpu: number | null; cpuCap: number; memory: number; memoryCap: number | null; atCapSince: string | null }
 /** One host as the loop last read it (GY-3407): this machine (`local`) or an added one; `away` while it does not answer. */
 export interface LoopHost { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null }
 /**
@@ -40,8 +42,8 @@ export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * inte
 /** The loop as the control plane last saw it read, in memory beside the engine. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
-  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null; workerGrowth?: string | null; stepFailure?: string | null; fetchRefusal?: string | null; cpu?: LoopCpu | null; hosts?: LoopHost[] | null }, now: Date) {
-    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}), ...(poll.workerGrowth ? { workerGrowth: poll.workerGrowth } : {}), ...(poll.stepFailure ? { stepFailure: poll.stepFailure } : {}), ...(poll.fetchRefusal ? { fetchRefusal: poll.fetchRefusal } : {}), ...(poll.cpu ? { cpu: poll.cpu } : {}), ...(poll.hosts?.length ? { hosts: poll.hosts } : {}) };
+  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null; workerGrowth?: string | null; stepFailure?: string | null; fetchRefusal?: string | null; cpu?: LoopCpu | null; hosts?: LoopHost[] | null; sessions?: LoopSession[] | null }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}), ...(poll.workerGrowth ? { workerGrowth: poll.workerGrowth } : {}), ...(poll.stepFailure ? { stepFailure: poll.stepFailure } : {}), ...(poll.fetchRefusal ? { fetchRefusal: poll.fetchRefusal } : {}), ...(poll.cpu ? { cpu: poll.cpu } : {}), ...(poll.hosts?.length ? { hosts: poll.hosts } : {}), ...(poll.sessions?.length ? { sessions: poll.sessions } : {}) };
   }
   /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
   get observed(): boolean { return this.latest !== null; }
@@ -224,5 +226,26 @@ export function loopHosts(header: string | string[] | undefined): LoopHost[] | n
     const figure = (raw: unknown) => typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : null;
     return parsed.filter(entry => typeof entry?.host === 'string').slice(0, 50)
       .map(entry => ({ host: String(entry.host).slice(0, 300), ...(entry.local === true ? { local: true } : {}), away: entry.away === true, ...(typeof entry.reason === 'string' && entry.reason ? { reason: entry.reason.slice(0, 300) } : {}), cores: figure(entry.cores), celsius: figure(entry.celsius), steal: figure(entry.steal), runs: figure(entry.runs) }));
+  } catch { return null; }
+}
+
+/**
+ * GY-3438: the header naming every live agent session's use against its CPU and memory caps, as the
+ * loop last read each scope's cgroup, URI-encoded JSON, or `off` with none. /api/status serves the
+ * latest as `sessions` for the Workers page.
+ */
+export const loopSessionsHeader = 'X-Graphyard-Loop-Sessions';
+export const encodeLoopSessions = (sessions: readonly { unit: string; name?: string; cpu: number | null; cpuCap: number; memory: number; memoryCap: number | null; atCapSince: string | null }[]) =>
+  encodeURIComponent(JSON.stringify(sessions.slice(0, 50).map(({ unit, name, cpu, cpuCap, memory, memoryCap, atCapSince }) => ({ session: (name ?? unit).slice(0, 120), cpu: cpu === null ? null : Number(cpu.toFixed(2)), cpuCap: Number(cpuCap.toFixed(2)), memory, memoryCap, atCapSince }))));
+/** The sessions a loop read names, or null when it names none or they do not parse. */
+export function loopSessions(header: string | string[] | undefined): LoopSession[] | null {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value || value === 'off' || value.length > 16000) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(value)) as unknown;
+    if (!Array.isArray(parsed)) return null;
+    const figure = (raw: unknown) => typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : null;
+    return parsed.filter(entry => typeof entry?.session === 'string' && figure(entry.cpuCap) !== null).slice(0, 50)
+      .map(entry => ({ session: String(entry.session).slice(0, 120), cpu: figure(entry.cpu), cpuCap: entry.cpuCap, memory: figure(entry.memory) ?? 0, memoryCap: figure(entry.memoryCap), atCapSince: typeof entry.atCapSince === 'string' && Number.isFinite(Date.parse(entry.atCapSince)) ? entry.atCapSince : null }));
   } catch { return null; }
 }

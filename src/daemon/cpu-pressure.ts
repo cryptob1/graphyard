@@ -23,6 +23,7 @@ import type { DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
 import { cpuSensorNames, trialHotCelsius } from '../merge-writer/trial-load.js';
 import { sessionTestBudget } from '../runner/registry.js';
+import { overloadAlarm, overloaded, readSessionUsage } from '../session-share.js';
 
 /** The one constant, no setting: while 'some avg60' reads above this, no new worker, reviewer or trial starts. */
 export const cpuPressureCeiling = 85;
@@ -106,4 +107,18 @@ export async function cpuPressureStep(cycle: { state: DaemonState; effects: Daem
     : { at: new Date(at).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat, celsius, samples, testBudget: sessionTestBudget(), trialCap: previous?.trialCap ?? null };
   const waiting = cpuWaiting(state);
   if (!!waiting !== !!was) log(`[graphyard-master] cycle ${state.cycle}: ${waiting ? `${waiting}; no new worker, reviewer or trial starts until it falls` : 'launches resume'}`);
+}
+
+/**
+ * GY-3438: every live agent session's use against its caps, read from its scope's cgroup each cycle
+ * for master status and the Workers page. A session that has sat at its cap for five minutes is one
+ * journal line naming it, logged as its alarm begins; the alarm stands in master status and on the
+ * Workers page while it lasts.
+ */
+export function sessionUsageStep(cycle: { state: DaemonState; effects: DaemonEffects; now: () => number; log: (line: string) => void }) {
+  const { state, effects, now, log } = cycle;
+  if (!effects.sessionScopes) return;
+  const at = now(), raised = new Set(overloaded(state.sessions, at).map(session => session.unit));
+  state.sessions = readSessionUsage(state.sessions, at, effects.sessionScopes(), effects.sessionName);
+  for (const session of overloaded(state.sessions, at)) if (!raised.has(session.unit)) log(`[graphyard-master] cycle ${state.cycle}: overload: ${overloadAlarm(session, at)}`);
 }
