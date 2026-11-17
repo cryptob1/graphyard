@@ -70,7 +70,7 @@ export interface MergeWriterReads extends MergePorts {
    */
   createWork?(input: RelandInput, idempotencyKey: string): Promise<{ key?: string } | null>;
   /** GY-3119: the checkout whose .graphyard/main-gate.json the batch gate keeps, and the repository it gates; absent, no batch gate runs. */
-  gate?: { root: string; repository: string; /** GY-3296: the app environment lifecycle; absent, the loop's own over the root's state file. */ environments?: ReturnType<typeof import('../app-environments.js').environmentLifecycle>; /** GY-3193: runs the preview cases on the host against the commit; absent, each is reported not covered. */ previews?(commit: string): Promise<PreviewCaseRun[]> };
+  gate?: { root: string; repository: string; /** GY-3296: the app environment lifecycle; absent, the loop's own over the root's state file. */ environments?: ReturnType<typeof import('../app-environments.js').environmentLifecycle>; /** GY-3193: runs the preview cases on the host against the commit; absent, each is reported not covered. */ previews?(commit: string): Promise<PreviewCaseRun[]>; /** GY-3444: the machine's trial slot directory the gate reads its waits from; absent, the launcher's own. */ slots?: string };
   /**
    * GY-3199: publishes `commit` at `refs/graphyard/verified` on this checkout's origin with the
    * merge writer's deploy key alone, like every other push — the ref every install's deploy watch

@@ -7,7 +7,8 @@ import { releaseNotesPath, releaseNote, appendReleaseNote } from '../release-not
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
-import { gateTrialKey } from '../merge-writer/trial-load.js';
+import { gateTrialKey, trialStartWaiting } from '../merge-writer/trial-load.js';
+import { cpuWaiting } from './cpu-pressure.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
@@ -261,6 +262,8 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
     trial: (sha, files, item, base, step, timing, heads, _share, signal, timeout) =>
       reads.trial(sha, files, item, base, step, timing, heads, Math.max(1, busyTrialSlots(cycle.state)), signal, timeout),
   }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
+  // GY-3444: the gate's bound leaves out the time its checks wait for a trial slot or while the loop holds launches for CPU.
+  ports.waiting = () => cpuWaiting(cycle.state) !== null || trialStartWaiting('gate', gate.slots);
   const note = (key: string, state: 'done' | 'failed', detail: string) => {
     const entry = storeAction(cycle.state, key,
       { kind: 'merge', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() });

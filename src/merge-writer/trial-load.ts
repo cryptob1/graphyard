@@ -26,6 +26,8 @@ export const cpuSensorNames = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal']
 export const trialHotCelsius = 85;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
 export const gateTrialKey = 'batch-gate';
+/** GY-3444: the gate's containers' CPU weight (Docker's default is 1024), so under load its checks run ahead of merge trials and worker verification. */
+export const gateCpuShares = 4096;
 /** Who starts first once a start can go: the lower number. GY-3444: the batch gate's checks first, so a loaded host never starves the deploy path. */
 export const trialStartOrder = { gate: 0, merge: 1, verification: 2 } as const;
 
@@ -37,13 +39,13 @@ export const trialStartOrder = { gate: 0, merge: 1, verification: 2 } as const;
 export const trialPressureBoundSeconds = 10 * 60;
 
 /** What the launcher reads to admit a container. `slots` is per machine, not per install: any install's containers load the same CPUs. */
-export interface TrialLoad { slots: string; cap: number; order: number; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number }
+export interface TrialLoad { slots: string; cap: number; order: number; /** GY-3444: Docker --cpu-shares, set for the gate alone. */ cpuShares?: number; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number }
 
 /** The load of one start for `root`'s install; `run.diskFloorGb` is the one setting it reads. */
 const hostCpu = trialCpuMonitor();
 export async function trialLoad(root: string, who: keyof typeof trialStartOrder, usable = hostCpu.cores(), cores = availableParallelism()): Promise<TrialLoad> {
   const run = await readFile(join(root, '.graphyard', 'master.json'), 'utf8').then(text => JSON.parse(text).run ?? {}, () => ({}));
-  return { slots: trialSlots(), cap: trialContainerCap(cores, usable), order: trialStartOrder[who], hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon',
+  return { slots: trialSlots(), cap: trialContainerCap(cores, usable), order: trialStartOrder[who], ...(who === 'gate' ? { cpuShares: gateCpuShares } : {}), hotCelsius: trialHotCelsius, floorBytes: diskFloorBytes({ run }), hwmon: '/sys/class/hwmon',
     pressureBoundSeconds: trialPressureBoundSeconds };
 }
 export const trialSlots = (home = homedir()) => join(home, '.gy', 'trial-slots');
@@ -134,6 +136,8 @@ def admit():
     os.makedirs(load['slots'], exist_ok=True)
     # A start waiting on the disk floor says so here, for master status; a killed launcher's note names a dead pid.
     note = os.path.join(load['slots'], 'floor-' + str(os.getpid()))
+    # GY-3444: any wait says so too, by start order, so the batch gate's bound leaves the wait out.
+    waiting = os.path.join(load['slots'], 'wait-' + str(load['order']) + '-' + str(os.getpid()))
     queued = None
     said = None
     began = time.time()
@@ -167,14 +171,17 @@ def admit():
                 began = time.time()
             if why != said:
                 print('${waitingLine}: ' + why, file=sys.stderr, flush=True)
+                if said is None:
+                    open(waiting, 'w').close()
                 said = why
             if bound is not None and time.time() - began >= bound:
                 print('${faultLine}the trial container waited ' + str(int(time.time() - began)) + 's to start and gave up: ' + why, file=sys.stderr, flush=True)
                 sys.exit(75)
             time.sleep(1)
     finally:
-        if os.path.exists(note):
-            os.remove(note)
+        for path in (note, waiting):
+            if os.path.exists(path):
+                os.remove(path)
 `;
 
 /** The launcher's own lines from `chunks` of its stderr, each passed to `line` as it arrives (GY-3332): what a waiting start shows its caller. */
@@ -200,6 +207,18 @@ export function trialFloorWaits(slots = trialSlots()): string[] {
     if (!pid) return [];
     try { process.kill(Number(pid), 0); return [readFileSync(join(slots, name), 'utf8')]; }
     catch { try { unlinkSync(join(slots, name)); } catch { /* another reader took it */ } return []; } // a killed launcher's note
+  });
+}
+
+/** GY-3444: whether a live launcher on this machine waits to start a container of start order `who` now. */
+export function trialStartWaiting(who: keyof typeof trialStartOrder, slots = trialSlots()): boolean {
+  let names: string[];
+  try { names = readdirSync(slots); } catch { return false; }
+  return names.some(name => {
+    const pid = new RegExp(`^wait-${trialStartOrder[who]}-(\\d+)$`).exec(name)?.[1];
+    if (!pid) return false;
+    try { process.kill(Number(pid), 0); return true; }
+    catch { try { unlinkSync(join(slots, name)); } catch { /* another reader took it */ } return false; } // a killed launcher's note
   });
 }
 

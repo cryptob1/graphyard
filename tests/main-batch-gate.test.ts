@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { bootstrapGate, catalogBudgetMs, catalogFits, diagnosticsIntervalMs, gateCauses, gateHoldAttention, gateHoldCoolOffMs, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, timeoutHold, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
+import { bootstrapGate, catalogBudgetMs, catalogFits, diagnosticsIntervalMs, gateCauses, gateHoldAttention, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, timeoutHold, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
 import { appendReleaseNote, latestReleaseNote, readReleaseNotes, releaseNote, releaseNotesPath } from '../src/release-notes.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import { batchGateStep } from '../src/daemon/cycle-batch-gate.js';
@@ -307,55 +307,48 @@ test('integration:main-batch-gate-failures — smoke, bound and core cases must 
     assert.equal(batchGateCauses(record)[0]!.key, 'batch-gate');
     assert.equal((await runGate(ports, record)).outcome, 'idle', 'a held tip is not gated again until main moves');
   }
-  // A gate past 45 minutes is a timeout: no culprit search, one recut, and a second timeout holds.
+  // A gate past 45 minutes is a timeout: no culprit search, and a timeout never holds (GY-3444): every one recuts.
   {
     const { ports, reverted, runs } = gatePorts(batch, () => false, { slow: true });
     const record = fresh();
     assert.equal((await runGate(ports, record)).outcome, 'timeout');
     assert.equal(runs.length, 1, 'no re-run and no culprit search');
-    assert.equal((await runGate(ports, record)).outcome, 'held');
+    assert.equal((await runGate(ports, record)).outcome, 'timeout');
     assert.deepEqual(reverted, []);
     assert.equal(record.verified, verified, 'the last verified commit stays served');
-    assert.match(gateCauses(record)[0]!.detail, /timed out twice/);
+    assert.equal(record.held, null, 'two timeouts hold nothing');
+    assert.deepEqual(gateCauses(record), []);
   }
 });
 
-test('e2e:batch-gate-timeout-retry — a gate held for timing out twice on a tip reruns that tip on its own once its cool-off passes, without main moving, and while held master status attention names the hold and its reason; a gate held for a failing case still waits for main to move (GY-3383)', async () => {
+test('e2e:batch-gate-timeout-retry — a timeout hold an older loop wrote clears on the next gate run, which gates main\'s newest tip and verifies it, and while held master status attention names the hold and its reason; a gate held for a failing case still waits for main to move (GY-3383, GY-3444)', async () => {
   const verified = sha(1), batch = [landing(2), landing(3)], tip = sha(3);
   let clock = Date.parse('2026-11-15T06:00:00Z');
 
-  // Two timeouts on the same tip hold it: the host, not the change, is at fault.
+  // A hold for two timeouts, as a loop before GY-3444 wrote it.
   {
     const world = gatePorts(batch, () => false, { clock });
     world.ports.now = () => clock;
-    let slow = true;
-    const realRun = world.ports.run!;
-    world.ports.run = async (commit, checks, files, timeoutMs) => { if (slow) clock += gateLimitMs + 1; return realRun(commit, checks, files, timeoutMs); };
     const record = bootstrapGate(repository, verified);
-    assert.equal((await runGate(world.ports, record)).outcome, 'timeout');
-    assert.equal((await runGate(world.ports, record)).outcome, 'held');
+    record.held = { tip, reason: `the batch gate timed out twice (past 45 minutes) on ${tip.slice(0, 12)}; ${verified.slice(0, 12)} stays served`, at: new Date(clock).toISOString() };
+    record.attempt = { recuts: 0, timeouts: 2 };
     assert.ok(timeoutHold(record.held), 'the hold says it timed out twice');
-
-    // Within the cool-off the gate stays idle, and master status attention names the hold and its reason.
-    clock += gateHoldCoolOffMs - 1;
-    assert.equal((await runGate(world.ports, record)).outcome, 'idle', 'the held tip waits out its cool-off');
-    const attention = gateHoldAttention(record, clock);
+    const attention = gateHoldAttention(record, clock + 60_000);
     assert.equal(attention.length, 1, 'one attention line while the gate is held');
     assert.equal(attention[0]!.subject, 'the batch gate');
-    assert.match(attention[0]!.text, new RegExp(`held on ${tip.slice(0, 12)} \\(for 29m\\)`));
+    assert.match(attention[0]!.text, new RegExp(`held on ${tip.slice(0, 12)} \\(for 1m\\)`));
     assert.match(attention[0]!.text, /timed out twice/, 'the line carries the hold\'s reason');
-    assert.match(attention[0]!.next, /cool-off/);
+    assert.match(attention[0]!.next, /newest main within one cycle/);
 
-    // Past the cool-off, with main unmoved, the gate reruns the held tip on its own and verifies it.
-    clock += 2;
-    slow = false;
+    // The next gate run, with main unmoved and no cool-off waited, reruns the tip and verifies it.
+    clock += 60_000;
     const runs = world.runs.length;
     const outcome = await runGate(world.ports, record);
     assert.equal(outcome.outcome, 'verified');
-    assert.equal(record.verified, tip, 'the held tip is verified without main moving');
-    assert.equal(record.held, null, 'the expired hold is cleared');
+    assert.equal(record.verified, tip, 'the held tip is verified on the next run');
+    assert.equal(record.held, null, 'the timeout hold is cleared');
     assert.equal(record.attempt.timeouts, 0, 'the rerun starts with a fresh attempt');
-    assert.ok(world.runs.length > runs, 'the gate reran its checks on the held tip');
+    assert.ok(world.runs.length > runs, 'the gate reran its checks');
     assert.deepEqual(gateHoldAttention(record, clock), [], 'a cleared hold raises no attention');
   }
 
@@ -367,8 +360,8 @@ test('e2e:batch-gate-timeout-retry — a gate held for timing out twice on a tip
     assert.equal((await runGate(world.ports, record)).outcome, 'reverted');
     assert.equal((await runGate(world.ports, record)).outcome, 'held');
     assert.ok(!timeoutHold(record.held), 'a failing-case hold is not a timeout hold');
-    clock += gateHoldCoolOffMs * 4;
-    assert.equal((await runGate(world.ports, record)).outcome, 'idle', 'past any cool-off, a failing-case hold still waits for main');
+    clock += 2 * 60 * 60_000;
+    assert.equal((await runGate(world.ports, record)).outcome, 'idle', 'hours later, a failing-case hold still waits for main');
     const attention = gateHoldAttention(record, clock);
     assert.equal(attention.length, 1);
     assert.match(attention[0]!.text, /still fails e2e:case-3/, 'the line carries the failing check');
@@ -464,7 +457,7 @@ test('unit:batch-gate-own-deadline — a gate run is bounded by its own 45-minut
     const record = bootstrapGate(repository, verified);
     assert.equal((await runGate(ports, record)).outcome, 'verified');
     assert.equal(record.verified, tip);
-    assert.deepEqual(limits, [gateLimitMs], 'the trial is bounded by the gate\'s 45 minutes');
+    assert.deepEqual(limits, [2 * gateLimitMs], 'the trial is bounded by the gate\'s 45 minutes left plus one bound of headroom for its slot and CPU waits (GY-3444)');
   }
   // Only a run past 45 minutes counts as a gate timeout.
   {
@@ -565,15 +558,14 @@ test('unit:batch-gate-outcome-visible — every settled run is the record\'s las
     assert.equal(record.lastOutcome!.cases!['case-2'], 'pass');
     assert.ok(Date.parse(record.lastOutcome!.finishedAt!) > 0, 'the end time is recorded');
   }
-  // A timeout names the limit, and the second timeout holds with its reason.
+  // A timeout names the limit, and a second timeout is a timeout again, never a hold (GY-3444).
   {
     const { ports } = gatePorts(batch, () => false, { slow: true });
     const record = bootstrapGate(repository, verified);
     await runGate(ports, record);
     assert.deepEqual([record.lastOutcome!.outcome, record.lastOutcome!.reason], ['timeout', 'past 45 minutes']);
     await runGate(ports, record);
-    assert.equal(record.lastOutcome!.outcome, 'held');
-    assert.match(record.lastOutcome!.reason!, /timed out twice/);
+    assert.deepEqual([record.lastOutcome!.outcome, record.lastOutcome!.reason], ['timeout', 'past 45 minutes']);
     // master status shows the last outcome with its tip cut to the summary's 12 characters.
     assert.equal(gateSummary(record)!.lastOutcome!.tip, tip.slice(0, 12));
     assert.equal(gateSummary(record)!.lastOutcome!.reason, record.lastOutcome!.reason);

@@ -34,7 +34,7 @@ test('integration:batch-gate-bound-follows-catalog — past 1.5x the catalog the
   assert.equal(slow.outcome.outcome === 'timeout' && slow.outcome.boundMs, Math.ceil(1.5 * 61 * minute));
   const unmeasured = await gate(bootstrapGate('owner/project', verified), 46 * minute);
   assert.equal(unmeasured.outcome.outcome, 'timeout', 'no catalog measured: the 45-minute limit');
-  assert.equal(unmeasured.limits[0], gateLimitMs);
+  assert.equal(unmeasured.limits[0], 2 * gateLimitMs, 'the trial gets the 45 minutes plus one bound of headroom for its waits');
   const fast = await gate({ ...bootstrapGate('owner/project', verified), catalogMs: 10 * minute }, 46 * minute);
   assert.equal(fast.outcome.outcome, 'timeout', 'a short catalog never lowers the bound under 45 minutes, nor raises it');
 });
