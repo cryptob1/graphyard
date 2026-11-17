@@ -7,9 +7,7 @@ import { releaseNotesPath, releaseNote, appendReleaseNote } from '../release-not
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
-import { gateTrialKey, trialSlotCount } from '../merge-writer/trial-load.js';
-import { trialAffordableFiles } from '../merge-writer/trial.js';
-import { availableParallelism } from 'node:os';
+import { gateTrialKey } from '../merge-writer/trial-load.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
@@ -298,27 +296,33 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       note('publish-tag', 'done', `Pushed ${tag}; GitHub Actions publishes the package and images`);
     } catch (error) { note('publish-tag', 'failed', `Could not push the release tag: ${message(error)}`); }
   }
-  const slots = trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? Infinity, await trialAffordableFiles(reads.memory));
-  if (!live.gate && busyTrialSlots(cycle.state) < slots) {
+  // GY-3444: the gate has first claim on trial slots — it starts without waiting for a free merge
+  // slot, and its trial containers start before queued merge trials (trialStartOrder).
+  if (!live.gate) {
     const current = record;
     live.gate = (async () => {
       try {
-        // Each mid-flight write keeps the diagnostics' fields and both writers' filings (GY-3147),
-        // as the settled gate's own write does: the batch it carries — tip, files, checks, finished
-        // steps — is what the next loop adopts after a restart (GY-3135).
-        const before = current.verified;
-        const write = () => mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) }));
-        const outcome = await runGate({ ...ports, checkpoint: write }, current);
-        // The diagnostics' fields and filings are theirs: a gate's write keeps what they recorded meanwhile.
-        await write();
-        if (outcome.outcome === 'verified' && before) {
-          const landings = await ports.landings(before, outcome.tip);
-          const reverted = new Set(current.merges.filter(merge => merge.reverted).map(merge => merge.sha));
-          await appendReleaseNote(releaseNotesPath(gate.root), releaseNote(outcome.tip, current.verifiedAt ?? new Date(cycle.now()).toISOString(), landings, reverted));
-        }
-        if (outcome.outcome !== 'idle') {
-          const reason = gateOutcomeReason(outcome);
-          note(`batch-gate:${outcome.tip}`, outcome.outcome === 'held' ? 'failed' : 'done', `Batch gate on ${outcome.tip.slice(0, 12)}: ${outcome.outcome}${reason !== null ? `: ${reason}` : ''}`);
+        // A timed-out run starts again at once: runGate cleared its batch, so the retry is cut from
+        // main's newest tip; a second timeout holds (GY-3383), which ends the loop.
+        for (;;) {
+          // Each mid-flight write keeps the diagnostics' fields and both writers' filings (GY-3147),
+          // as the settled gate's own write does: the batch it carries — tip, files, checks, finished
+          // steps — is what the next loop adopts after a restart (GY-3135).
+          const before = current.verified;
+          const write = () => mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) }));
+          const outcome = await runGate({ ...ports, checkpoint: write }, current);
+          // The diagnostics' fields and filings are theirs: a gate's write keeps what they recorded meanwhile.
+          await write();
+          if (outcome.outcome === 'verified' && before) {
+            const landings = await ports.landings(before, outcome.tip);
+            const reverted = new Set(current.merges.filter(merge => merge.reverted).map(merge => merge.sha));
+            await appendReleaseNote(releaseNotesPath(gate.root), releaseNote(outcome.tip, current.verifiedAt ?? new Date(cycle.now()).toISOString(), landings, reverted));
+          }
+          if (outcome.outcome !== 'idle') {
+            const reason = gateOutcomeReason(outcome);
+            note(`batch-gate:${outcome.tip}`, outcome.outcome === 'held' ? 'failed' : 'done', `Batch gate on ${outcome.tip.slice(0, 12)}: ${outcome.outcome}${reason !== null ? `: ${reason}` : ''}${outcome.outcome === 'timeout' ? '; retrying now on the newest main' : ''}`);
+          }
+          if (outcome.outcome !== 'timeout' || stopped.has(cycle.state) || reads.drain?.()) break;
         }
       } catch (error) {
         // The stop killed the gate's children, so the failure is no outcome: nothing is written or logged.

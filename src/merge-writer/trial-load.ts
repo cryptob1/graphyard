@@ -26,8 +26,8 @@ export const cpuSensorNames = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal']
 export const trialHotCelsius = 85;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
 export const gateTrialKey = 'batch-gate';
-/** Who starts first once a start can go: the lower number. */
-export const trialStartOrder = { merge: 0, gate: 1, verification: 2 } as const;
+/** Who starts first once a start can go: the lower number. GY-3444: the batch gate's checks first, so a loaded host never starves the deploy path. */
+export const trialStartOrder = { gate: 0, merge: 1, verification: 2 } as const;
 
 /**
  * GY-3332: how long a start waits on host pressure (heat, the disk floor) before it fails as a trial-host

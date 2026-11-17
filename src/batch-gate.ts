@@ -471,7 +471,9 @@ export function gateSummary(record: GateRecord | null) {
   if (!record) return null;
   const rate = revertRate(record);
   return { verified: record.verified?.slice(0, 12) ?? null, verifiedAt: record.verifiedAt,
-    inFlight: record.inFlight ? { tip: record.inFlight.tip.slice(0, 12), startedAt: record.inFlight.startedAt, step: record.inFlight.step ?? null } : null,
+    // GY-3444: a run in flight holds first claim on trial slots and pauses implementation launches until it settles.
+    inFlight: record.inFlight ? { tip: record.inFlight.tip.slice(0, 12), startedAt: record.inFlight.startedAt, step: record.inFlight.step ?? null,
+      holds: 'first claim on trial slots; implementation launches paused until the gate settles' } : null,
     // GY-3141: the last settled run's outcome with its reason or failing check, beside the run in flight's current step.
     lastOutcome: record.lastOutcome ? { ...record.lastOutcome, tip: record.lastOutcome.tip ? record.lastOutcome.tip.slice(0, 12) : null } : null,
     held: record.held, revertRate: `${rate.reverted}/${rate.merges}`, diagnosticsAt: record.diagnosticsAt, catalogMs: measuredCatalogMs(record, Date.now()),
