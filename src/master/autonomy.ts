@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 import { localDirectory } from '../onboarding.js';
 import { writeHarnessPermissions } from '../harness.js';
 import type { Work } from '../model.js';
-import { type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema } from './profiles.js';
+import { type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema, selectReviewerProfile } from './profiles.js';
 import { externalCredential, loadStoredMasterConfig } from './config.js';
 import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { setupAgentEnvironments } from './environments.js';
@@ -110,11 +110,13 @@ export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, 
  */
 export async function registeredReview<T>(config: MasterConfig, args: string[], snapshot: { work: Work[] }, mutate: (path: string, body: unknown) => Promise<unknown>, launch: () => Promise<T>) {
   const work = snapshot.work.find(item => item.id === args[0] || item.key === args[0]);
-  const profile = args[1] ? config.reviewers.find(entry => entry.name === args[1]) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
+  const profile = args[1] ? config.reviewers.find(entry => entry.name === args[1]) : selectReviewerProfile(config).profile ?? undefined;
   if (insideMasterConfinement() && work?.candidate) {
     const request = liveReviewRequest(work);
     if (!request) throw new Error(`${work.key} has no pending control-plane review request; host dispatch launches reviews when its review gate requests one`);
-    return { work: work.key, requestId: request.id, queued: true, recorded: 'The durable review request is queued for the host master loop.' };
+    // GY-3428: the request is asked afresh, so the host loop launches a reviewer for it on its next cycle even when it had stopped relaunching the old one.
+    const renewed = await mutate(`work/${work.id}/review-request`, {}) as { requestId: string | null };
+    return { work: work.key, requestId: renewed.requestId, previous: request.id, queued: true, recorded: 'The review request is renewed; the host master loop launches a reviewer for it on its next cycle.' };
   }
   if (!work?.candidate || !profile) return launch();
   const request = liveReviewRequest(work), sha = work.candidate.sha, id = request?.id ?? `review:${sha}`;

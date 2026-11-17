@@ -165,6 +165,13 @@ export const selectionRequestSchema = z.object({
   exclude: z.array(entryName).max(50).default([]),
   /** What the executor just observed about the accounts that live on its host. */
   observations: z.array(z.object({ account: entryName, quota: quotaObservationSchema, smoke: smokeObservationSchema.optional() }).strict()).max(200).default([]),
+  /**
+   * GY-3333: the live sessions other Graphyard installs on this host hold on accounts that live
+   * there, read from the host-level records beside each login home. Every install counts them
+   * toward the account's own session limit, so one login home serves at most its `maxSessions`
+   * sessions across every install on the host.
+   */
+  hostSessions: z.array(z.object({ account: entryName, install: text(200), at: z.string().datetime() }).strict()).max(100).default([]),
 }).strict();
 /** What an executor reports of its own host's accounts between selections (GY-1573): a hold a session just saw. */
 export const observationRequestSchema = selectionRequestSchema.pick({ host: true, observations: true }).strict();

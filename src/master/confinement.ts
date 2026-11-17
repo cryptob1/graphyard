@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defaultChildRun } from '../child-runner.js';
-import { slotsDirectoryVariable } from './verification-slots.js';
+import { heavyDrainDirectory, heavyJobsDirectory, slotsDirectoryVariable } from './verification-slots.js';
 import { herdrTarget } from './herdr.js';
 import { cliMountRoot } from '../install/cli-release.js';
 import { configHome } from '../install/secrets.js';
@@ -422,6 +422,8 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
  * the runtime command follows it.
  */
 export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask; environment?: NodeJS.ProcessEnv;
+  /** GY-3445: the master session writes the host's heavy-work drain record; every other session reads it. */
+  drainWritable?: boolean;
   /** GY-3237: Herdr socket and config directories the session reaches read-only (the master session's own grant): bound after the masks, kept from the process-launch masks, and allowed socket resolution under Landlock. */
   herdrPaths?: readonly string[] }): readonly string[] {
   const root = canonicalPath(resolve(input.coordinatorRoot)), directory = canonicalPath(resolve(input.sessionDirectory));
@@ -459,6 +461,9 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   if (mask && !existsSync(blank)) writeFileSync(blank, '', { mode: 0 });
   const masks = credentialMaskWords(mask, [root, directory], blank);
   const environment = { ...process.env, ...input.environment };
+  // GY-3445: a session granted the heavy-jobs folder to take slots gets its drain folder back read-only.
+  const drain = input.drainWritable ? [] : writable.filter(path => path === heavyJobsDirectory(environment)).map(heavyDrainDirectory);
+  for (const path of drain) mkdirSync(path, { recursive: true });
   // The Herdr grant covers the sockets under it (GY-3237): a pane-inherited HERDR_SOCKET_PATH
   // would otherwise carry the keyring proxy over the very socket the session must reach.
   const launchTargets = hostProcessLaunchTargets(undefined, environment);
@@ -496,6 +501,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const siblingMasks = siblings.length ? credentialMaskWords({ configHome: '', extraPaths: [], own: [], cli: [], hostPaths: siblings }, [root, directory], blank) : [];
   return [bwrap, ...hostFilesystemWords(scratch, environment, [...writable, ...kept.filter(isDirectoryPath)]), ...masks, ...siblingMasks,
     ...writable.filter(path => !withinCheckout(path, root)).flatMap(path => ['--bind', path, path]),
+    ...drain.flatMap(path => ['--ro-bind', path, path]),
     '--ro-bind', root, root,
     ...commonGitDir.flatMap(path => ['--bind', path, path]),
     ...ownGitState.flatMap(path => ['--ro-bind', path, path]),

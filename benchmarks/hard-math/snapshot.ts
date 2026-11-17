@@ -2,6 +2,15 @@ import type { Work } from '../../src/model.js';
 import type { FleetSession } from '../../src/model/registry.js';
 import type { Receipt } from './receipt-schema.js';
 
+/**
+ * Each call reads after the reads before it, never joining one in flight: a read the 250 ms budget
+ * watchdog began before the fixture's last merge returned that item without its merge (GY-3422).
+ */
+export function serialReads<T>(read:()=>Promise<T>):()=>Promise<T> {
+  let last:Promise<unknown>=Promise.resolve();
+  return ()=>{const next=last.catch(()=>{}).then(read);last=next;return next;};
+}
+
 /** Fleet projections can omit their summary marker; always read each tracked document by ID. */
 export async function trackedDocuments(items:Work[],tracked:{id:string;key:string}[],read:(path:string)=>Promise<any>) {
   for(const w of tracked) if(!items.some(item=>item.id===w.id)) throw new Error(`Missing authoritative item ${w.key}`);

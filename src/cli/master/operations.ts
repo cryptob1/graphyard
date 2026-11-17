@@ -4,7 +4,7 @@ import { resourceConflicts } from '../../coordination.js';
 import { dispatchWork, readWorkerCredential } from '../../master.js';
 import { atomicPrivateWrite } from '../../private-file.js';
 import { loopRestartRequestPath } from '../../daemon/run.js';
-import { heavyDrainDirectory, masterStatusReport } from '../master-status.js';
+import { masterStatusReport } from '../master-status.js';
 import { unhandled, type MasterSession } from './session.js';
 import { readSecretFromStdin } from '../context.js';
 import { defaultChildRun } from '../../child-runner.js';
@@ -14,7 +14,7 @@ import { knownGoodState, pinKnownGood } from '../../master/known-good.js';
 import { alignLoopUnit, loopUnitOf, type LoopSupervisorHost } from '../../install/loop-unit.js';
 import type { ChildRun } from '../../child-runner.js';
 import { masterConfinementVariable } from '../../master/launch.js';
-import { heavyDrainLine, requestHeavyDrain, resumeHeavyDrain } from '../../master/verification-slots.js';
+import { heavyDrainLine, heavyJobsDirectory, requestHeavyDrain, resumeHeavyDrain } from '../../master/verification-slots.js';
 
 /** Whether this command runs inside the master session's confinement (GY-1658): its wrapper sets the variable. */
 export const confinedMaster = (env: NodeJS.ProcessEnv = process.env) => env[masterConfinementVariable] === 'master';
@@ -38,11 +38,11 @@ export async function operationsCommand(session: MasterSession, effects: Recover
   // GY-3304: drain the host's heavy work for another project's quiet window, and resume it.
   if (id === 'drain') {
     if (!args.length) throw new Error('Use master drain REASON (say who asked and for how long)');
-    const drain = requestHeavyDrain(heavyDrainDirectory(root, master), args.join(' '), String(coordinator?.actor?.id ?? master.masterAgentName));
+    const drain = requestHeavyDrain(heavyJobsDirectory(), args.join(' '), String(coordinator?.actor?.id ?? master.masterAgentName));
     return print({ drained: true, ...drain, detail: heavyDrainLine(drain) });
   }
   if (id === 'resume') {
-    const lifted = resumeHeavyDrain(heavyDrainDirectory(root, master));
+    const lifted = resumeHeavyDrain(heavyJobsDirectory());
     return print({ resumed: !!lifted, lifted, detail: lifted ? 'New heavy jobs start again from the next loop cycle, each with all its gates' : 'Heavy work was not drained' });
   }
   if (id === 'dispatch') {

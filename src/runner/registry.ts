@@ -64,7 +64,8 @@ export const liveRuns = () => { prune(); return [...runs.values()].filter(entry 
 /**
  * GY-3401: the test parallelism a session launched now gets — the host's cores shared among the
  * sessions already running, never below two. Exported to the session as VITEST_MAX_WORKERS, which
- * `npm test` (tests/helpers/run-tests.ts) takes as its --test-concurrency.
+ * `npm test` (tests/helpers/run-tests.ts) takes as its --test-concurrency, and as PLAYWRIGHT_WORKERS,
+ * which playwright.config takes as its workers (GY-3436).
  */
 export const sessionTestBudget = (cores = availableParallelism(), running = liveRuns().length) => Math.max(2, Math.floor(cores / Math.max(1, running)));
 

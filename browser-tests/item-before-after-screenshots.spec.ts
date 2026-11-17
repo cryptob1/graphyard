@@ -126,7 +126,8 @@ test('e2e:item-before-after-screenshots — the item page shows a browser case\'
     await expect(shots.locator('figure', { hasText: 'After' })).toBeVisible();
     const images = shots.locator('img.artifact-preview');
     await expect(images).toHaveCount(2);
-    const loaded = await images.evaluateAll(entries => (entries as HTMLImageElement[]).map(image => [image.naturalWidth, image.currentSrc] as const));
+    // GY-3391: an img element exists before its blob has loaded, when naturalWidth is still 0; each image is decoded first.
+    const loaded = await images.evaluateAll(entries => Promise.all((entries as HTMLImageElement[]).map(async image => { await image.decode(); return [image.naturalWidth, image.currentSrc] as const; })));
     expect(loaded.length).toBe(2);
     expect(loaded.every(([width]) => width > 0)).toBe(true);
     expect(loaded[0]![1]).not.toBe(loaded[1]![1]);

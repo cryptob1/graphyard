@@ -9,7 +9,7 @@ import { gateFiledItem, pinningProof } from '../src/daemon/cycle-batch-gate.js';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { mergeOne, type MergePorts } from '../src/merge-writer/executor.js';
 import { masterConfigSchema } from '../src/master.js';
-import { trialFailurePrefix } from '../src/model/rework-ground.js';
+import { proofPassesOnBasePrefix } from '../src/model/rework-ground.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -80,5 +80,5 @@ test('e2e:pipeline-gate-filed-item-merges — a gate-filed item whose head adds 
   assert.equal(filed.outcome, 'merged', JSON.stringify(filed));
   const old = await merge(repo, [{ id: 'AC-1', text: 'fixed', proofs: ['manual:batch-gate-repaired', 'e2e:create-work-item'] }] as Work['criteria']);
   assert.equal(old.outcome, 'refused', JSON.stringify(old));
-  assert.match((old as { reason: string }).reason, new RegExp(`^${trialFailurePrefix}: not reproduced: e2e:create-work-item`));
+  assert.match((old as { reason: string }).reason, new RegExp(`^${proofPassesOnBasePrefix}: e2e:create-work-item`));
 });
