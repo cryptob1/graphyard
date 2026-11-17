@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto';
 import { emptyProjectMemory, masterLessons, updateProjectMemoryFromWork, type MemoryNote, type ProductBrief, type ProjectMemory } from './model/project-memory.js';
 import { projectMemorySchema } from './model-boundary/project-memory.js';
 import type { Work } from './model/work.js';
+import { thisWeek, type ThisWeek } from './model/lessons-to-code.js';
+import { gateRecordPath, readGateRecord } from './batch-gate.js';
 
 export { emptyProjectMemory, isNoteRoleRelevant, masterBriefSection, masterLessonCharacterLimit, masterLessonKind, masterLessonWordTotal, masterLessons, masterLessonsSection, productBriefExcerpt, productBriefHeadings, productBriefSectionWords, productBriefWordLimit, productBriefWorkingHeadings, projectMemoryDigest, projectMemoryWordBudget, recentChangesWindowMs, recordChangeInMemory, recordMasterLesson, recordNoteInMemory, reconcileMasterMemory, removeMasterLesson, retainedMasterLessons, retainedMemoryChanges, retainedMemoryNotes, retainedProductBriefChanges, setProductBrief, boundMemoryNotes, updateProjectMemoryFromWork, type MemoryChange, type MemoryNote, type ProjectMemory, type ProductBrief, type ProductBriefChange, type SessionRole } from './model/project-memory.js';
 export { projectMemorySchema, productBriefSchema, productBriefChangeSchema } from './model-boundary/project-memory.js';
@@ -67,4 +69,13 @@ export async function syncProjectMemory(
   }
 
   return memory;
+}
+
+/**
+ * GY-3399: the week's batch-gate reverts beside the week's removed gates (lessons turned into code),
+ * read from the checkout's `.graphyard/main-gate.json` and `.graphyard/project-memory.json` — what
+ * `master status` and the dashboard header both show.
+ */
+export async function thisWeekReport(root: string, now: number): Promise<ThisWeek> {
+  return thisWeek(await readProjectMemory(root).catch(() => null), readGateRecord(gateRecordPath(root)), now);
 }

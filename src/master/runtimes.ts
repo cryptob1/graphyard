@@ -36,7 +36,8 @@ export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note
 export interface RuntimeAdapter {
   kind: string;
   recipe?: LaunchRecipe;
-  headless?: { program?: string; before: string[]; flags: string[]; drop?: string[] };
+  /** `optional`: flags passed only when the installed runtime's `BEFORE --help` lists them (acceptedFlags). */
+  headless?: { program?: string; before: string[]; flags: string[]; drop?: string[]; optional?: string[] };
   request?: (reference: string) => string;
   role?: (reference: string) => string;
   screen?: RegExp;
@@ -89,8 +90,22 @@ async function opencodeAccount(environment: ProbedHome, probe: EnvironmentProbe,
   const available = await models(environment.home).then(output => output.split('\n').map(line => line.trim()).some(line => line === model || line.startsWith(`${model}/`)), () => false);
   return available ? reading : { ...reading, unready: `model unavailable: ${model}` };
 }
-/** What OpenCode itself answers for a home: `--standalone`, or the host's background service answers with its own login. */
-const opencodeCommand = async (home: string, args: string[]) => String(await defaultChildRun(realRuntimeBinary('opencode'), [...args, '--standalone'], { env: { ...process.env, XDG_DATA_HOME: home }, timeoutMs: 30_000 }));
+/**
+ * GY-3425: which of `flags` the installed `program` lists in its `BEFORE --help`, asked once per
+ * launch or probe: an OpenCode that lacks `--standalone` exits with its usage text when given it.
+ * A runtime whose help cannot be read accepts none of them.
+ */
+export async function acceptedFlags(program: string, before: readonly string[], flags: readonly string[], env: NodeJS.ProcessEnv): Promise<string[]> {
+  if (!flags.length) return [];
+  const help = await defaultChildRun(program, [...before, '--help'], { env, timeoutMs: 30_000 }).then(String, () => '');
+  const words = new Set(help.split(/[\s,=]+/));
+  return flags.filter(flag => words.has(flag));
+}
+/** What OpenCode itself answers for a home: `--standalone` where it has one, or the host's background service answers with its own login. */
+async function opencodeCommand(home: string, args: string[]) {
+  const program = realRuntimeBinary('opencode'), env = { ...process.env, XDG_DATA_HOME: home };
+  return String(await defaultChildRun(program, [...args, ...await acceptedFlags(program, ['run'], ['--standalone'], env)], { env, timeoutMs: 30_000 }));
+}
 export const opencodeAuthList = (home: string) => opencodeCommand(home, ['auth', 'list']);
 export const opencodeModels = (home: string) => opencodeCommand(home, ['models']);
 /** GY-3329: where cursor-agent keeps its sign-in on a host with no desktop keyring: `$XDG_CONFIG_HOME/cursor/auth.json`. */
@@ -165,8 +180,9 @@ const builtInAdapters = {
   opencode: {
     // GY-3414: OpenCode 2.x hands every command to a background service on the host's loopback
     // unless `--standalone`, and that service answers with its own login — none — whatever the
-    // account's XDG_DATA_HOME, so the run fell back to the free model and stopped at once.
-    headless: { before: ['run'], flags: ['--format', 'json', '--standalone'] },
+    // account's XDG_DATA_HOME, so the run fell back to the free model and stopped at once. An
+    // OpenCode without it rejects the flag, so it is passed only where `run --help` lists it (GY-3425).
+    headless: { before: ['run'], flags: ['--format', 'json'], optional: ['--standalone'] },
     recipe: { args: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","bash":"allow","webfetch":"allow"}' }, permits: { OPENCODE_PERMISSION: asksNothing }, prompts: 'edit, bash, and webfetch permission prompts',
       tradeoff: 'opencode edits files, runs shell commands, and fetches URLs without asking.' },
     request: reference => `--prompt ${reference}`,

@@ -122,7 +122,7 @@ const waitFor = async (what: () => boolean, ms = 5_000) => { for (let waited = 0
 /** The CPU reading the loop's close step leaves on the state before the merge writer runs. */
 function reading(state: DaemonState, world: World, celsius: number) {
   world.hot = celsius >= trialHalfCelsius;
-  state.cpuPressure = { at: iso(start), avg60: 20, steal: null, stat: null, celsius, testBudget: null, trialCap: state.cpuPressure?.trialCap ?? null };
+  state.cpuPressure = { at: iso(start), avg60: 20, steal: null, stat: null, celsius, samples: [], testBudget: null, trialCap: state.cpuPressure?.trialCap ?? null };
 }
 
 test(`${proof} — at the halving limit running trials finish, no trial starts beyond half the cap of 4, and the full cap returns once it cools`, { timeout: 60_000 }, async () => {

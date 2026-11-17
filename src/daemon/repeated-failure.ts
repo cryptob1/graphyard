@@ -108,7 +108,7 @@ export function repeatedFailureCause(run: FailureRun | undefined): { key: string
   const label = labels[run.kind];
   return failureHeld(run)
     ? { key, detail: `${run.key}: the same ${label} ${run.kind === 'lease' ? 'twice' : 'a third time'}; the loop stopped dispatching it. Decide: resume it with node graphyard master rework ${run.key} REASON naming a different approach, or close or park it. The last two: ${quoted(run)}` }
-    : { key, detail: `${run.key}: the same ${label} twice; its next worker is asked to state a diagnosis and a different approach before changing code. Both: ${quoted(run)}` };
+    : { key, detail: `${run.key}: the same ${label} twice; its next worker is asked to state a diagnosis and a different approach before changing code. Both: ${quoted(run)}${run.kind === 'review' ? ' If a lint rule, type or test could enforce this review reason, record it with graphyard master lesson add REASON --enforceable so it becomes code.' : ''}` };
 }
 
 /** Whether the item's per-failure wake causes give way to its run's single cause. */
