@@ -1,6 +1,6 @@
 # Graphyard
 
-**Run AI coding agents like Claude Code and Codex, ship each goal to production with independent review and proof.**
+**Run Claude Code and Codex; ship goals to production with independent review and proof.**
 
 [![Graphyard walkthrough: goal through review, merge trial, deploy, revert](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
 
@@ -27,16 +27,16 @@ Once published to npm:
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
-The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in.
+Setup connects worker and reviewer accounts. File goals under **New work item**: title, optional description; the master writes criteria. **Advanced** takes full detail. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in.
 
 ## Where things run
 
 ![Diagram of where every part of Graphyard runs, on the host and outside it](docs/diagrams/where-things-run.svg)
 
-`graphyard guide infra` lists every part.
+`graphyard guide infra` lists components.
 
 ## Learn more
 
 - `graphyard guide TOPIC` and `graphyard master guide` print procedures.
-- `graphyard guide setup` and `graphyard guide publishing` cover the details.
+- `graphyard guide setup` and `graphyard guide publishing` explain setup and publishing.
 - [Shared server](docs/shared-server.md) · [Re-render the walkthrough](docs/walkthrough.md) · [Contributing](AGENTS.md) · [Apache 2.0](LICENSE)
