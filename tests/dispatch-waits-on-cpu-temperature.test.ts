@@ -12,7 +12,7 @@ import { Store } from '../src/store.js';
 import { daemonStatePath, emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { hottestCpuCelsius } from '../src/daemon/cpu-pressure.js';
+import { cpuCelsius, trialHalfCelsius } from '../src/daemon/cpu-pressure.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -28,11 +28,12 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 // GY-3373: dispatch waits while the CPU is too hot. On core (24 cores, 18 workers) a sensor read
 // 98C with CPU pressure near 20 percent: the trial guard refused every container start at 95C while
 // the loop, holding launches only on pressure, kept launching agents. Now the loop reads the hottest
-// CPU sensor the trial guard reads, and from that guard's limit minus 5C no worker, reviewer or trial
-// starts, one master status line names the temperature, and a running session is untouched. Below
-// it the next cycle launches; where no sensor is readable the check is skipped. Driven through the
-// loop's own cycle against a temporary control plane, with an injected /sys/class/hwmon tree read
-// by the production reader.
+// CPU sensor the trial guard reads, and at that guard's own heat limit (GY-3416: min(85C, crit-3),
+// so a laptop at 95-98C against a 102C critical is held too) no worker, reviewer or trial starts,
+// one master status line names the temperature, and a running session is untouched. Below the
+// halving limit the next cycle launches; where no sensor is readable the check is skipped. Driven
+// through the loop's own cycle against a temporary control plane, with an injected /sys/class/hwmon
+// tree read by the production reader.
 
 const proof = 'integration:dispatch-waits-on-cpu-temperature';
 const repository = 'owner/cpu-temperature';
@@ -134,7 +135,7 @@ async function hwmon(celsius: number | null) {
 }
 const calm = (stat: number) => ({ pressure: pressureText(20), stat: statText(stat, 0) });
 
-test(`${proof} — at 96C a ready item gets no launch and no trial, master status shows one waiting line with the temperature, and a running session is untouched; at 80C the next cycle launches it`, async () => {
+test(`${proof} — at 96C a ready item gets no launch and no trial, master status shows one waiting line with the temperature, and a running session is untouched; below the halving limit the next cycle launches it`, async () => {
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
   credentialsDirectory = await temporaryDirectory('cpu-temperature-credentials');
   const config = makeConfig();
@@ -155,10 +156,11 @@ test(`${proof} — at 96C a ready item gets no launch and no trial, master statu
   }), submitted.id]);
 
   // CPU pressure is low throughout (20 percent): only the heat holds launches.
-  let sensors = await hwmon(96), stat = 0;
-  const { daemon, seen } = effects(config, herdr, async () => ({ ...calm(stat += 1000), celsius: await hottestCpuCelsius(sensors) }));
+  // GY-3426: the guard averages the last 60 s, so each reading here is a minute after the last.
+  let sensors = await hwmon(96), stat = 0, clock = Date.now();
+  const { daemon, seen } = effects(config, herdr, async () => ({ ...calm(stat += 1000), celsius: await cpuCelsius(sensors) }));
 
-  await runCycle(config, state, daemon);
+  await runCycle(config, state, daemon, () => clock);
   await mergeWriterIdle(state);
   assert.deepEqual(seen.dispatched, [], 'a CPU at 96C launches no worker');
   assert.equal(seen.trials, 0, 'a CPU at 96C starts no trial');
@@ -172,16 +174,17 @@ test(`${proof} — at 96C a ready item gets no launch and no trial, master statu
   assert.equal(report.cpuPressure?.avg60, 20);
   assert.equal(report.cpuPressure?.waiting, 'launches waiting: CPU 96C', 'master status shows one waiting line with the temperature');
 
-  sensors = await hwmon(80);
-  await runCycle(config, state, daemon);
+  sensors = await hwmon(trialHalfCelsius - 1);
+  clock += 61_000;
+  await runCycle(config, state, daemon, () => clock);
   await mergeWriterIdle(state);
-  assert.deepEqual(seen.dispatched, [readyItem.key], 'the ready item launches the first cycle at 80C');
-  assert.ok(seen.trials >= 1, 'the submitted head is trialled the first cycle at 80C');
+  assert.deepEqual(seen.dispatched, [readyItem.key], `the ready item launches the first cycle at ${trialHalfCelsius - 1}C`);
+  assert.ok(seen.trials >= 1, `the submitted head is trialled the first cycle at ${trialHalfCelsius - 1}C`);
   assert.deepEqual(seen.ticks, ['launches waiting: CPU 96C', undefined], 'the dispatcher launches again');
   running = (await reload(runningItem.id)).sessions ?? [];
-  assert.equal(running.at(-1)?.state, 'running', 'the session already running is untouched at 80C too');
+  assert.equal(running.at(-1)?.state, 'running', 'the session already running is untouched once cool too');
   report = await status(config, state);
-  assert.equal(report.cpuPressure?.celsius, 80);
+  assert.equal(report.cpuPressure?.celsius, trialHalfCelsius - 1);
   assert.equal(report.cpuPressure?.waiting, null, 'below the limit no waiting line stands');
 });
 
@@ -193,7 +196,7 @@ test(`${proof} — with no readable CPU sensor launches proceed`, async () => {
   const readyItem = await file('No sensor');
   await ok(token(operator.id), 'POST', `work/${readyItem.id}/ready`, {});
   const sensors = await hwmon(null);
-  const { daemon, seen } = effects(config, { agents: [] }, async () => ({ ...calm(1000), celsius: await hottestCpuCelsius(sensors) }));
+  const { daemon, seen } = effects(config, { agents: [] }, async () => ({ ...calm(1000), celsius: await cpuCelsius(sensors) }));
   await runCycle(config, state, daemon);
   await mergeWriterIdle(state);
   assert.deepEqual(seen.dispatched, [readyItem.key], 'the check is skipped where no CPU sensor is readable');

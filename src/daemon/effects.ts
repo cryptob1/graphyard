@@ -1,3 +1,4 @@
+import type { HostReading } from '../hosts.js';
 import type { Conversation } from '../master/conversation.js';
 import type { RuntimeSession } from '../model/sessions.js';
 import type { SessionInventory } from '../session-inventory.js';
@@ -101,6 +102,8 @@ export interface DaemonEffects {
    * kept and no launch waits on the CPU.
    */
   cpuPressure?: () => Promise<{ pressure: string | null; stat: string | null; celsius?: number | null } | null>;
+  /** GY-3407: this machine and every added host read once, steal measured from the previous readings. */
+  hostReadings?: (previous: HostReading[]) => Promise<HostReading[]>;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   /** Stops what still runs naming a removed worktree (GY-3185), answering what was stopped. */

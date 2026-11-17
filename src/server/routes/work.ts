@@ -11,6 +11,8 @@ import { defineRoutes, parseJson, Sent, type RouteContext } from '../routes.js';
 import { answerHumanDecision, answerHumanProof, listHumanRequests, requestHumanProof, recordCapacity, requestHumanDecision } from '../waits.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
+import { installUrl } from '../../team-access.js';
+import { unownedFamilySql } from '../../store/tables/work.js';
 import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
 import { readTrialScreenshot } from '../trial-screenshots.js';
 import { mergeRecordInput, recordMergeEvent } from '../merge-record.js';
@@ -18,6 +20,12 @@ import { save } from '../../store.js';
 import { lockedWork, workIdByRef } from '../../store/locked-read.js';
 import { applyPreviewRecord, previewRecordBodySchema, previewSiteByteLimit, previewSiteFileLimit } from '../../project-previews.js';
 import type { Services } from '../routes.js';
+
+/** GY-3415: the address the owner opens this install at — its tailnet name once the host reported it (routes/team-access.ts), else the address this request reached. */
+async function installAddress(context: RouteContext) {
+  const report = (await context.services.engine.store.pool.query(`SELECT payload FROM events WHERE ${unownedFamilySql('team-access.')} AND kind = 'team-access.host' ORDER BY seq DESC LIMIT 1`)).rows[0]?.payload;
+  return installUrl(report ?? {}, context.services.teamAccess?.port ?? String(context.req.socket.localPort ?? '')) ?? `http://${context.req.headers.host}`;
+}
 import { hostRunLog } from '../terminal.js';
 import { runTranscript } from '../../model/sessions.js';
 
@@ -69,7 +77,7 @@ export const workRoutes = defineRoutes('work', [
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
       return action === 'park' ? requestHumanDecision(context.services, context.actor, target, data, key)
-        : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key)
+        : action === 'answer' ? answerHumanDecision(context.services, context.actor, target, data, key, await installAddress(context))
         : recordCapacity(context.services, context.actor, target, data, key);
     },
   },

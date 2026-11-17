@@ -22,8 +22,8 @@ const minimumTrialContainers = 6;
 export const trialContainerCap = (cores = availableParallelism(), usable = cores) => Math.max(2, Math.floor(Math.max(minimumTrialContainers, Math.floor(cores / 2)) * usable / cores));
 /** The hwmon sensor names that read a CPU, for the trial guard here and the loop's launch guard (GY-3373). */
 export const cpuSensorNames = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal'];
-/** GY-3376: a start waits while a CPU sensor reads 3C under its own critical (else max) temperature; this is the limit for a sensor that reports neither. */
-export const trialHotCelsius = 95;
+/** GY-3376, GY-3416: a start waits while a CPU sensor reads the lower of this and 3C under its own critical (else max) temperature — a laptop at 95-98C against a 102C crit-3 was never held; this alone is the limit for a sensor that reports neither. */
+export const trialHotCelsius = 85;
 /** The batch gate's key in the trial, a proofless pseudo-item. */
 export const gateTrialKey = 'batch-gate';
 /** Who starts first once a start can go: the lower number. */
@@ -62,10 +62,11 @@ def read(path):
     except OSError:
         return ''
 def limit(path):
+    # GY-3416: the lower of the constant and the sensor's own critical (else max) minus 3.
     for kind in ('_crit', '_max'):
         value = read(path.replace('_input', kind))
         if value.isdigit() and int(value) > 0:
-            return int(value) // 1000 - 3
+            return min(load['hotCelsius'], int(value) // 1000 - 3)
     return load['hotCelsius']
 def hottest():
     # (reading, limit) of the first CPU sensor at or over its own limit, else None.
