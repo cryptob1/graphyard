@@ -37,6 +37,23 @@ export const isPlaceholderServe = (serve: { command?: string } | null | undefine
 /** Why a case cannot run against the placeholder, and what to declare instead. */
 export const placeholderServeRefusal = 'e2e.serve is onboarding\'s placeholder serve, which answers with graphyard.json and runs none of the application: declare the command that serves the application in graphyard.json "e2e": { "serve": { "command", "url", "readySeconds" } }, or a previewable application in delivery.applications';
 
+/** The application's short map: a URL on the served app or a command, plus known traps. */
+export interface AppFeature { name: string; url?: string; command?: string; traps: string[] }
+export interface AppOnboarding { onboarded: boolean; fault: string | null; features: AppFeature[] }
+export function appOnboarding(config: any): AppOnboarding {
+  const serve = config?.e2e?.serve;
+  const features = config?.featureMap;
+  const fault = isPlaceholderServe(serve) ? `Placeholder serve: ${placeholderServeRefusal}`
+    : !serve?.command?.trim() || !serve?.url ? 'Declare e2e.serve in graphyard.json to start the real application.'
+    : !Array.isArray(features) || !features.length || features.some(feature =>
+      !feature || typeof feature.name !== 'string' || !feature.name.trim()
+      || (typeof feature.url !== 'string' || !feature.url.startsWith('/')) && (typeof feature.command !== 'string' || !feature.command.trim())
+      || !Array.isArray(feature.traps) || feature.traps.some((trap: unknown) => typeof trap !== 'string'))
+      ? 'Declare a nonempty featureMap in graphyard.json: each feature needs a name, a URL path or command, and traps (an empty list when none are known).'
+      : null;
+  return { onboarded: !fault, fault, features: fault ? [] : features };
+}
+
 /**
  * The work item that carries the onboarding commit on `graphyard/onboarding` through the normal
  * gates: a chore that requires independent review and CHECKS (the repository's own, else the

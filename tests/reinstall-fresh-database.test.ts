@@ -38,6 +38,7 @@ const planeFetch = (plane: Plane): typeof fetch => async (input, init) => {
 const green = (loop: boolean) => ({
   github: true, githubRepository: 'acme/shop', mergeWriter: { merger: 'github' },
   fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
+  serving: { onboarding: { onboarded: true, fault: null, features: [] } },
   setup: { protection: 'checks', loop },
 });
 

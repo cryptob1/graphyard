@@ -48,6 +48,7 @@ function dependencies(root: string, events: UpEvent[]): UpDependencies {
     serverUrl: async () => SERVER, masterToken: async () => 'm'.repeat(40), operatorToken: async () => 'a'.repeat(40),
     status: async () => ({
       fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, eligible: true }] },
+      serving: { onboarding: { onboarded: true, fault: null, features: [] } },
       setup: { loop: true },
     }),
     publishOnboarding: async () => null,

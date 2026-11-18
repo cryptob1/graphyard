@@ -265,7 +265,7 @@ function boundCaseIds(record: Pick<GateRecord, 'merges'>, landings: readonly Ser
 
 /** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. */
 export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
-  const cases = whole ? await ports.catalog(tip) : [...new Set([...boundCaseIds(record, landings), ...await ports.core(tip)])];
+  const cases = [...new Set([...(whole ? await ports.catalog(tip) : boundCaseIds(record, landings)), ...await ports.core(tip)])];
   return ['build', ...[...new Set(cases)].map(id => `e2e:${id}`), 'affected'];
 }
 
@@ -404,12 +404,14 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
         // A known red is a check that also fails on the last verified commit: an affected test, or a
         // catalog-only e2e case — one no batch item binds, gate.core does not name and smoke is not.
         const catalogOnly = check.startsWith('e2e:') && !(await mustPass()).has(check);
-        if (check.startsWith('test:') || catalogOnly) {
+        const featureMap = check === 'e2e:graphyard-feature-map';
+        if (featureMap || check.startsWith('test:') || catalogOnly) {
           let failsThere = record.results[verified]?.[check];
           if (failsThere === undefined) { await step(`probing ${check} on the verified commit`); failsThere = (await run(verified, [check], files)).includes(check); }
           (record.results[verified] ??= {})[check] = failsThere;
           await ports.checkpoint?.(); // the probe's verdict is saved to the record before anything is filed (GY-3147)
           if (failsThere) {
+            if (featureMap) return hold(`Master fault: ${record.repository}'s real application feature check already fails on the verified commit; repair its serve and feature map before verifying this batch.`);
             knownRed.push(check);
             await fileFailure(ports, record, at(), { key: `known-red:${check}`, title: `Known red on main: ${check}`, description: `${check.startsWith('test:') ? `The test ${check.slice(5)}` : `The E2E case ${check.slice(4)}`} fails on the verified commit ${verified.slice(0, 12)} and on ${tip.slice(0, 12)}. The batch gate exempts it until it is fixed.` });
             continue;

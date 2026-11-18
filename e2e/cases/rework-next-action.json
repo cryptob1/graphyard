@@ -1,0 +1,15 @@
+{
+  "id": "rework-next-action",
+  "title": "A rework brief for a conflict or failed trial names the next action",
+  "description": "A conflict trial failure tells the worker to run sync, resolve and complete; a failing test or e2e trial tells it to reproduce with run-tests.ts and complete; the base-conflict and sync-conflict reasons end with the same sync imperative; every reason fits the rework bound.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "rework reasons name sync, run-tests.ts and complete",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/rework-next-action.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

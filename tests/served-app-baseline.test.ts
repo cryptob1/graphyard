@@ -42,7 +42,7 @@ const serveJs = [
   '}).listen(port, "127.0.0.1");',
 ].join('\n');
 /** The node application graphyard.json declares (GY-3201): built and started at the root, on the PORT the pass gives it. */
-const graphyardJson = JSON.stringify({ delivery: { mode: 'local', applications: [{ id: 'app', kind: 'node', directory: '.', build: 'node build.js', start: 'node serve.js' }] } });
+const graphyardJson = JSON.stringify({ e2e: { serve: { command: 'node serve.js', url: 'http://127.0.0.1:43911/', readySeconds: 30 } }, featureMap: [{ name: 'Home', url: '/', traps: [] }], delivery: { mode: 'local', applications: [{ id: 'app', kind: 'node', directory: '.', build: 'node build.js', start: 'node serve.js' }] } });
 
 /** A minimal npm package and its lockfile, so the fixture's install is the npm ci a real app runs. */
 const packageJson = JSON.stringify({ name: 'fixture-baseline', version: '1.0.0', private: true }) + '\n';

@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { PageHeader } from '../components/page-layout';
+import Term from '../components/term';
 
 /** The delivery flow, one card per step (GY-3295): a short line each, read left to right and top to bottom. */
 const flow: [string, string][] = [
@@ -39,6 +40,7 @@ const faq: [string, string, ReactNode][] = [
   ['faq-what', 'What is Graphyard?', <>A coding factory for one repository. The owner states goals; agents implement, review, prove, merge and deploy them with no person in the loop. Every item, attempt, review and proof is kept on the item’s page.</>],
   ['faq-where', 'What runs locally, and what at a provider?', <>Everything Graphyard runs is on your Linux host: the loop, the deploy watch, the server and its database, merge trials in Docker and every agent session. Off the host are GitHub (your code), the agent providers (Claude, Codex and others answer model calls on your own accounts) and your browser. Graphyard hosts nothing for you. See {link('docs-where', 'Where things run')}.</>],
   ['faq-credentials', 'Which credentials does setup need?', <>A GitHub CLI login with admin access to the repository (<code>gh auth login --scopes repo</code>). <code>up</code> registers a deploy key with it, and only the merge writer pushes; where deploy keys are not allowed, <code>--push-auth gh</code> pushes with your gh login instead. Agent accounts are your own Claude, Codex or other logins on the host, connected from the Setup page. No GitHub App and no publish token are needed.</>],
+  ['faq-onboarding', 'What does onboarded mean?', <>Setup shows Project onboarded when main declares the command that serves the real app and a <Term term="feature map"/>. Batch and deploy checks run against it. A missing one or a placeholder serve shows as a Master fault, and the Master fixes it.</>],
   ['faq-filing', 'How do I file and prioritise work?', <>On Work, press <strong>New work item</strong>. A title and a sentence or two are enough; the Master writes the acceptance criteria, and <strong>Advanced</strong> takes full detail. Set priority from P0 (first) to P3 on the work row or the item page; the next dispatch uses it. The Master files work too, ranked by the product brief.</>],
   ['faq-item', 'What does an item’s page show?', <>It opens on why the item helps users, the proof it works — the trial’s screenshots of the changed page — and one plain line on what changed. Then one line says who acts next and where the item stands. The gates, every trial and each attempt’s detail stay one click down, under Technical details.</>],
   ['faq-taste', 'What is Taste?', <>A feed on Work of the latest shipped items with their evidence. <strong>Looks good</strong> clears the card. <strong>Send back</strong> files your note as a follow-up item and a proposed lesson for agents. Deliveries never wait on it.</>],
@@ -128,7 +130,7 @@ export default function GuidePage() {
           <ul>{outside.map(([part, line]) => <li key={part} className="guide-card"><strong>{part}</strong><span>{line}</span></li>)}</ul>
         </div>
       </figure>
-      <p className="muted">OWNER-NAME is your repository’s slug. The Setup page shows this install’s names.</p>
+      <p className="muted">OWNER-NAME is your repository slug, shown on Setup.</p>
     </section>
 
     <section id="docs-faq" className="panel" aria-labelledby="docs-faq-title">
