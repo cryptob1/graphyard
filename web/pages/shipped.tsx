@@ -5,7 +5,8 @@ import { liveFailingLine, plainStage, serveView } from '../../src/model/plain-st
 import { releasedAt } from '../groups';
 import { releaseView } from '../../src/model/release';
 import { trustCounts, type TrustKind } from '../trust';
-import { Explained } from '../components/term';
+import Term, { Explained } from '../components/term';
+import type { ReactNode } from 'react';
 import type { Dashboard } from './dashboard';
 import { EmptyState, PageHeader, PageSection } from '../components/page-layout';
 
@@ -17,10 +18,33 @@ const trustLabel: Record<TrustKind, string> = {
 };
 
 /**
+ * The trust strip (GY-3395), on the Shipped page since the header shows only what is happening
+ * now (GY-3483): three numbers for the last seven days — the share of
+ * delivered items whose proofs ran the real app, the share sent back for rework, and the items the
+ * batch gate reverted — read off the same snapshot the page below shows (web/trust.ts), each number
+ * filtering the list below to the items behind it. The numbers carry data attributes with
+ * exactly what the sentence says, so a reader (and a test) checks the words against the records
+ * the item pages read, in the app's own words: verified by running, sent back, reverted — the
+ * last with the glossary's "reverts this week" on hover, which names the seven-day window.
+ */
+export function TrustStrip({ work, observedAt, onItems }: { work: Work[]; observedAt: number; onItems: (kind: TrustKind) => void }) {
+  const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
+  const { delivered, verifiedByRunning, sentBack, reverts } = trustCounts(work, now);
+  const number = (kind: TrustKind, items: readonly Work[], label: ReactNode, share = false) => <button type="button" className="text-button" data-trust={kind} onClick={() => onItems(kind)}>
+    <span className="mono">{items.length}{share ? `/${delivered.length}` : ''}</span> {label}
+  </button>;
+  return <p className="trust-strip" aria-label="Trust" data-verified-by-running={verifiedByRunning.length} data-delivered={delivered.length} data-sent-back={sentBack.length} data-reverts={reverts.length}>
+    {number('verified-by-running', verifiedByRunning, 'verified by running', true)}
+    <span aria-hidden="true"> · </span>{number('sent-back', sentBack, 'sent back', true)}
+    <span aria-hidden="true"> · </span>{number('reverts', reverts, <Term term="reverts this week" focusable={false}>reverted</Term>)}
+  </p>;
+}
+
+/**
  * Every delivered item, newest first, with its pull request and the plain stage (GY-2988) —
  * Merged, not live yet / Live / Live and verified / Live and failing / Done; a failing live app is
  * one release-level line, not a verdict on every row; closed items apart, below. A trust number
- * in the header (GY-3395) opens this page showing exactly the items behind it, from the last
+ * on the strip above (GY-3395) opens this page showing exactly the items behind it, from the last
  * seven days, with the note saying so.
  */
 export default function ShippedPage({ work, status, observedAt, setSelected, shippedFilter, setShippedFilter }: Dashboard) {
@@ -38,6 +62,7 @@ export default function ShippedPage({ work, status, observedAt, setSelected, shi
     : shipped;
   return <>
     <PageHeader title="Shipped" fact={shipped.length ? `${shipped.length} shipped · latest ${new Date(shippedAt(shipped[0])).toLocaleDateString()}, ${shipped[0].key} ${shipped[0].title}` : 'Nothing has shipped yet.'}/>
+    <TrustStrip work={work} observedAt={observedAt} onItems={setShippedFilter}/>
     {liveFailingLine(serve) && <p className="danger-text" data-live-failing>{liveFailingLine(serve)}.</p>}
     {shippedFilter && <p className="filter-note" data-trust-note={shippedFilter}>Showing {shown.length}{shippedFilter === 'reverts' ? ' reverted this week' : ` of ${counts.delivered.length} delivered this week`}: {trustLabel[shippedFilter]} · <button type="button" className="text-button" onClick={() => setShippedFilter(null)}>Show every delivered item</button></p>}
     {shown.length === 0 ? <EmptyState title={shippedFilter ? `No ${trustLabel[shippedFilter]} in the last 7 days.` : 'Shipped items land here.'}>{shippedFilter ? undefined : 'Each item appears once its pull request merges, with whether it is live.'}</EmptyState>

@@ -127,24 +127,22 @@ test('unit:ui-four-states-board — the board API and the Work page list only To
     assert.equal(tile, served.groups[group].length, groupLabel[group]);
   }
 
-  // The one release line, from the release view the board already reads: the served commit, its
-  // health, and the merged changes it does not carry yet.
+  // The one release line, from the release view the board already reads: the live commit and the
+  // merged changes it does not carry yet, with ill health named only when there is some.
   const status = { ...boardStatus(), production: { observedAt: new Date(NOW - minute).toISOString(), serving: 'a'.repeat(40), error: null, pending: ['GY-18', 'GY-19', mergedUndeployed().key], incidents: [] } };
   const line = renderToStaticMarkup(createElement(ReleaseLine, { status }))!;
   assert.match(line, /data-release-line="serving"/);
   assert.match(line, /data-healthy="true"/);
   assert.match(line, /data-pending="3"/);
   assert.match(line, new RegExp(`title="${'a'.repeat(40)}">a{8}</span>`), 'the served commit, eight characters');
-  assert.match(line, /Serving <span class="mono" title="a{40}">a{8}<\/span> · <strong>healthy<\/strong> · 3 merged changes not carried yet/);
+  assert.match(line, /Live: <span class="mono" title="a{40}">a{8}<\/span> · 3 changes not live yet/);
   // An open deployment incident is an unhealthy release; the pending count is lag, not ill health.
   const unhealthy = { ...status, production: { ...status.production, incidents: [{ key: 'GY-18', status: 'missing', reason: 'no deployment observed' }] } };
   const failing = renderToStaticMarkup(createElement(ReleaseLine, { status: unhealthy }))!;
   assert.match(failing, /data-healthy="false"/);
   assert.match(failing, /<strong>unhealthy: 1 open deployment incident<\/strong>/);
-  // Where nothing has observed production, the line says so rather than claiming either way.
-  const unobserved = renderToStaticMarkup(createElement(ReleaseLine, { status: boardStatus() }))!;
-  assert.match(unobserved, /data-release-line="unobserved"/);
-  assert.match(unobserved, /Release: not watched/);
+  // Where nothing has observed production there is no line, never a claim either way (GY-3483).
+  assert.equal(renderToStaticMarkup(createElement(ReleaseLine, { status: boardStatus() })), '');
   // The Work page carries the line in its top bar, at the same place the reader starts.
   assert.match(home(work, { status: status as Dashboard['status'] }), /data-release-line="serving"/);
 });

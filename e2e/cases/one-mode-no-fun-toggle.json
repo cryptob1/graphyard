@@ -1,7 +1,7 @@
 {
   "id": "one-mode-no-fun-toggle",
   "title": "The dashboard has one mode: no Fun toggle",
-  "description": "A real browser on the built dashboard: no Fun control exists on the Work, Master, Workers or Settings pages; a stored Fun preference from before the change (graphyard.fun = off) has no effect, so the build line, agent names and the trust strip still show and the page carries no data-fun attribute; the left menu and the Master page read Master and Workers; and no source file under web/ or src/ references the Fun mode setting.",
+  "description": "A real browser on the built dashboard: no Fun control exists on the Work, Master, Workers or Settings pages; a stored Fun preference from before the change (graphyard.fun = off) has no effect, so the build line, agent names and the activity strip still show and the page carries no data-fun attribute; the left menu and the Master page read Master and Workers; and no source file under web/ or src/ references the Fun mode setting.",
   "tags": ["dashboard"],
   "target": "any",
   "required": false,

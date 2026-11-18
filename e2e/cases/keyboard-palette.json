@@ -1,11 +1,11 @@
 {
   "id": "keyboard-palette",
   "title": "The dashboard is keyboard-first: a Cmd/Ctrl+K command palette, j/k over Work rows, g-prefix jumps, and a ? shortcut sheet",
-  "description": "A real browser on the built dashboard: Cmd/Ctrl+K (and a visible button, so a phone can too) opens the command palette; typing an item key and Enter opens that item's page, and the palette also opens Master (whose title reads Master) and toggles the theme; j/k move a cursor through the Work rows and Enter opens the row under it; g m opens Master, g w returns to Work, g s opens Setup; ? shows the shortcut sheet and Esc closes it.",
+  "description": "A real browser on the built dashboard: Cmd/Ctrl+K (and a visible button, so a phone can too) opens the command palette; typing an item key and Enter opens that item's page, and the palette also opens Master (whose title reads Master) and toggles the theme; j/k move a cursor through the Work rows and Enter opens the row under it; g m opens Master, g w returns to Work, g s opens Setup; ? shows the shortcut sheet and Esc closes it; the top bar strip reads agents working, checks running and merged today with the counts the Workers page reads.",
   "tags": ["dashboard"],
   "target": "any",
   "required": false,
   "steps": [
-    { "kind": "command", "name": "palette, row navigation, jumps and the shortcut sheet", "run": "npm run test:browser -- browser-tests/keyboard-palette.spec.ts", "timeoutSeconds": 300 }
+    { "kind": "command", "name": "palette, row navigation, jumps, the shortcut sheet and the top bar strip", "run": "npm run test:browser -- browser-tests/keyboard-palette.spec.ts", "timeoutSeconds": 300 }
   ]
 }

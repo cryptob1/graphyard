@@ -1,0 +1,11 @@
+{
+  "id": "dashboard-header-plain",
+  "title": "The top bar shows only what is happening now, and the sidebar foot is short",
+  "description": "A real browser on the built dashboard over the real control plane, managing a repository with no deploy and a batch gate running on main. At 1280 and 390 px the header strip reads '0 agents working · 1 check running · 0 merged today' with the counts on data-on-shift, data-in-trial and data-shipped-tonight; there is no release line and no week line; on Work, Master and Settings the header and sidebar carry no 'No deploy configured', 'Reverts this week', 'Gates removed this week', 'local-viewer', 'updated' or principal id; the sidebar foot reads 'Live' and 'Avery · Owner'; and Delivery opens as a Settings tab saying no deploy is configured.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "the plain header and sidebar foot at 1280 and 390 px, and Delivery under Settings", "run": "npm run test:browser -- browser-tests/dashboard-header-plain.spec.ts", "timeoutSeconds": 420 }
+  ]
+}

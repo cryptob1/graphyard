@@ -1,10 +1,9 @@
-import type { ReactNode } from 'react';
 import { glossary, type GlossaryTerm } from '../glossary';
 import Term from './term';
 import { viewFor, visibleViews, type View } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
-import { trustCounts, type TrustKind } from '../trust';
-import { shippedCounts } from '../groups';
+import { mergedAt, shippedCounts } from '../groups';
+import { workersView } from '../workers-view';
 import type { Work } from '../../src/model';
 import { OpenApp } from './where-it-runs';
 
@@ -12,24 +11,21 @@ import { OpenApp } from './where-it-runs';
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
 
 /**
- * The trust strip (GY-3395): the header's three numbers for the last seven days — the share of
- * delivered items whose proofs ran the real app, the share sent back for rework, and the items the
- * batch gate reverted — read off the same snapshot the page below shows (web/trust.ts), each number
- * linking to the items behind it on the Shipped page. The numbers carry data attributes with
- * exactly what the sentence says, so a reader (and a test) checks the words against the records
- * the item pages read, in the app's own words: verified by running, sent back, reverted — the
- * last with the glossary's "reverts this week" on hover, which names the seven-day window.
+ * GY-3483: the header's strip says what is happening now — live agent sessions (the Workers page's
+ * open ones plus the master's pane), the checks running (merge trials and a batch gate on main, as
+ * /api/status counts them) and today's merges. Each number rides a data attribute for readers and tests.
  */
-export function TrustStrip({ work, observedAt, onItems }: { work: Work[]; observedAt: number; onItems: (kind: TrustKind) => void }) {
+export function ActivityStrip({ work, observedAt, status }: { work: Work[]; observedAt: number; status?: Dashboard['status'] }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
-  const { delivered, verifiedByRunning, sentBack, reverts } = trustCounts(work, now);
-  const number = (kind: TrustKind, items: readonly Work[], label: ReactNode, share = false) => <button type="button" className="text-button" data-trust={kind} onClick={() => onItems(kind)}>
-    <span className="mono">{items.length}{share ? `/${delivered.length}` : ''}</span> {label}
-  </button>;
-  return <p className="trust-strip" aria-label="Trust" data-verified-by-running={verifiedByRunning.length} data-delivered={delivered.length} data-sent-back={sentBack.length} data-reverts={reverts.length}>
-    <span className="beacon" aria-hidden="true"/>{number('verified-by-running', verifiedByRunning, 'verified by running', true)}
-    <span aria-hidden="true"> · </span>{number('sent-back', sentBack, 'sent back', true)}
-    <span aria-hidden="true"> · </span>{number('reverts', reverts, <Term term="reverts this week" focusable={false}>reverted</Term>)}
+  const agents = workersView(work, new Date(now)).running.filter(row => !row.stale && row.roleKind !== 'master').length + (status?.setup?.panes?.master ? 1 : 0);
+  const checks = typeof status?.checksRunning === 'number' ? status.checksRunning : 0;
+  const today = new Date(now).setHours(0, 0, 0, 0);
+  const merged = work.filter(item => item.stage === 'done' && !!(item.delivery?.mergedAt ?? item.observation?.mergedAt) && mergedAt(item) >= today).length;
+  const plural = (n: number, word: string) => <><span className="mono">{n}</span> {word}{n === 1 ? '' : 's'}</>;
+  return <p className="activity-strip" aria-label="Activity" data-on-shift={agents} data-in-trial={checks} data-shipped-tonight={merged}>
+    <span className="beacon" aria-hidden="true"/>{plural(agents, 'agent')} working
+    <span aria-hidden="true"> · </span>{plural(checks, 'check')} running
+    <span aria-hidden="true"> · </span><span className="mono">{merged}</span> merged today
   </p>;
 }
 
@@ -46,28 +42,21 @@ export function ShippedStrip({ work, observedAt, live }: { work: Work[]; observe
   </p>;
 }
 
+/** "· <n> changes not live yet", or nothing when the live commit carries every merge. */
+const notLive = (pending: number | null) => pending ? <> · {pending} {pending === 1 ? 'change' : 'changes'} not live yet</> : null;
+
 /**
- * The board's one release line (GY-1979). A repository that declares a node application
- * (GY-2976) renders what the deploy unit's serve pass last served — "Serving <commit>" with the
- * merged changes main holds since it, the last build failure, a link to the declared URL, and the
- * served commit's required cases' verdict (GY-2983): "verified", "failing <case>: <step>" once a
- * required case is broken, or "not yet run" while the pass has recorded no verdict. Elsewhere a
- * managed install (GY-2964) names its repository's own serving, which only a deploy record naming
- * it can: "Serving <commit>" with the merged changes main holds since it, or "No deploy configured
- * · main <tip>" — never the control plane's own commit, which serves Graphyard's code, not the
- * managed repository's. Elsewhere it reads the production watch's report on status (`production`),
- * the same view the board reads (src/model/release.ts): the commit production serves, whether it is
- * healthy, and how many merged changes it does not carry yet. Health is the watch's own: an open
- * deployment incident is an unhealthy release; a pending count is lag, not ill health. Where
- * nothing has observed production (no watch configured, a failed provider read, an unknown serving
- * commit) the line says so rather than claiming either way — "Release: not watched", never a
- * serving sha or health claim without an observation. It is plain text, not a live region: it
- * refreshes with every poll, and the page's own `role="status"` regions (loading notices) stay
- * unique for readers and tests.
+ * The board's one release line (GY-1979), shown only when it says something (GY-3483): "Live:
+ * <sha8>" with the merged changes the live commit does not carry yet. A declared node application
+ * (GY-2976) reads what the serve pass last served, with its required cases' verdict (GY-2983) once
+ * one is recorded, the last build failure and a link to the declared URL; a managed install
+ * (GY-2964) reads the deploy record naming its repository; elsewhere the production watch's report
+ * (src/model/release.ts), with its open deployment incidents. With no deploy configured, or
+ * nothing observing production, there is no line — Settings → Delivery says so.
  */
 export function ReleaseLine({ status }: { status?: Dashboard['status'] }) {
   // The declared serve's serving, read from master status's serving block over the API.
-  const serving = status?.serving as { commit?: unknown; main?: unknown; pending?: unknown; failedDeploy?: { tip?: unknown; reason?: unknown } | null | undefined; serve?: { url?: unknown; failure?: { commit?: unknown; reason?: unknown } | null; check?: { verified?: unknown; case?: unknown; step?: unknown } | null } | null | undefined } | null | undefined;
+  const serving = status?.serving as { commit?: unknown; main?: unknown; pending?: unknown; serve?: { url?: unknown; failure?: { commit?: unknown; reason?: unknown } | null; check?: { verified?: unknown; case?: unknown; step?: unknown } | null } | null | undefined } | null | undefined;
   const declared = serving?.serve && typeof serving.serve === 'object' ? serving.serve : null;
   if (declared) {
     const commit = typeof serving!.commit === 'string' && serving!.commit ? serving!.commit : null;
@@ -81,53 +70,45 @@ export function ReleaseLine({ status }: { status?: Dashboard['status'] }) {
     try { host = url ? new URL(url).host : ''; } catch { /* the declared text stands */ }
     return <p className="release-line" data-release-line={commit ? 'serving' : 'unserved'}>
       {commit
-        ? <>Serving {shortSha(commit)}{pending !== null && pending > 0 && <> · {pending} merged {pending === 1 ? 'change' : 'changes'} not carried yet</>}
+        ? <>Live: {shortSha(commit)}{notLive(pending)}
           {check && check.verified === true && <> · verified</>}
-          {check && check.verified === false && typeof check.case === 'string' && <> · failing {check.case}{typeof check.step === 'string' && check.step ? <>: {check.step}</> : null}</>}
-          {!check && <> · not yet run</>}</>
+          {check && check.verified === false && typeof check.case === 'string' && <> · failing {check.case}{typeof check.step === 'string' && check.step ? <>: {check.step}</> : null}</>}</>
         : <>No serve yet{main && <> · main {shortSha(main)}</>}</>}
       {failure && <> · build of {shortSha(failure.commit)} failed: {failure.reason.slice(0, 140)}</>}
       {url && <> · <a href={url}>Served · {host}</a></>}
     </p>;
   }
-  const deploy = status?.deploy as { configured?: unknown; tip?: unknown; main?: unknown; pending?: unknown } | null | undefined;
+  const deploy = status?.deploy as { configured?: unknown; tip?: unknown; pending?: unknown } | null | undefined;
   if (deploy && typeof deploy === 'object') {
-    const configured = deploy.configured === true && typeof deploy.tip === 'string' && !!deploy.tip;
-    const pending = typeof deploy.pending === 'number' ? deploy.pending : null;
-    const main = typeof deploy.main === 'string' && deploy.main ? deploy.main : null;
-    return <p className="release-line" data-release-line={configured ? 'serving' : 'undeployed'}>
-      {configured
-        ? <>Serving {shortSha(deploy.tip as string)}{pending !== null && <> · {pending} merged {pending === 1 ? 'change' : 'changes'} not carried yet</>}</>
-        : <>No deploy configured{main && <> · main {shortSha(main)}</>}</>}
-    </p>;
+    if (deploy.configured !== true || typeof deploy.tip !== 'string' || !deploy.tip) return null;
+    return <p className="release-line" data-release-line="serving">Live: {shortSha(deploy.tip)}{notLive(typeof deploy.pending === 'number' ? deploy.pending : null)}</p>;
   }
   const watch = status?.production as { observedAt?: unknown; serving?: unknown; error?: unknown; pending?: unknown; incidents?: unknown } | null | undefined;
-  const observed = !!watch?.observedAt && typeof watch.serving === 'string' && !!watch.serving && !watch.error;
-  const incidents = Array.isArray(watch?.incidents) ? watch.incidents.length : 0;
-  const pending = Array.isArray(watch?.pending) ? watch.pending.filter(entry => typeof entry === 'string').length : 0;
-  return <p className="release-line" data-release-line={observed ? 'serving' : 'unobserved'} data-healthy={observed ? incidents === 0 : undefined} data-pending={observed ? pending : undefined}>
-    {observed
-      ? <>Serving {shortSha(watch!.serving as string)} · <strong>{incidents ? `unhealthy: ${incidents} open deployment ${incidents === 1 ? 'incident' : 'incidents'}` : 'healthy'}</strong> · {pending} merged {pending === 1 ? 'change' : 'changes'} not carried yet</>
-      : <>Release: not watched</>}
+  if (!watch?.observedAt || typeof watch.serving !== 'string' || !watch.serving || watch.error) return null;
+  const incidents = Array.isArray(watch.incidents) ? watch.incidents.length : 0;
+  const pending = Array.isArray(watch.pending) ? watch.pending.filter(entry => typeof entry === 'string').length : 0;
+  return <p className="release-line" data-release-line="serving" data-healthy={incidents === 0} data-pending={pending}>
+    Live: {shortSha(watch.serving)}{notLive(pending)}
+    {incidents > 0 && <> · <strong>unhealthy: {incidents} open deployment {incidents === 1 ? 'incident' : 'incidents'}</strong></>}
   </p>;
 }
 
 /**
- * GY-3399: the week's batch-gate reverts beside the week's gates removed — lessons the master
- * turned into code, whose item's delivery removed them — as /api/status's `thisWeek` reports them,
- * each count followed by links that open its items. Absent while the status names no week.
+ * GY-3399: the week's batch-gate reverts and gates removed — lessons the master turned into code,
+ * whose item's delivery removed them — as /api/status's `thisWeek` reports them, each count
+ * followed by links that open its items. One line, shown only while either count is above zero (GY-3483).
  */
 export function WeekLine({ status, work, open }: { status?: Dashboard['status']; work: Work[]; open?: (id: string) => void }) {
   const week = status?.thisWeek as { reverts?: unknown; revertedItems?: unknown; gatesRemoved?: unknown; gatesRemovedItems?: unknown } | null | undefined;
-  if (!week || typeof week.reverts !== 'number' || typeof week.gatesRemoved !== 'number') return null;
+  if (!week || typeof week.reverts !== 'number' || typeof week.gatesRemoved !== 'number' || (!week.reverts && !week.gatesRemoved)) return null;
   const keys = (value: unknown) => Array.isArray(value) ? value.filter((key): key is string => typeof key === 'string') : [];
   const links = (value: unknown) => keys(value).map(key => {
     const id = work.find(item => item.key === key)?.id;
     return <span key={key}> <a className="mono" href={`#${key}`} onClick={event => { if (id && open) { event.preventDefault(); open(id); } }}>{key}</a></span>;
   });
   return <p className="week-line" data-reverts={week.reverts} data-gates-removed={week.gatesRemoved}>
-    <Term term="reverts this week">Reverts this week</Term>: <span className="mono">{week.reverts}</span>{links(week.revertedItems)}
-    <span aria-hidden="true"> · </span><Term term="gates removed this week">Gates removed this week</Term>: <span className="mono">{week.gatesRemoved}</span>{links(week.gatesRemovedItems)}
+    This week: <span className="mono">{week.reverts}</span> {week.reverts === 1 ? 'revert' : 'reverts'}{links(week.revertedItems)}
+    <span aria-hidden="true"> · </span><span className="mono">{week.gatesRemoved}</span> {week.gatesRemoved === 1 ? 'gate' : 'gates'} removed{links(week.gatesRemovedItems)}
   </p>;
 }
 
@@ -151,7 +132,7 @@ const meaning = (label: string): GlossaryTerm | null => {
  * whole feature.
  */
 export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }) {
-  const { view, setView, status, selected, setSelected, work, observedAt, onPalette, setShippedFilter } = dashboard;
+  const { view, setView, status, selected, work, observedAt, onPalette } = dashboard;
   const section = viewFor(view).section;
   const pages = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
   const tabs = pages.filter(page => !page.advanced), advanced = pages.filter(page => page.advanced);
@@ -160,7 +141,7 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
     <div className="top-bar-row">
       {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}
       <div className="top-bar-live">
-        <TrustStrip work={work} observedAt={observedAt} onItems={kind => { setSelected(null); setShippedFilter(kind); setView('shipped'); }}/>
+        <ActivityStrip work={work} observedAt={observedAt} status={status}/>
         <ShippedStrip work={work} observedAt={observedAt} live={status?.live}/>
         <OpenApp status={status}/>
         {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
