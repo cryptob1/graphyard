@@ -18,7 +18,7 @@ import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../c
 import { capacityRefusal } from '../fleet.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterCauses, masterCausePrompt, messageCauses } from './master-stalled-delivery.js';
-import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld, normalizeFailureReason } from './repeated-failure.js';
+import { accountNames, advanceFailureRuns, diagnosisSection, failureHeld, normalizeFailureReason, repeatingItems } from './repeated-failure.js';
 import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
 import { herdrWorkspaceOf } from '../master/herdr.js';
@@ -45,10 +45,11 @@ import { actionStallDelay, actionStallThreshold } from '../model/action-progress
 import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
-import { cpuPressureStep, cpuWaiting, implementationWaiting } from './cpu-pressure.js';
+import { cpuPressureStep, cpuWaiting, implementationWaiting, sessionUsageStep } from './cpu-pressure.js';
 import { batchGateRunning } from './trial-slots.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
+import { recordStallAlarm, stallAlarm } from './stall-alarm.js';
 import { controlPlaneStep } from './control-plane.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
@@ -172,9 +173,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
       void effects.persist(state).catch(() => {});
       return;
     }
-    const reason = normalizeFailureReason(message(error)).slice(0, 1000), at = new Date(now()).toISOString();
+    // The run counts equal failures by their normalized words; the entry keeps the last error as it read (the stall alarm names it, GY-3432).
+    const reason = message(error).slice(0, 1000), at = new Date(now()).toISOString();
     const prior = state.stepFailures[name];
-    const run = prior && prior.reason === reason ? { step: name, reason, count: prior.count + 1, at } : { step: name, reason, count: 1, at };
+    const same = !!prior && normalizeFailureReason(prior.reason) === normalizeFailureReason(reason);
+    const run = { step: name, reason, count: same ? prior.count + 1 : 1, at };
     state.stepFailures[name] = run;
     if (run.count < stepFailureThreshold) return;
     const detail = `The loop's ${name} step failed the same way ${stepFailureThreshold} consecutive cycles: ${message(error)}`.slice(0, actionDetailMax);
@@ -504,6 +507,8 @@ async function closeStep(cycle: Cycle) {
   // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new
   // launches while it is saturated — before anything of this cycle starts one.
   await cpuPressureStep(cycle);
+  // GY-3438: and every agent session's use against its CPU and memory caps.
+  sessionUsageStep(cycle);
   // GY-3407: every host is read for the Workers page; one that does not answer reads away until it does.
   if (cycle.effects.hostReadings) cycle.state.hosts = await cycle.effects.hostReadings(cycle.state.hosts).catch(error => { cycle.log(`[graphyard-master] the host readings failed: ${message(error)}`); return cycle.state.hosts; });
 }
@@ -692,8 +697,18 @@ async function dispatchStep(cycle: Cycle) {
     try { await effects.askHumanProof(item, proof); await note(cycle, key, 'judgement', item.key, 'done', `Asked a person for ${proof} on ${item.candidate!.sha.slice(0, 12)}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not ask a person for ${proof} on ${item.key}: ${message(error)}`); }
   }
-  await effects.dispatchTick?.(snapshot, cpuWaitingLine);
-  await masterSession(cycle, open);
+  // GY-3432: the stall alarm, before the master is woken, so a raised alarm wakes it this cycle.
+  if (!config.forPerson) {
+    const running = snapshot.work.flatMap(item => item.sessions ?? []).filter(session => session.kind === 'implementation' && session.state === 'running').length;
+    // An item in a run of equal failures already wakes the master by that run (GY-3104), held or not.
+    const repeating = repeatingItems(state.failureRuns), unheld = (item: Work) => !repeating.has(item.key);
+    const alarm = stallAlarm({ now: clock, open: open.filter(unheld), ready: claimable.filter(unheld), freeSlots: allowed - running,
+      state, registry, serving: await Promise.resolve(effects.servingCommit?.()).catch(() => null) ?? null });
+    if (recordStallAlarm(state, alarm, clock)) { cycle.log(`[graphyard-master] cycle ${state.cycle}: ${alarm ?? 'the stall alarm cleared'}`); await effects.persist(state); }
+  }
+  // A dispatch tick that fails (its state cannot be saved) still wakes the master.
+  try { await effects.dispatchTick?.(snapshot, cpuWaitingLine); }
+  finally { await masterSession(cycle, open); }
 }
 
 /**
@@ -1032,10 +1047,20 @@ async function masterPaneFailover(cycle: Cycle, handle: RuntimeSession, open: Wo
   const bare = handle.agent === null && !exited;
   master.misses = bare ? master.misses + 1 : 0;
   if (!notice && !exited && !(bare && master.misses >= 2)) return;
-  const reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : bare ? 'its pane held a bare shell with no agent on two consecutive cycles, so the session is gone' : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
+  let reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : bare ? 'its pane held a bare shell with no agent on two consecutive cycles, so the session is gone' : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
   const key = cycle.config.forPerson ? `master:failover:${cycle.config.forPerson}` : 'master:failover';
   try {
-    if (notice && master.account && sessions.exhaust) await sessions.exhaust(master.account, notice);
+    if (notice && master.account && sessions.exhaust) {
+      const checked = await sessions.exhaust(master.account, notice);
+      if (checked?.available || checked?.until && Date.parse(checked.until) <= clock) {
+        if (!exited && !(bare && master.misses >= 2)) return;
+        notice = null;
+        reason = 'its session exited; its account passed the live check';
+      } else if (checked?.until) {
+        notice = { ...notice, reason: checked.reason ?? notice.reason, resetsAt: checked.until };
+        reason = `its account failed the live request: ${notice.reason}`;
+      }
+    }
     if (handle.pane_id) await Promise.resolve(effects.closeSession(handle.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
     state.master = { ...master, agentName: null, pane: null, runtime: null, adopted: false, rotations: master.rotations + 1, misses: 0,
       lastEnd: { cause: notice ? 'exhausted' : 'exited', at: new Date(clock).toISOString(), detail: reason.slice(0, 500) },

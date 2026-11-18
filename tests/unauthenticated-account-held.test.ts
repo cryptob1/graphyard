@@ -64,6 +64,7 @@ before(async () => {
 const { appendFileSync, existsSync } = require('node:fs');
 const home = process.env.CLAUDE_CONFIG_DIR ?? '';
 if (existsSync(home + '/lapsed')) { console.error(${JSON.stringify(message)}); process.exit(1); }
+if (process.argv.includes('Reply with the single word OK.')) { console.log('OK'); process.exit(0); }
 appendFileSync(${JSON.stringify(join(scratch, 'answered'))}, home + '\\n');
 console.log('{"verdict": "APPROVE", "body": "Reviewed head ${head} against base ${base}. AC-1 met: feature.ts sets the flag.", "findings": []}');
 `, { mode: 0o755 });
@@ -117,7 +118,7 @@ test('e2e:unauthenticated-account-held — reviews whose agent exits not logged 
   assert.deepEqual(await answered(), [working], 'the answer came from the working account');
   const held = await account('lapsed-account');
   assert.equal(held.eligible, false);
-  assert.match(held.ineligible!, /^lapsed-account is not logged in: its agent reported "Not logged in · Please run \/login"; held until cleared with master registry account quota lapsed-account available$/);
+  assert.match(held.ineligible!, /^lapsed-account is not logged in: Not logged in · Please run \/login; checked again within 30 minutes$/);
 
   // A review launch, like every later selection, never starts on the held account: the probe still reads its login file as a login.
   const first = await insert(reviewItem('GY-9302'));
@@ -135,7 +136,7 @@ test('e2e:unauthenticated-account-held — reviews whose agent exits not logged 
   assert.equal(record.verdict?.state, 'APPROVED', 'the review moved to the next account and posted its verdict');
   assert.equal(record.verdict?.reviewer, reviewer);
   assert.deepEqual(await answered(), [working, working, working]);
-  assert.match((await account('lapsed-account')).ineligible!, /is not logged in: its agent reported "Not logged in · Please run \/login"/);
+  assert.match((await account('lapsed-account')).ineligible!, /is not logged in: Not logged in · Please run \/login/);
 
   // Cleared with the login restored, the account takes sessions again.
   await rm(join(lapsed, 'lapsed'));

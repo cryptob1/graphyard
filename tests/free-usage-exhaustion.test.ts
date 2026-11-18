@@ -97,6 +97,7 @@ async function configure(entries: { name: string; kind: string; failure?: string
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 const home = process.env.RUNTIME_HOME, args = process.argv.slice(2);
+if (args.includes('Reply with the single word OK.')) { if (${JSON.stringify(entry.failure ?? '')}) { console.error(${JSON.stringify(entry.failure ?? '')}); process.exit(1); } console.log('OK'); process.exit(0); }
 fs.appendFileSync(home + '/starts', '1');
 fs.writeFileSync(home + '/started.json', JSON.stringify({ args }));
 const [, key, epoch] = /complete (GY-\\d+) (\\d+) --head/.exec(args.join(' ')) ?? [];

@@ -61,7 +61,7 @@ before(async () => {
   await mkdir(bin);
   await writeFile(join(bin, 'muse'), `#!${process.execPath}
 const { appendFileSync } = require('node:fs');
-appendFileSync(${JSON.stringify(join(scratch, 'muse-runs'))}, 'run\\n');
+if (!process.argv.includes('Reply with the single word OK.')) appendFileSync(${JSON.stringify(join(scratch, 'muse-runs'))}, 'run\\n');
 console.error('missing meta credentials: run \`muse login\` or set META_API_KEY, or save credentials at ' + process.env.HOME + '/.config/muse/auth.json');
 process.exit(1);
 `, { mode: 0o755 });
@@ -124,7 +124,7 @@ test('e2e:review-skips-broken-account — a reviewer account whose sessions fail
   assert.deepEqual(await answered(), [working], 'claude-a answered');
   const held = await account('muse');
   assert.equal(held.eligible, false);
-  assert.match(held.ineligible!, /^muse is not logged in: its agent reported ".*missing meta credentials: run `muse login`/);
+  assert.match(held.ineligible!, /^muse is not logged in: .*missing meta credentials: run `muse login`/);
 
   // The next review skips muse entirely.
   const second = await insert(reviewItem('GY-9402'));

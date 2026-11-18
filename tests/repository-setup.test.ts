@@ -167,7 +167,8 @@ function runCli(cwd: string, args: string[], input: string, env: NodeJS.ProcessE
 
 test('CLI init from a linked worktree shares credentials with siblings and replaces legacy defaults', async () => {
   const root=await repo();let authorization='';
-  const http=createServer((req,res)=>{authorization=String(req.headers.authorization??'');res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.url === '/api/agent-registry/document' ? { accounts: [], runtimes: [] } : {actor:{id:'worker-a',role:'worker'}}));});
+  // Doctor also reads the agent registry (GY-3351); this server holds none, so that read is a 404, not a second whoami.
+  const http=createServer((req,res)=>{authorization=String(req.headers.authorization??'');res.setHeader('Content-Type','application/json');if(req.url?.includes('agent-registry')){res.statusCode=404;res.end(JSON.stringify({error:'not found'}));return;}res.end(JSON.stringify({actor:{id:'worker-a',role:'worker'}}));});
   await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
   const url=`http://127.0.0.1:${(http.address() as any).port}`;
   const env={...process.env};delete env.GRAPHYARD_TOKEN;delete env.GRAPHYARD_URL;delete env.GRAPHYARD_TOKEN_FILE;delete env.GRAPHYARD_HOST_ID;

@@ -316,6 +316,8 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
     assert.equal(settled.verdict!.state, 'COMMENTED'); assert.equal(host.agents.length, 0);
     // The completed request is no longer queued; COMMENTED still leaves its review gate closed.
     done.autoDispatch!.review = null;
+    // Both items changed at the incident, so the stall alarm's hour without an actor (GY-3432) has not passed.
+    done.updatedAt = waiting.updatedAt = incident.start;
     const preserved = structuredClone({ done, waiting });
     let clock = Date.parse(incident.start) + 4 * 60_000;
     const snapshot = async () => ({ work: postMerge ? [waiting] : [done, waiting], now: new Date(clock).toISOString() });

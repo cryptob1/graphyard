@@ -7,7 +7,8 @@
 // affected selection picks for the changed files — the whole E2E catalog in place of the subset
 // only when its measured gate-run time fits half the 45-minute limit (GY-3144). A passing gate records the tip as
 // verified in .graphyard/main-gate.json; the deploy watch serves only that commit. A failing check
-// is re-run once (a pass is a filed flake), an affected test — or, when the whole catalog ran, a
+// is re-run once (a pass is a filed flake; a failure of a check with an open flaky-check item is
+// recorded on that item and the batch kept, GY-3431), an affected test — or, when the whole catalog ran, a
 // catalog case no batch item binds, gate.core does not name and smoke is not (GY-3147) — that also
 // fails on the last verified commit is a filed known red, and a confirmed failure is bisected over the batch's prefixes in
 // merge order (from the landing that added a failing case, GY-3409): the last item of the smallest
@@ -127,6 +128,8 @@ export interface GateRecord {
   filed?: Record<string, { item: string | null; at: string }>;
   /** Filing failures that never aborted a run (GY-3147), newest last; the last few are kept. */
   notes?: string[];
+  /** GY-3431: the failures recorded on each open flaky-check item instead of a revert, by item key: the last few per item, the ten items failing most recently. Optional only for records an older loop wrote. */
+  flaky?: Record<string, { check: string; tip: string; at: string }[]>;
   at: string;
 }
 
@@ -172,6 +175,8 @@ export interface GatePorts {
   revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string } | { retry: string }>;
   /** Files an item owning a failure, once per `key`; answers the item it filed, when it names one. */
   file(input: { title: string; description: string; key: string }): Promise<{ item: string | null } | void>;
+  /** GY-3431: the key of the open "Flaky check on main" item for `check`, or null when none is open. */
+  flaky?(check: string): string | null;
   /**
    * GY-3199: publishes `commit` at `refs/graphyard/verified` on Graphyard's own repository through
    * the merge writer's deploy key, where every install's deploy watch reads it. Absent on an
@@ -218,7 +223,7 @@ export function mergeFilings(latest: Pick<GateRecord, 'filed' | 'notes'> | null,
 /** What one gate came to. */
 export type GateOutcome =
   | { outcome: 'idle' }
-  | { outcome: 'verified'; tip: string; checks: string[]; flakes: string[]; knownRed: string[] }
+  | { outcome: 'verified'; tip: string; checks: string[]; flakes: string[]; knownRed: string[]; knownFlaky?: { check: string; item: string }[] }
   | { outcome: 'reverted'; tip: string; check: string; culprit: string; revertSha: string; fallback?: string }
   | { outcome: 'timeout'; tip: string; boundMs: number }
   | { outcome: 'retry'; tip: string; reason: string }
@@ -258,6 +263,7 @@ export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, rec
 export function gateOutcomeReason(outcome: GateOutcome): string | null {
   if (outcome.outcome === 'reverted') return `reverted ${outcome.culprit} for failing ${outcome.check}${outcome.fallback ? ` (${outcome.fallback})` : ''}`;
   if (outcome.outcome === 'timeout') return `past ${minutes(outcome.boundMs)} minutes`;
+  if (outcome.outcome === 'verified' && outcome.knownFlaky?.length) return `kept the batch: ${outcome.knownFlaky.map(flaky => `${flaky.check} failed and has the open flaky item ${flaky.item}`).join('; ')}`;
   return 'reason' in outcome ? outcome.reason : null;
 }
 
@@ -362,7 +368,7 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
     const failed = await run(tip, checks, files);
     if (!mainCached) measure(ports.now() - mainStarted);
     let confirmed: string[] = [], flakes: string[] = [];
-    const knownRed: string[] = [];
+    const knownRed: string[] = [], knownFlaky: { check: string; item: string }[] = [];
     if (failed.length) {
       // A failing check runs once more before anything is blamed: a pass is a flake, filed for an owner.
       await step(`re-running ${failed.join(', ')}`);
@@ -375,6 +381,14 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
       let outright: Set<string> | null = null;
       const mustPass = async () => outright ??= new Set(['e2e:smoke', ...(await ports.core(tip)).map(id => `e2e:${id}`), ...boundCaseIds(record, landings).map(id => `e2e:${id}`)]);
       for (const check of again) {
+        // GY-3431: a check with an open flaky-check item is that item's to fix: the failure is recorded on it and the batch is kept.
+        const flakyItem = ports.flaky?.(check);
+        if (flakyItem) {
+          knownFlaky.push({ check, item: flakyItem });
+          const { [flakyItem]: earlier = [], ...others } = record.flaky ?? {};
+          record.flaky = Object.fromEntries([...Object.entries(others), [flakyItem, [...earlier, { check, tip, at: at() }].slice(-filingNotesWindow)]].slice(-10));
+          continue;
+        }
         // A known red is a check that also fails on the last verified commit: an affected test, or a
         // catalog-only e2e case — one no batch item binds, gate.core does not name and smoke is not.
         const catalogOnly = check.startsWith('e2e:') && !(await mustPass()).has(check);
@@ -406,7 +420,7 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
       try { await ports.publish?.(tip); record.published = tip; } catch (error) {
         record.notes = [...record.notes ?? [], `verified-ref: ${error instanceof Error ? error.message : String(error)}`.slice(0, 200)].slice(-filingNotesWindow);
       }
-      return { outcome: 'verified', tip, checks, flakes, knownRed };
+      return { outcome: 'verified', tip, checks, flakes, knownRed, ...(knownFlaky.length ? { knownFlaky } : {}) };
     }
     const check = confirmed[0]!;
     if (record.attempt.recuts >= 1) return hold(`the recut batch ${tip.slice(0, 12)} still fails ${check}; ${verified.slice(0, 12)} stays served`);
@@ -504,7 +518,9 @@ export function gateSummary(record: GateRecord | null) {
     // GY-3264: the latest diagnostic failures with the exact commit, failing step and the item that owns each.
     diagnosticFailures: Object.entries(record.diagnosticFailures ?? {}).map(([check, failure]) => ({ check, ...failure, item: record.filed?.[`diagnostic:${check}`]?.item ?? null })),
     // GY-3147: the filing failures that never aborted a run, newest last.
-    notes: record.notes ?? [] };
+    notes: record.notes ?? [],
+    // GY-3431: the failures the gate recorded on open flaky-check items instead of reverting.
+    knownFlaky: Object.entries(record.flaky ?? {}).map(([item, failures]) => ({ item, check: failures.at(-1)!.check, failures: failures.length, lastTip: failures.at(-1)!.tip.slice(0, 12) })) };
 }
 
 /** The causes that wake the master: a held batch, and a revert rate above 1 in 5. */

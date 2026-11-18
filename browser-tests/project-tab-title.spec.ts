@@ -12,6 +12,10 @@ async function install(page: Page, repository: () => string) {
   });
 }
 
+// GY-3430: the dashboard's first render after sign-in or a reload is CPU-bound; on a loaded trial host it
+// took past the 5 s default (the page painted no frame for seconds), so those waits allow the suite's settled time.
+const settled = { timeout: 15_000 };
+
 const open = async (page: Page) => {
   // The sign-in page is the pre-identity state: the plain fallback every install shares.
   await page.goto('/?sign-in');
@@ -23,7 +27,7 @@ const open = async (page: Page) => {
 /** What one install's tab owes everywhere: its own project's title, on every page and after a reload. */
 async function tabNamesTheProject(page: Page, repository: string) {
   const title = `gh · ${repository}`;
-  await expect(page.locator('.top-bar .project-name')).toHaveText(repository);
+  await expect(page.locator('.top-bar .project-name')).toHaveText(repository, settled);
   await expect(page).toHaveTitle(title);
   for (const entry of ['Workers', 'Work']) {
     await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: entry, exact: true }).click();
@@ -37,7 +41,7 @@ async function tabNamesTheProject(page: Page, repository: string) {
   await page.getByRole('button', { name: '← Back' }).click();
   // A reload restarts from the page's own Graphyard fallback and lands on the same project again.
   await page.reload();
-  await expect(page.locator('.top-bar .project-name')).toHaveText(repository);
+  await expect(page.locator('.top-bar .project-name')).toHaveText(repository, settled);
   await expect(page).toHaveTitle(title);
 }
 
@@ -53,11 +57,11 @@ test('the title follows the served identity, never a stale project, and sign-out
   let repository = 'cryptob1/graphyard';
   await install(page, () => repository);
   await open(page);
-  await expect(page).toHaveTitle('gh · cryptob1/graphyard');
+  await expect(page).toHaveTitle('gh · cryptob1/graphyard', settled);
   // The same tab, served the other install's identity: the title replaces the old project.
   repository = 'cryptob1/hello-huck';
   await page.reload();
-  await expect(page.locator('.top-bar .project-name')).toHaveText(repository);
+  await expect(page.locator('.top-bar .project-name')).toHaveText(repository, settled);
   await expect(page).toHaveTitle('gh · cryptob1/hello-huck');
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page.getByLabel('Access token')).toBeVisible();

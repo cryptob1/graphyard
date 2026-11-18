@@ -1,3 +1,4 @@
+import { sessionScopeProperties } from '../session-share.js';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { confinedRuntimeArgs } from '../worker-sandbox.js';
 import { randomUUID } from 'node:crypto';
@@ -172,7 +173,7 @@ const quoted = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
  * `confinement` words wrap Pi alone, never the shell: the run's directory lies under the
  * coordinator checkout the confinement makes read-only, so only the shell outside it can write there.
  */
-export function detachedLaunch(directory: string, id: string, command: string, args: string[], containment: RunContainment, confinement: readonly string[] = [], boundSeconds?: number) {
+export function detachedLaunch(directory: string, id: string, command: string, args: string[], containment: RunContainment, confinement: readonly string[] = [], boundSeconds?: number, scopeProperties: readonly string[] = []) {
   if (confinement.length) args = confinedRuntimeArgs(command, args);
   const files = runFiles(directory), pending = `${files.exit}.tmp`;
   const confined = confinement.map(word => `${quoted(word)} `).join('');
@@ -192,8 +193,12 @@ export function detachedLaunch(directory: string, id: string, command: string, a
     + `else printf '%s: command not found\\n' "$0" >${quoted(files.stderr)}; code=spawn; fi; ${watchdog ? 'kill -TERM "$watchdog" 2>/dev/null; ' : ''}printf '%s\\n' "$code" >${quoted(pending)} && mv -f ${quoted(pending)} ${quoted(files.exit)}`;
   const shell = ['/bin/sh', '-c', script, command, ...args];
   const unit = containment === 'systemd' ? `graphyard-run-${id}.scope` : null;
-  return unit ? { file: 'systemd-run', args: ['--user', '--scope', '--quiet', '--collect', `--unit=${unit}`, '--', ...shell], unit } : { file: shell[0], args: shell.slice(1), unit };
+  return unit ? { file: 'systemd-run', args: ['--user', '--scope', '--quiet', '--collect', `--unit=${unit}`, ...scopeProperties, '--', ...shell], unit } : { file: shell[0], args: shell.slice(1), unit };
 }
+
+/** GY-3438: an agent session's launch — a worker, reviewer or producer — whose scope carries the session's CPU and memory share. */
+export const sessionLaunch = (directory: string, id: string, command: string, args: string[], containment: RunContainment, confinement: readonly string[] = []) =>
+  detachedLaunch(directory, id, command, args, containment, confinement, undefined, containment === 'systemd' ? sessionScopeProperties() : []);
 
 /** A process's start time (/proc/PID/stat), which tells it from a later process given the same pid. */
 export function processIdentity(pid: number): string | null {
@@ -240,8 +245,10 @@ export function piRunner(configured: PiRunnerOptions = {}): Runner {
         const containment = scratch ? 'setsid' : configured.containment ?? runContainment();
         const environment = runEnvironment(process.env, { ...configured.environment, ...options.env });
         const confinement = configured.confine?.(options.cwd, environment) ?? [];
-        const launch = detachedLaunch(directory, id, command, [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })], containment, confinement,
-          scratch ? (options.timeoutMs + grace) / 1000 + scratchBoundMarginSeconds : undefined);
+        const argv = [...(configured.commandArgs ?? []), ...piArgs(prompt, { model, extension: configured.extension, args: configured.args })];
+        // A scratch run (triage, diagnosis) is no agent session: it bounds itself and takes no share.
+        const launch = scratch ? detachedLaunch(directory, id, command, argv, containment, confinement, (options.timeoutMs + grace) / 1000 + scratchBoundMarginSeconds)
+          : sessionLaunch(directory, id, command, argv, containment, confinement);
         // Detached: the run leads its own session and process group, holds no pipe to this process
         // (stdin is closed, so nothing can wait on a person), and is not waited on by it.
         child = (configured.spawn ?? spawn)(launch.file, launch.args, { cwd: options.cwd, env: environment, stdio: ['ignore', 'ignore', 'ignore'], detached: true });

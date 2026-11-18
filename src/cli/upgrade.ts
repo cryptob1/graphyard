@@ -483,10 +483,11 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
     // GY-3199: the verified ref from Graphyard's canonical upstream — the only commit an install for
     // another repository adopts, at least once a day, without a command or a new setting.
     verifiedUpstream: () => oneFetchAtATime(() => fetchVerifiedRef(gitIn)),
+    // GY-3450: the deploy build and restart take the deploy path's reserved slot, never waiting behind item work or a drain.
     build: async commit => {
-      await withHeavyJob(`deploy build ${commit.slice(0, 12)}`, () => prepareCliRelease(directory, cliRoot, commit, input.run));
+      await withHeavyJob(`deploy build ${commit.slice(0, 12)}`, () => prepareCliRelease(directory, cliRoot, commit, input.run), { reserved: true });
     },
-    restart: async commit => {
+    restart: commit => withHeavyJob(`deploy restart ${commit.slice(0, 12)}`, async () => {
       const inputs = inputsFor(commit);
       if (process.env.DATABASE_URL) await liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json')).run(step(commit, 'backup'));
       // Every redeploy builds with the stamp of the commit it deploys (GY-2167), so /healthz names that commit.
@@ -498,7 +499,7 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
       const invoke = (flags: string[]) => run(process.execPath, ['--import', loader, join(build, 'src', 'cli.ts'), 'install', ...flags], repoRoot, { ...process.env, GRAPHYARD_VERSION: stamp.version, GRAPHYARD_BUILD_REVISION: stamp.revision });
       await invoke([...args.slice(0, -1), '--plan']);
       await invoke(args);
-    },
+    }, { reserved: true }),
     head: async () => git(activeCliRoot(cliRoot), 'rev-parse', 'HEAD'),
     checkout: commit => publishCliRelease(directory, cliRoot, commit),
     health: deployHealth(cliRoot, url),

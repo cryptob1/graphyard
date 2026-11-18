@@ -137,12 +137,9 @@ test('integration:gate-releases-heavy-slot — a gate run that verifies, is held
     const yard = await world('gate-slot-restart', { limit: 1, image: () => hung, verdict: async () => passing });
     const flight = (await batchGateStep(yard.cycle))!.gate!;
     await until(() => holders(yard.slots).length === 1, 'the gate takes its slot');
-    const merge = mergeTrial();
-    await sleep(300);
-    assert.equal(merge.started(), false, 'the merge trial waits while the gate runs');
+    // GY-3450: the gate's check holds its reserved slot; item work never waits on it.
     noteBatchGateStopping(yard.state);
-    await until(merge.started, 'the stopping loop\'s gate slot goes to the waiting merge trial');
-    await merge.done;
+    await until(() => holders(yard.slots).length === 0, 'the stopping loop frees the gate\'s slot');
     finishImage();
     await flight;
   }

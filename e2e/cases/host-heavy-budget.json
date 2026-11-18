@@ -1,13 +1,13 @@
 {
   "id": "host-heavy-budget",
-  "title": "Every Graphyard project on one host shares a budget of two heavy jobs",
-  "description": "Two fixture installs on one host launch nine heavy jobs from their own processes — worker verification commands with nested work, merge and batch-gate trials, a host-run worker check, a preview build and deploy builds — and never more than two run at once; every queued job runs, a waiting job names the shared limit and the jobs and projects holding it, nested work runs on its parent's slot, a lowered limit leaves running jobs alone and admits none until below it, and finished, failed, cancelled and dead holders all give their slot back.",
+  "title": "Every Graphyard project on one host shares two ordinary heavy-job slots and a gate/deploy reservation",
+  "description": "Two fixture installs on one host launch eight heavy jobs from their own processes — sessions’ whole suites with nested work, merge and batch-gate trials, a preview build and deploy builds — and never more than two ordinary jobs plus one reserved gate/deploy job run at once; every queued job runs, a waiting job names the shared limit and the jobs and projects holding it, nested work runs on its parent's slot, a lowered limit leaves running jobs alone and admits none until below it, and finished, failed, cancelled and dead holders all give their slot back.",
   "target": "any",
   "required": false,
   "steps": [
     {
       "kind": "command",
-      "name": "two installs' heavy jobs share the host's limit of two",
+      "name": "two installs share the host budget and gate/deploy reservation",
       "run": "node --import tsx tests/helpers/run-tests.ts tests/host-heavy-budget.test.ts",
       "timeoutSeconds": 600
     }
