@@ -122,7 +122,10 @@ const starving = (item: Work, now: number | undefined) => now !== undefined && s
  * itself calls that only an ended attempt (`recordRework`), not a rework round, and the item starts
  * again in the existing order. `dispatchSort` reads it once per sort, like starvation.
  */
-const attempted = (work: Work & { reworkRounds?: number }) => !!work.submission || !!work.pipeline?.submittedAt || (work.pipeline?.reworkRounds ?? work.reworkRounds ?? 0) > 0;
+const reworkRounds = (work: Work & { reworkRounds?: number }) => work.pipeline?.reworkRounds ?? work.reworkRounds ?? 0;
+const attempted = (work: Work & { reworkRounds?: number }) => !!work.submission || !!work.pipeline?.submittedAt || reworkRounds(work) > 0;
+/** From this rework round an attempted item loses the attempted-first rank and sorts with fresh work (GY-3504). */
+export const attemptedRankMaxRounds = 4;
 function dispatchRank(a: Work, b: Work, hot: ReadonlySet<string>, starvingA: boolean, starvingB: boolean) {
   const hotA = touchesHot(a, hot), hotB = touchesHot(b, hot);
   return a.priority - b.priority
@@ -141,10 +144,12 @@ export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new S
  * fresh work starts only raises work in progress. Within each group the existing order stands
  * unchanged, and priority still decides first. The pairwise `dispatchOrder` keeps the heat/wait
  * order; whole-set ordering goes through here, as the loop's dispatch step and
- * master status's schedule already do.
+ * master status's schedule already do. An item on its fourth rework round or later
+ * (`attemptedRankMaxRounds`) loses that rank and sorts with fresh work, so work that cannot
+ * converge does not starve the rest of its priority (GY-3504).
  */
 export function dispatchSort(items: readonly Work[], hot: ReadonlySet<string> = new Set(), now?: number) {
-  const starved = new Map(items.map(item => [item, starving(item, now)])), attemptedOnce = new Map(items.map(item => [item, attempted(item)]));
+  const starved = new Map(items.map(item => [item, starving(item, now)])), attemptedOnce = new Map(items.map(item => [item, attempted(item) && reworkRounds(item) < attemptedRankMaxRounds]));
   return [...items].sort((a, b) => Number(!!b.yardRepair) - Number(!!a.yardRepair) || a.priority - b.priority
     || (attemptedOnce.get(a)! !== attemptedOnce.get(b)! ? (attemptedOnce.get(a)! ? -1 : 1) : 0)
     || dispatchRank(a, b, hot, starved.get(a)!, starved.get(b)!));

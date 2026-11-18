@@ -33,6 +33,16 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 - Setup invites or revokes viewers and maintainers.
 - Sharing one machine across installs: the [shared server guide](shared-server.md).
 
+## Shipped means live
+
+Work counts a merge as shipped once the live app runs a commit that contains it; until then it is going live. The top bar and the Work page show the same two numbers. When your app deploys somewhere else, such as Railway, tell Graphyard where to ask which commit is live, in `graphyard.json`:
+
+```json
+{ "app": { "healthUrl": "https://your-app.example.com/version" } }
+```
+
+The URL must answer the commit it runs: the plain SHA, or JSON with a `commit` or `sha` field. Graphyard asks at most once a minute. Without it, Graphyard reads the commit from its own deploy, and with neither nothing counts as shipped.
+
 ## Delivery feedback
 
 Work's **Taste** feed shows recent deliveries with why and evidence: **Looks good** records your call, **Send back** turns your note into a follow-up item and a proposed master lesson; nothing waits on a taste.

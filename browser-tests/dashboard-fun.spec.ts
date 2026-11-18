@@ -36,7 +36,6 @@ async function serve(page: Page, work: any[]) {
   await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
   return state;
 }
-const shipped = (page: Page) => page.locator('[aria-label="Shipped today"]');
 const live = { timeout: 15_000 };
 
 test('e2e:dashboard-fun — named agents on every page, a rotating line, and a toast with confetti when an item merges', async ({ page }) => {
@@ -53,7 +52,6 @@ test('e2e:dashboard-fun — named agents on every page, a rotating line, and a t
   await line.click();
   await expect(line).not.toHaveText(first!);
   expect(LINES).toContain(await line.textContent());
-  await expect(shipped(page)).toHaveAttribute('data-shipped-today', '0');
 
   // The item history names the same account the same way, and the master as the Master.
   await page.getByRole('button', { name: /Change priority from the dashboard.*GY-1/ }).click();
@@ -69,12 +67,11 @@ test('e2e:dashboard-fun — named agents on every page, a rotating line, and a t
   await expect(sessions.locator(`[data-agent="${builder}"]`).first()).toHaveText(name);
   await expect(sessions.locator(`[data-agent="${master}"]`).first()).toHaveText('the Master');
 
-  // GY-1 merges while the page is open: a toast names its builder, confetti runs, and Shipped today counts it.
+  // GY-1 merges while the page is open: a toast names its builder, and confetti runs.
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Work', exact: true }).click();
   state.work = [merged(state.work[0]), state.work[1]];
   await expect(page.locator('[data-toast="GY-1"]')).toContainText(`${name} shipped “Change priority from the dashboard”`, live);
   await expect(page.locator('.confetti')).toHaveCount(1);
-  await expect(shipped(page)).toHaveAttribute('data-shipped-today', '1');
 
 });
 
