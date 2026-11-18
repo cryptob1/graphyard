@@ -281,9 +281,10 @@ export const waitStep = (directory: string) =>
 /**
  * GY-3460: the host's queue of jobs waiting for an ordinary slot, shared by every install. Each waiter
  * holds a kernel-locked ticket in `queue/`, named so that the deploy path sorts first and then the
- * oldest request. A freed slot goes to the waiters at the head: a job that arrives later never
- * overtakes an older one from any project, so one install's stream of new trials cannot starve
- * another's. A ticket whose owner died is unlocked and removed by the next waiter that reads it.
+ * oldest request; each ticket holds its project. A freed slot goes to the oldest waiter whose project
+ * holds none (GY-3487), else to the oldest: a job that arrives later never overtakes an older one of
+ * the same standing, so one install's stream of new trials cannot starve another's. A ticket whose
+ * owner died is unlocked and removed by the next waiter that reads it.
  */
 const queueDirectory = (directory: string) => join(directory, 'queue');
 async function enqueue(directory: string, options: AcquireOptions) {
@@ -293,21 +294,39 @@ async function enqueue(directory: string, options: AcquireOptions) {
   const fd = openSync(pending, 'wx');
   try {
     if (!await lock(fd)) throw new Error('new heavy-job ticket is locked');
+    writeFileSync(fd, options.project ?? '');
     renameSync(pending, path);
   } catch (error) { closeSync(fd); rmSync(pending, { force: true }); throw error; }
   return { name, leave: () => { rmSync(path, { force: true }); closeSync(fd); } };
 }
-/** The live waiters queued ahead of `name`; a drained job does not hold up others while the drain stands. */
-async function waitersAhead(directory: string, name: string, drained: boolean) {
-  let ahead = 0;
-  for (const other of readdirSync(queueDirectory(directory)).sort()) {
-    if (other >= name) break;
-    if (drained && other.endsWith('-drainable')) continue;
+/** The live waiters in queue order, with their projects; a drained job does not hold up others while the drain stands. */
+async function liveWaiters(directory: string, drained: boolean) {
+  const waiters: { name: string; project: string }[] = [];
+  for (const name of readdirSync(queueDirectory(directory)).sort()) {
+    if (drained && name.endsWith('-drainable')) continue;
+    const path = join(queueDirectory(directory), name);
     let fd: number;
-    try { fd = openSync(join(queueDirectory(directory), other), 'r'); } catch { continue; }
-    try { if (await lock(fd)) rmSync(join(queueDirectory(directory), other), { force: true }); else ahead++; } finally { closeSync(fd); }
+    try { fd = openSync(path, 'r'); } catch { continue; }
+    try { if (await lock(fd)) rmSync(path, { force: true }); else waiters.push({ name, project: readFileSync(fd, 'utf8') }); } finally { closeSync(fd); }
   }
-  return ahead;
+  return waiters;
+}
+/**
+ * GY-3487: who the `free` slots go to. Each goes to the oldest waiter whose project holds none, else to
+ * the oldest waiter: a project that holds a slot never takes another while a project holding none
+ * waits. With one project waiting this is plain arrival order.
+ */
+function admitted(waiters: { name: string; project: string }[], holders: string[], free: number) {
+  const holding = new Map<string, number>();
+  for (const project of holders) holding.set(project, (holding.get(project) ?? 0) + 1);
+  const queue = [...waiters], chosen: string[] = [];
+  for (let slot = 0; slot < free && queue.length; slot++) {
+    const index = Math.max(0, queue.findIndex(waiter => !holding.get(waiter.project)));
+    const [next] = queue.splice(index, 1);
+    chosen.push(next.name);
+    holding.set(next.project, (holding.get(next.project) ?? 0) + 1);
+  }
+  return chosen;
 }
 
 /** Take a slot, waiting as long as the budget is spent and behind every older waiter. */
@@ -317,7 +336,7 @@ export async function acquireVerificationSlot(options: AcquireOptions): Promise<
   const owner: SlotOwner = { identity, locked: true, files: options.files, pid: process.pid, label: options.label, ...(options.project ? { project: options.project } : {}), cwd: process.cwd(), at: new Date().toISOString() };
   // A declaration beyond the bound (a running trial's shard files) or a caller fixing its own numbers does not queue.
   const ticket = options.firstSlot === undefined ? await enqueue(options.directory, options) : null;
-  let told = false, drained = false, heated = false;
+  let told = false, drained = false, heated = false, blocked = false;
   try {
     for (;;) {
       if (options.signal?.aborted) throw options.signal.reason;
@@ -337,8 +356,12 @@ export async function acquireVerificationSlot(options: AcquireOptions): Promise<
       const reserved = options.reserved && !strict ? await tryTake(options.directory, 1, owner, gateSlot) : null;
       if (reserved) return reserved;
       const limit = options.slots ?? heavyJobLimit(options.directory);
-      const free = limit - (await running(options.directory)).length;
-      if (free > 0 && (!ticket || await waitersAhead(options.directory, ticket.name, !!readHeavyDrain(options.directory)) < free)) {
+      const holders = await running(options.directory), free = limit - holders.length;
+      const waiters = free > 0 && ticket ? await liveWaiters(options.directory, !!readHeavyDrain(options.directory)) : [];
+      const project = options.project ?? '', holderProjects = holders.map(entry => entry.owner?.project ?? '');
+      const next = holderProjects.includes(project) ? waiters.find(waiter => waiter.project !== project && !holderProjects.includes(waiter.project)) : undefined;
+      if (next && !blocked) { blocked = true; options.onWait?.(`graphyard: ${options.label} waiting: ${next.project} holds none and is next`); }
+      if (free > 0 && (!ticket || admitted(waiters, holderProjects, free).includes(ticket.name))) {
         const held = await tryTake(options.directory, limit, owner, options.firstSlot);
         if (held) {
           // Jobs that passed the count together and took different numbers are too many: each steps back and tries again.
