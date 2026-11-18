@@ -6,7 +6,7 @@
 
 ## Why Graphyard
 
-- **You decide goals, money, credentials.** Any agent records your words, reversible under Needs you. Blockers are the Master's.
+- **You decide goals, money, credentials.** Tell any agent; reverse relayed answers under Needs you. Master handles blockers.
 - **Every change is proven.** Workers build, agents review, main test-merges each head.
 - **Production stays safe.** Main deploys itself; failures revert automatically.
 
@@ -27,7 +27,7 @@ Once published to npm:
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
-The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in.
+The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. The dashboard header's trust strip counts this week's deliveries — verified by running the real app, sent back, reverted — and each number opens the items behind it. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in.
 
 ## Where things run
 

@@ -2,7 +2,6 @@
 import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, limitSignalReset, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
 import { exhaustionTail, outOfCreditsScreen } from '../exhaustion-screen.js';
 import { providerUsageErrors, runtimeAdapter } from './runtimes.js';
-import { runtimeReport } from '../model/token-costs.js';
 /**
  * A runtime's own safety prompt, read off a blocked session's screen (GY-197).
  *
@@ -227,16 +226,22 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
   return null;
 }
 /**
- * A headless run's limit notice (GY-3389): the reply inside its JSON report (`claude -p`'s usage-credits
- * result), else a line it printed — such as OpenCode's Z.AI `{"type":"provider.quota",…}` error, which a
- * text reply before it must not hide. OpenCode's worker run prints that error inside its JSON error
- * event (`{"type":"error",…,"error":{"type":"provider.quota","message":…}}`), a line too long to read as
- * a notice, so the event's own error message is what is judged (GY-3427).
+ * A headless run's limit notice (GY-3389), read only from what the runtime itself said, never from an
+ * assistant's message (GY-3457: a final reply quoting another account's limit text is work): the
+ * error reply of its JSON report (`claude -p`'s usage-credits result, `is_error: true`), the message
+ * of a JSON error event (OpenCode's `{"type":"error",…,"error":{"type":"provider.quota",…}}`, GY-3427),
+ * and, for a run that failed (`ok` false), the tail it printed — such as OpenCode's bare Z.AI
+ * `{"type":"provider.quota",…}` line or pi's `429 … 1310` error. A run that exited 0 was not stopped by
+ * its provider, so its printed text is never read as a notice.
  */
-export function detectHeadlessExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
-  const reply = runtimeReport(output).reply;
-  const errors = output.split('\n').map(line => { try { return JSON.parse(line)?.error?.message; } catch { return null; } }).filter(message => typeof message === 'string');
-  return (reply ? detectRuntimeExhaustion(reply, runtime, now) : null) ?? (errors.length ? detectRuntimeExhaustion(errors.join('\n'), runtime, now) : null) ?? detectRuntimeExhaustion(output, runtime, now);
+export function detectHeadlessExhaustion(output: string, runtime: string | null | undefined, now: number, ok = false): ExhaustionSignal | null {
+  const said = output.split('\n').flatMap(line => {
+    let event: any;
+    try { event = JSON.parse(line); } catch { return []; }
+    const text = event?.type === 'result' && event.is_error === true ? event.result : event?.type === 'error' ? event.error?.message : null;
+    return typeof text === 'string' ? [text] : [];
+  });
+  return (said.length ? detectRuntimeExhaustion(said.join('\n'), runtime, now) : null) ?? (ok ? null : detectRuntimeExhaustion(output, runtime, now));
 }
 
 /**

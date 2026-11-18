@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { bootstrapGate, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, runGate, writeGateRecord, type GatePorts } from '../src/batch-gate.js';
+import { bootstrapGate, gateBoundMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, runGate, writeGateRecord, type GatePorts } from '../src/batch-gate.js';
 import { batchGateStep, noteBatchGateStopping } from '../src/daemon/cycle-batch-gate.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
@@ -43,7 +43,7 @@ after(() => { if (previous === undefined) delete process.env[slotsDirectoryVaria
 const holders = (directory: string) => heldSlots(directory).filter(entry => entry.slot < declarationSlot).map(entry => entry.owner?.label);
 
 /** One detached run as the loops see it: its directory, and each loop's watch of it, which the test steps, passes or drops. */
-interface Run { directory: string; proofs: string[]; files: string[]; watches: { onStep?: (step: string) => void; resolve: (run: MergeTrialRun) => void; reject: (error: Error) => void; signal?: AbortSignal }[] }
+interface Run { directory: string; proofs: string[]; files: string[]; timeoutMs?: number; watches: { onStep?: (step: string) => void; resolve: (run: MergeTrialRun) => void; reject: (error: Error) => void; signal?: AbortSignal }[] }
 
 /**
  * A main with a verified base and one merge past it, a host that reads 96C with another install's
@@ -84,7 +84,7 @@ async function world(label: string) {
     ensureTrialImage: async () => {},
     launchTrialRun: request => {
       if (request.key !== 'batch-gate') { merges.push(request.key); return { directory: join(base, 'runs', request.key), mergeSha: request.mergeSha, trial: async () => passing, detach: () => {}, cancel: () => {} }; }
-      const run: Run = { directory: join(base, 'runs', `run-${runs.length + 1}`), proofs: request.proofs, files: request.changedFiles, watches: [] };
+      const run: Run = { directory: join(base, 'runs', `run-${runs.length + 1}`), proofs: request.proofs, files: request.changedFiles, timeoutMs: request.timeoutMs, watches: [] };
       runs.push(run);
       return { directory: run.directory, mergeSha: request.mergeSha, trial: watch(run), detach: () => {}, cancel: () => {} };
     },
@@ -132,6 +132,38 @@ test('integration:batch-gate-own-wait-liveness — a stalled check on a hot host
   assert.equal(yard.record().verified, yard.tip, 'the retry verified main');
   assert.equal(yard.runs.length, 2);
   assert.deepEqual(holders(yard.slots), []);
+});
+
+test('e2e:batch-gate-median-bound — a gate run on the real loop step and detached runner meets twice its verified median: its one run is stopped, the timeout names its bound, nothing verifies, and the retry runs every check', { timeout: 120_000 }, async () => {
+  const yard = await world('gate-median-bound');
+  // GY-3507: the recorded history of 2026-11-18 — verified runs of 30 to 40 minutes, one 400-minute outlier — and a diagnostics catalog stretched to 222 minutes.
+  const history = [30, 32, 35, 38, 400].map(ms => ({ ms: ms * minute, at: iso(start - minute) }));
+  await writeGateRecord(gateRecordPath(yard.coordinator), { ...yard.record(), verifiedRuns: history, catalogMs: 222 * minute });
+  const bound = gateBoundMs(yard.record());
+  assert.equal(bound, 70 * minute);
+  const before = yard.record().verified;
+  const flight = (await batchGateStep(yard.loop()))!.gate!;
+  const stalled = await yard.watching(0);
+  assert.ok(yard.runs[0]!.timeoutMs! <= bound, `the detached run's own clock follows the gate's bound (${yard.runs[0]!.timeoutMs} ms), not hours`);
+  const checks = yard.record().inFlight!.checks!;
+  assert.deepEqual([checks[0], checks.at(-1)], ['build', 'affected'], 'the build and affected tests are cut into the batch');
+  yard.advance(bound - minute);
+  await sleep(1500);
+  assert.equal(stalled.signal?.aborted, false, 'inside its bound the run goes on');
+  assert.equal(yard.runs.length, 1);
+  yard.advance(2 * minute);
+  const retry = await yard.watching(1);
+  assert.equal(stalled.signal?.aborted, true, 'the run past its bound is stopped before its retry starts: never two at once');
+  const timedOut = yard.record().lastOutcome!;
+  assert.equal(timedOut.outcome, 'timeout');
+  assert.equal(timedOut.reason, 'past 70 minutes', 'the failure names the bound it met');
+  assert.equal(yard.record().verified, before, 'a timeout verifies nothing');
+  assert.equal(yard.record().verifiedRuns!.length, 5, 'and samples nothing');
+  assert.deepEqual(yard.record().inFlight!.checks, checks, 'the retry runs every check');
+  assert.deepEqual(yard.runs[1]!.files, yard.runs[0]!.files);
+  retry.resolve(passing);
+  await flight;
+  assert.equal(yard.record().verified, yard.tip);
 });
 
 test('integration:batch-gate-own-wait-liveness — the gate\'s own waits, for its host heavy-job slot and then for its own container start, are not its time: two bounds of each neither time it out nor start a second run', { timeout: 120_000 }, async () => {

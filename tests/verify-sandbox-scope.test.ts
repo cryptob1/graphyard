@@ -123,6 +123,6 @@ test('unit:worker-request-trial-only-tests — trial-environment failures permit
   assert.match(prompt, /record command and environment error in the commit message, submit with complete instead of recording a blocker; the merge trial runs the test and decides/);
   assert.match(prompt, /For sandbox-only test failures, including required criteria tests/);
   assert.match(prompt, /Fix or block assertion failures, build errors and refusals of your own writes/);
-  assert.match(prompt, /If a command you need is refused or cannot succeed, other than a test failing only for the sandbox limitations described above, record a blocker with node .* blocked GY-3078 1 REASON/);
+  assert.match(prompt, /end with complete or a recorded blocker naming the command and its error \(node .* blocked GY-3078 1 REASON\)/);
   assert.doesNotMatch(prompt, /a failure of your own criteria's tests always blocks/);
 });

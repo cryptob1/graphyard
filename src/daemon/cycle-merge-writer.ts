@@ -327,11 +327,13 @@ const replyUnknown = (error: unknown) => { const status = mergeRecordStatus(erro
 /**
  * Trials running at once divide the host's cores, so their shards never oversubscribe it; a trial
  * given 1/`share` of the cores gets `share` times the deadline (GY-3183), so the suite that passes
- * alone within the limit is not timed out for running beside others.
+ * alone within the limit is not timed out for running beside others. GY-3509: an explicit deadline
+ * (the batch gate's) is already a bound and is kept as given; only the default trial deadline scales.
  */
-export function trialShareAllowance(share: number | undefined, timeoutMs = trialTimeoutMinutes * 60_000, cores = availableParallelism()): { timeoutMs: number; cores?: number } {
-  if (!share || share <= 1) return { timeoutMs };
-  return { timeoutMs: timeoutMs * share, cores: Math.max(2, Math.floor(cores / share)) };
+export function trialShareAllowance(share: number | undefined, timeoutMs?: number, cores = availableParallelism()): { timeoutMs: number; cores?: number } {
+  const deadline = timeoutMs ?? trialTimeoutMinutes * 60_000;
+  if (!share || share <= 1) return { timeoutMs: deadline };
+  return { timeoutMs: timeoutMs ?? deadline * share, cores: Math.max(2, Math.floor(cores / share)) };
 }
 
 /**

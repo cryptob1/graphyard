@@ -121,6 +121,7 @@ function dashboard(work: Work[], now: number, overrides: Partial<Dashboard> = {}
   const status = { actor: { id: 'operator', role: 'admin' }, humanOnly: [], executors: { live: 0, liveMs: 60_000, served: [], unserved: [], attention: [] }, delegation: null, github: false, reviewProviders: ['github'], jobs: [], now: iso(now) };
   const d: Dashboard = {
     token: 'scale', work, status, error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
+    shippedFilter: null, setShippedFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: now, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: unknownFeatures, events: [], editingRequirements: false, setEditingRequirements: noop,
     sessionEpoch: { current: 0 }, api: async () => ({}), refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop, ...overrides,

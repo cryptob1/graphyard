@@ -7,7 +7,6 @@ import type { AgentRegistry } from '../model/registry.js';
 import { exhaustionEvidence } from '../model/account-quota.js';
 import { parkedOnHuman } from '../model/human-request.js';
 import { actionDetailMax, storeAction, type DaemonState } from './state.js';
-import { cpuWaiting } from './cpu-pressure.js';
 
 export const stallAlarmKey = 'stall-alarm';
 /** Free capacity and ready work with no launch this long raise the alarm. */
@@ -20,6 +19,8 @@ export interface StallReadings {
   /** Open items in scope; `ready` are the ones dispatch could launch now. */
   open: readonly Work[]; ready: readonly Work[];
   freeSlots: number;
+  /** GY-3473: what holds every implementation launch this cycle — disk, heat, an untrusted checkout, a running batch gate — as dispatch itself decided it. */
+  holds?: readonly string[];
   state: Pick<DaemonState, 'actions' | 'stepFailures' | 'launchBackoff' | 'cpuPressure' | 'release' | 'lock' | 'mergeWriter'>;
   registry: Pick<AgentRegistry, 'accounts' | 'roles'> | null;
   /** The commit the deploy unit serves, null when none is recorded. */
@@ -46,14 +47,16 @@ export function lastLaunchAt(state: StallReadings['state'], work: readonly Work[
   return seen.length ? Math.max(...seen) : state.lock ? Date.parse(state.lock.startedAt) : null;
 }
 
-/** Why nothing launches, from what the loop already read, most direct first; the item with no actor only when nothing else explains it. */
-export function stallCauses({ now, ready, state, registry, serving }: StallReadings): string[] {
-  const causes: string[] = [];
-  const launchFailure = Object.values(state.launchBackoff).sort((a, b) => Date.parse(b.until) - Date.parse(a.until))[0];
-  const dispatchError = state.stepFailures.dispatch?.reason ?? launchFailure?.reason;
+/**
+ * Why nothing launches now, from what the loop already read, most direct first: dispatch's own
+ * holds this cycle, then a failing dispatch step or a launch refusal still backing off — an expired
+ * backoff is history, not a cause (GY-3473). The item with no actor only when nothing else explains it.
+ */
+export function stallCauses({ now, ready, holds = [], state, registry, serving }: StallReadings): string[] {
+  const causes = [...holds];
+  const launchFailure = Object.values(state.launchBackoff).filter(entry => Date.parse(entry.until) > now).sort((a, b) => Date.parse(b.until) - Date.parse(a.until))[0];
+  const dispatchError = state.stepFailures.dispatch?.reason ?? (launchFailure && `${launchFailure.reason} (launches back off until ${launchFailure.until})`);
   if (dispatchError) causes.push(`last dispatch error: ${dispatchError}`);
-  const heat = cpuWaiting(state);
-  if (heat) causes.push(heat);
   const names = registry?.roles.find(role => role.name === 'worker')?.accounts ?? [];
   const accounts = (registry?.accounts ?? []).filter(account => account.enabled && names.includes(account.name));
   const spent = accounts.map(account => [account.name, exhaustionEvidence(account.quota, now)] as const);
