@@ -133,7 +133,7 @@ test('e2e:master-image-paste-delivery — a screenshot pasted on the Master page
     await viewer.addInitScript(() => sessionStorage.setItem('graphyard-token', 'test-reader'));
     const reader = await viewer.newPage(); await serveXterm(reader);
     await reader.goto(`${origin}/#master`);
-    await expect(reader.getByRole('status')).toContainText('read-only', settled);
+    await expect(reader.getByRole('status')).toContainText('View only', settled);
     await pastePng(reader, png, 'sneaky.png');
     await expect(reader.getByRole('status')).toContainText('Paste refused', settled);
     expect((await typed()).length).toBe(before);
