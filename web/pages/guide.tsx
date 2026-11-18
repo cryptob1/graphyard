@@ -9,7 +9,7 @@ const flow: [string, string][] = [
   ['Build', 'A worker writes it in its own worktree, a private copy of the repository.'],
   ['Review', 'A different agent checks it against every criterion.'],
   ['Merge trial', 'Tested on the latest main.'],
-  ['Merge', 'The loop merges it to main. No pull request is opened.'],
+  ['Merge', 'The loop merges it to main; no pull request.'],
   ['Deploy and verify', 'Verified in batches; a failing batch reverts its culprit. Main deploys.'],
 ];
 
@@ -101,7 +101,7 @@ export default function GuidePage() {
         <li><strong>Connect your repository.</strong> In its checkout, run <code>npx @cryptob1/graphyard up --repo OWNER/NAME</code>. It installs everything and prints a sign-in link.</li>
         <li><strong>Open the dashboard.</strong> The link signs you in at <code>http://127.0.0.1:4310</code>, or the port <code>up</code> chose. Setup connects agent accounts.</li>
         <li><strong>State a goal.</strong> On Work, press <strong>New work item</strong> and title it. The Master writes the criteria.</li>
-        <li><strong>Watch it move.</strong> Under Moving it goes from build to deploy. Open it to see who acts next.</li>
+        <li><strong>Watch it move.</strong> Open it under Moving to see who acts next.</li>
         <li><strong>Find the result.</strong> Shipped lists what went live.</li>
         <li><strong>Rate it.</strong> Taste: <strong>Looks good</strong>, or <strong>Send back</strong> with a note.</li>
         <li><strong>Meet a blocker.</strong> Stuck items show under Blocked for the Master to clear; your decisions wait under Needs you.</li>
