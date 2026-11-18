@@ -119,7 +119,7 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   for (const group of groups) assert.ok(!rowsOf(releasingPage, group).includes('GY-18'), `${group}: no row for the merged item`);
   // Shipped means live (GY-3452): the footer counts the week's merges the live commit contains,
   // and the rest as going live; with no live commit named, none is claimed shipped.
-  const footer = (html: string) => /data-shipped="(\d+)"[^>]*>\d+ shipped this week<\/strong>, <span data-waiting="(\d+)"/.exec(html)!.slice(1).map(Number);
+  const footer = (html: string) => /data-shipped="(\d+)"[^>]*>\d+ shipped<\/strong>, <span data-waiting="(\d+)"/.exec(html)!.slice(1).map(Number);
   const mergedToday = { ...awaiting, observation: { ...merged.observation!, mergedAt: new Date(NOW - hour).toISOString() }, delivery: { ...awaiting.delivery!, mergedAt: new Date(NOW - hour).toISOString() } } as Work;
   const pending = work.map(item => item.key === 'GY-18' ? mergedToday : item);
   const weekMerges = shippedCounts(pending, null, NOW).waiting.length;

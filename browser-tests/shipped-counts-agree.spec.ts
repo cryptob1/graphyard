@@ -32,5 +32,5 @@ test('e2e:shipped-counts-agree — the top bar and the Work page card show the s
   await expect(strip).toContainText('2 shipped · 2 going live');
   await expect(card.locator('[data-shipped]')).toHaveAttribute('data-shipped', '2');
   await expect(card.locator('[data-waiting]')).toHaveAttribute('data-waiting', '2');
-  await expect(card).toContainText('2 shipped this week, 2 going live.');
+  await expect(card).toContainText('2 shipped, 2 going live.');
 });

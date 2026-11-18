@@ -466,10 +466,21 @@ export function declaredHealthUrl(root: string | null | undefined): string | nul
 }
 
 let health: { url: string; at: number; commit: string | null } | null = null;
-/** The commit the health URL answers, asked at most once a minute however often the dashboard polls; null when it does not answer one. */
+/**
+ * The commit the health URL answers, asked at most once a minute however often the dashboard polls;
+ * null when it does not answer one. Only the first ask is awaited: later ones refresh in the
+ * background, so a slow health URL never holds /api/status.
+ */
 async function healthCommit(url: string, now: number, fetcher: typeof fetch): Promise<string | null> {
-  if (health?.url === url && now - health.at < 60_000) return health.commit;
-  health = { url, at: now, commit: await servedCommit(url, fetcher).catch(() => null) };
+  const ask = () => servedCommit(url, fetcher).catch(() => null);
+  if (health?.url !== url) {
+    const entry = health = { url, at: now, commit: null as string | null };
+    return entry.commit = await ask();
+  }
+  if (now - health.at >= 60_000) {
+    const entry = health; entry.at = now;
+    void ask().then(commit => { entry.commit = commit; });
+  }
   return health.commit;
 }
 

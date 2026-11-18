@@ -5,9 +5,9 @@ import WorkCard from '../components/work-card';
 import TasteFeed from '../components/taste';
 import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
-import { groupLabel, shippedCounts, groupMeaning, groups, summarySentence, upNextTile, type BoardItem, type OpenGroup } from '../groups';
+import { groupLabel, mergedAt, shippedCounts, groupMeaning, groups, summarySentence, upNextTile, type BoardItem, type OpenGroup } from '../groups';
 import { releaseView } from '../../src/model/release';
-import { liveFailingLine, serveView } from '../../src/model/plain-stage';
+import { liveFailingLine, plainStage, serveView } from '../../src/model/plain-stage';
 import { stalledCards } from '../../src/model/actionless';
 import type { Dashboard } from './dashboard';
 import { BuildLine } from '../fun';
@@ -33,8 +33,8 @@ export function WorkPage(dashboard: Dashboard) {
  * those same groups — so a number on the page is always the number of rows it stands for.
  * Needs you comes first, with the one action to take; Backlog is folded away and carries no
  * clock. What shipped is one line at the foot, linking to the Shipped page: shipped means the live
- * commit contains it (GY-3452), the same count the top bar shows, beside the week's merges still
- * going live.
+ * commit contains it (GY-3452), worded and counted as the top bar shows it, beside the week's merges
+ * still going live, and the newest merge in its plain stage.
  */
 export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, action, busy, api, token }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
@@ -50,6 +50,8 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
   // GY-3452: shipped means live — the week's merges the live commit contains; the rest wait to go live. The top bar reads the same count.
   const { shipped, waiting } = shippedCounts(work, status?.live, now);
+  // The latest is the newest merge (GY-168), named with its plain stage (GY-2988).
+  const latest = [...shipped, ...waiting].reduce<Work | null>((newest, w) => !newest || mergedAt(w) > mergedAt(newest) ? w : newest, null);
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} queue={queues.get(w.id)} repository={status?.repository} now={now} onOpen={setSelected} release={release} busy={busy} onPriority={mayChangePriority(status?.actor) ? priority => { void action(w.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && (byGroup[group].length > 0 || (group === 'needs-you' && only === group)) && <section key={group} className={`panel work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
@@ -79,7 +81,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       {board && groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Inbox zero, factory edition.'}</p>}
       <div className="shipped-line" aria-label="Shipped this week">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
-        <span><strong data-shipped={shipped.length}>{shipped.length} shipped this week</strong>, <span data-waiting={waiting.length}>{waiting.length} going live</span>.{liveFailingLine(serve) && <span className="danger-text" data-live-failing> {liveFailingLine(serve)}.</span>}</span>
+        <span><strong data-shipped={shipped.length} title="Merged this week and live">{shipped.length} shipped</strong>, <span data-waiting={waiting.length}>{waiting.length} going live</span>.{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span></button> · {plainStage(latest, now, release, serve)}</>}{liveFailingLine(serve) && <span className="danger-text" data-live-failing> {liveFailingLine(serve)}.</span>}</span>
         <button type="button" className="text-button push" onClick={() => setView('shipped')}>Shipped →</button>
       </div>
       {/* GY-3393: what shipped and awaits the owner's taste, with its evidence; tasting gates nothing. The fold

@@ -47,9 +47,14 @@ test('integration:shipped-means-live — shipped counts only merges the live com
     const health = await liveRelease(root, merges[0].sha, main, work, read, { now });
     assert.deepEqual(health, { commit: merges[1].sha, waiting: ['GY-3'] }, 'the health URL wins over the served record');
     assert.deepEqual(keys(shippedCounts(work, health, now)), { shipped: ['GY-1', 'GY-2'], waiting: ['GY-3'] });
-    // The host deploys the newest merge; the next poll reads it and that merge becomes shipped.
+    // The host deploys the newest merge; the next poll a minute on asks again in the background,
+    // and once it answers that merge becomes shipped.
     body = `${main}\n`;
-    const deployed = await liveRelease(root, null, main, work, read, { now: now + 61_000 });
+    let deployed = await liveRelease(root, null, main, work, read, { now: now + 61_000 });
+    for (let n = 0; n < 100 && deployed?.commit !== main; n++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      deployed = await liveRelease(root, null, main, work, read, { now: now + 61_000 });
+    }
     assert.deepEqual(deployed, { commit: main, waiting: [] });
     assert.deepEqual(keys(shippedCounts(work, deployed, now)), { shipped: ['GY-1', 'GY-2', 'GY-3'], waiting: [] });
   } finally { server.close(); }
