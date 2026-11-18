@@ -39,6 +39,8 @@ export async function cpuCelsius(hwmon = '/sys/class/hwmon'): Promise<number | n
 
 /** The batch gate's key in the trial, a proofless pseudo-item. */
 export const gateTrialKey = 'batch-gate';
+/** GY-3474: the owner a trial's container starts carry in their wait markers: the install and the commit it trials. */
+export const trialStartOwner = (root: string, commit: string) => `${root} ${commit}`;
 /** GY-3444: the gate's containers' CPU weight (Docker's default is 1024), so under load its checks run ahead of merge trials and worker verification. */
 export const gateCpuShares = 4096;
 /** Who starts first once a start can go: the lower number. GY-3444: the batch gate's checks first, so a loaded host never starves the deploy path. */
@@ -52,7 +54,7 @@ export const trialStartOrder = { gate: 0, merge: 1, verification: 2 } as const;
 export const trialPressureBoundSeconds = 10 * 60;
 
 /** What the launcher reads to admit a container. `slots` is per machine, not per install: any install's containers load the same CPUs. */
-export interface TrialLoad { slots: string; cap: number; order: number; /** GY-3444: Docker --cpu-shares, set for the gate alone. */ cpuShares?: number; /** GY-3444: the gate's cap while the CPU is hot: it starts within it instead of waiting on heat. */ hotCap?: number; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number }
+export interface TrialLoad { slots: string; cap: number; order: number; /** GY-3444: Docker --cpu-shares, set for the gate alone. */ cpuShares?: number; /** GY-3444: the gate's cap while the CPU is hot: it starts within it instead of waiting on heat. */ hotCap?: number; /** GY-3474: whose start this is — the install root and commit — written into its wait marker, so the gate counts its own check's wait alone. */ owner?: string; hotCelsius: number; floorBytes: number; hwmon: string; pressureBoundSeconds: number }
 
 /** The load of one start for `root`'s install; `run.diskFloorGb` is the one setting it reads. */
 const hostCpu = trialCpuMonitor();
@@ -189,7 +191,8 @@ def admit():
             if why != said:
                 print('${waitingLine}: ' + why, file=sys.stderr, flush=True)
                 if said is None:
-                    open(waiting, 'w').close()
+                    with open(waiting, 'w') as file:
+                        file.write(load.get('owner', ''))
                 said = why
             if bound is not None and time.time() - began >= bound:
                 print('${faultLine}the trial container waited ' + str(int(time.time() - began)) + 's to start and gave up: ' + why, file=sys.stderr, flush=True)
@@ -227,15 +230,17 @@ export function trialFloorWaits(slots = trialSlots()): string[] {
   });
 }
 
-/** GY-3444: whether a live launcher on this machine waits to start a container of start order `who` now. */
-export function trialStartWaiting(who: keyof typeof trialStartOrder, slots = trialSlots()): boolean {
+/** GY-3444: whether a live launcher on this machine waits to start a container of start order `who` now; GY-3474: with `owner`, only that owner's start. */
+export function trialStartWaiting(who: keyof typeof trialStartOrder, slots = trialSlots(), owner?: string): boolean {
   let names: string[];
   try { names = readdirSync(slots); } catch { return false; }
   return names.some(name => {
     const pid = new RegExp(`^wait-${trialStartOrder[who]}-(\\d+)$`).exec(name)?.[1];
     if (!pid) return false;
-    try { process.kill(Number(pid), 0); return true; }
+    try { process.kill(Number(pid), 0); }
     catch { try { unlinkSync(join(slots, name)); } catch { /* another reader took it */ } return false; } // a killed launcher's note
+    if (owner === undefined) return true;
+    try { return readFileSync(join(slots, name), 'utf8') === owner; } catch { return false; }
   });
 }
 

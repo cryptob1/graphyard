@@ -27,7 +27,7 @@ import { cachedPasses, commitDependencies, dependencyKey, moduleFile, recordPass
 import { HostDroppedError, readShardHosts, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, splitLocalOnlyTests, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
-import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes } from './trial-load.js';
+import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes, trialStartOwner } from './trial-load.js';
 import { nestedSandboxDenied, trialAppArmorFix } from './trial-apparmor.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -1070,7 +1070,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       caches = resolve(input.root, String(await run('git', ['-C', input.root, 'rev-parse', '--git-common-dir'], { timeoutMs: remaining() })).trim());
       dependencies = dependencyKey(chosen ?? trialImage(), lockfile); warm = warmDependencies(caches, dependencies);
     }
-    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], [...trialContainerDependencies(input.root), ...(warm ? [warm] : [])], Date.now() + remaining(), await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge', cpu.cores(), input.cores ?? availableParallelism()), chosen ?? undefined);
+    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], [...trialContainerDependencies(input.root), ...(warm ? [warm] : [])], Date.now() + remaining(), { ...await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge', cpu.cores(), input.cores ?? availableParallelism()), owner: trialStartOwner(input.root, input.mergeSha) }, chosen ?? undefined);
     wrapper = boundary();
     runImage = chosen ?? undefined;
   };
@@ -1439,7 +1439,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null; passed: string[] } | undefined)[] = [];
     let stopped: unknown = null;
     // A shard a host turned away is noted after every shard's output, so the note stays in the log tail kept on the item.
-    const dropped: string[] = [];
+    const dropped = new Map<string, HostDroppedError>();
     const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, deadline, signal: input.signal }) : null;
     // One shard on this machine, or on `remote`; a remote host that turned it away rethrows, so it runs elsewhere.
     const shard = async (index: number, remote?: string) => {
@@ -1470,7 +1470,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries, passed,
           unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
       } catch (error) {
-        if (error instanceof HostDroppedError) { dropped.push(`[remote] ${error.message}; its shard runs on another host`); throw error; }
+        if (error instanceof HostDroppedError) { if (!dropped.has(error.host)) dropped.set(error.host, error); throw error; }
         log.push(...entries);
         // A remote shard past the deadline ends the trial as a timeout, as a local one does.
         stopped ??= (error as { timedOut?: boolean }).timedOut ? new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail()) : error;
@@ -1486,11 +1486,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         run: (host, index) => shard(index, host.remote) });
       if (hosts.length) await recordRemoteShardRun(input.root, { at: new Date().toISOString(), wallMs: Math.max(0, now() - startedAt), shards: placement.ran.length, remote: placement.ran.filter(name => name !== local.name).length,
         queuedWhileIdle: placement.queuedWhileIdle, host: local.name, celsius: local.reading.celsius,
-        hosts: readings.map(reading => ({ name: reading.name, away: reading.away || placement.dropped.includes(reading.name), celsius: reading.celsius, freeCores: Math.round(realFreeCores(reading) * 10) / 10 })) }).catch(() => {});
+        hosts: readings.map(reading => ({ name: reading.name, away: reading.away || placement.dropped.includes(reading.name), reason: dropped.get(reading.name)?.reason ?? reading.reason, celsius: reading.celsius, freeCores: Math.round(realFreeCores(reading) * 10) / 10 })) }).catch(() => {});
     } finally { await release(); await session?.close(); }
     const ran = settledShards.filter(shard => shard !== undefined);
     for (const shard of ran) log.push(...shard.entries);
-    log.push(...dropped);
+    log.push(...[...dropped.values()].map(error => `[remote] ${error.message}; its shard runs on another host`));
     // A shard past the deadline ends the trial as a timeout once every shard has stopped, its log holding what the others printed.
     if (stopped instanceof TrialTimeoutError) throw new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail());
     if (stopped !== null) throw stopped;

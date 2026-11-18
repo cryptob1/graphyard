@@ -20,7 +20,13 @@ export async function moveBranchToHead(root: string, branch: string, head: strin
 /** Poll alongside the host loop; trials never hold up supervision or renewal. */
 export function workerVerificationPump(root: string, host: () => string,
   mutate: (path: string, body: unknown) => Promise<any>, base: () => string, check = runWorkerCheck, verify = runWorkerVerification) {
+  let started: Promise<unknown> | undefined;
   return async () => {
+    // Once per loop lifetime, even while drained. Share initialization across overlapping polls.
+    await (started ??= mutate('worker-verifications/restart', { host: host() }).catch(error => {
+      started = undefined;
+      throw error;
+    }));
     // GY-3304: while the host's heavy work is drained, requests stay queued on the control plane until resume.
     if (readHeavyDrain(heavyJobsDirectory())) return;
     const jobs: WorkerVerificationJob[] = await mutate('worker-verifications/take', { host: host() });

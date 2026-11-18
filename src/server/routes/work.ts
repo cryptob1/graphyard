@@ -1,4 +1,4 @@
-import { takeWorkerVerifications, finishWorkerVerification, progressWorkerVerification, workerVerificationLines } from '../worker-verification-queue.js';
+import { restartWorkerVerifications, takeWorkerVerifications, finishWorkerVerification, progressWorkerVerification, workerVerificationLines } from '../worker-verification-queue.js';
 import { workerVerification } from '../worker-verification.js';
 import { workerVerificationTimeoutMs } from '../../merge-writer/worker-verification.js';
 import { once } from '../../store/mutations.js';
@@ -46,6 +46,9 @@ const refuseLead = async ({ actor, services }: RouteContext, id: string | null, 
 
 /** Work mutations: the human-only waits, the merge writer's record and every engine command. */
 export const workRoutes = defineRoutes('work', [
+  { method: 'POST', path: '/api/worker-verifications/restart', async handle(context) {
+    return restartWorkerVerifications(context.services, context.actor, await parseJson(context));
+  } },
   { method: 'POST', path: '/api/worker-verifications/take', async handle(context) {
     return takeWorkerVerifications(context.services, context.actor, await parseJson(context));
   } },
