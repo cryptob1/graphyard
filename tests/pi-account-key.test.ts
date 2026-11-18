@@ -46,6 +46,7 @@ function memoryRegistry(host: string) {
   const mutate = (kind: RegistryMutation, input: unknown) => { registry = applyRegistryMutation(registry, kind, input, { actor: 'operator', at: at() }).registry; append(kind, input); return registry.revision; };
   const client: FleetClient = {
     document: async () => structuredClone(registry),
+    observe: async request => { foldObservations(registry, request, { actor: 'coordinator', at: at() }); },
     select: async request => {
       for (const superseded of supersededByRequest(registry, request)) Object.assign(superseded, { endedAt: at(), endReason: 'superseded' });
       foldObservations(registry, request, { actor: 'coordinator', at: at() });
@@ -171,15 +172,15 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
   const pi = await fakePi();
   try {
     await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0 }),
-      /No healthy agent account for producer.*pi-a failed its smoke test: No API key found for zai\./s);
+      /No healthy agent account for producer.*pi-a is not logged in: No API key found for zai\./s);
     assert.deepEqual((await pi.runs()).map(entry => entry.smoke), [true], 'the smoke test ran, and no session was chosen');
     const account = registry.current().accounts[0];
-    assert.equal(account.smoke?.result, 'fail'); assert.equal(account.smoke?.reason, 'No API key found for zai. Use /login to log into a provider.', 'Pi\'s own error, on one line');
+    assert.equal(account.quota.state, 'exhausted'); assert.equal(account.quota.reason, 'No API key found for zai. Use /login to log into a provider.', 'Pi\'s own error, on one line');
     assert.equal(registry.current().sessions.length, 0, 'no session was selected on the account');
-    assert.match(fleetView(registry.current(), Date.now()).accounts[0].ineligible!, /failed its smoke test: No API key found for zai/);
+    assert.match(fleetView(registry.current(), Date.now()).accounts[0].ineligible!, /is not logged in: No API key found for zai/);
 
     // A failed account is not tested again on every launch: it stays out until it is changed.
-    await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0 }), /failed its smoke test/);
+    await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0 }), /is not logged in/);
     assert.equal((await pi.runs()).length, 1);
 
     // The fix is a registry change — naming the key — and the change is tested before any session.
@@ -204,7 +205,7 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
   const chosen = await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: alone.client, quota: false, cacheMs: 0, smoke: async account => { tested.push(account.name); return account.name === 'pi-x' ? { ok: false, error: '401 invalid api key' } : { ok: true, error: null }; } });
   assert.deepEqual(tested.sort(), ['pi-x', 'pi-y']);
   assert.equal(chosen?.account.name, 'pi-y', 'the account that failed is passed over for the next');
-  assert.match(chosen!.skipped[0].reason, /pi-x failed its smoke test: 401 invalid api key/);
+  assert.match(chosen!.skipped[0].reason, /pi-x quota is exhausted.*401 invalid api key/);
 
   // Concurrent launches that each read the registry before the first result is folded share one
   // smoke test of the untested account and report the same result (GY-463).
@@ -281,9 +282,9 @@ test('unit:account-smoke-gate — a failed smoke test is retested once its delay
   piFleet(registry, config.hostId, [{ name: 'pi-r', home: await piHome('pi-r', null) }]);
   let outage = true;
   const tested: number[] = [], smoke = async () => { tested.push(1); return outage ? { ok: false, error: '503 provider unavailable' } : { ok: true, error: null }; };
-  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /pi-r failed its smoke test: 503 provider unavailable; it is tested again after 60 minutes/);
+  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /pi-r quota is exhausted.*503 provider unavailable/);
   outage = false;
-  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /failed its smoke test/, 'within the delay the failure stands untested');
+  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /quota is exhausted/, 'within the delay the failure stands untested');
   assert.equal(tested.length, 1);
   const later = Date.now() + smokeRetestMs + 1_000;
   const chosen = await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke, now: () => later });
@@ -300,7 +301,7 @@ test('unit:account-smoke-gate — a failed smoke test is retested once its delay
   assert.equal(needsSmoke(failed, { ...pi, launch: { ...pi.launch, kind: 'claude' } }, at + smokeRetestMs), false, 'an interactive runtime has no smoke test');
 });
 
-test('unit:account-smoke-gate — the producer preflight reads an expired smoke failure as retestable, so the hourly retest can run (GY-515)', async () => {
+test('unit:account-smoke-gate — the producer preflight reads an expired smoke failure as retestable, so its next live check can run (GY-515)', async () => {
   const { config } = await installation(), registry = memoryRegistry(config.hostId);
   registry.mutate('apply', {
     runtimes: proposedRuntimes.filter(runtime => runtime.name === 'pi'),
@@ -313,40 +314,36 @@ test('unit:account-smoke-gate — the producer preflight reads an expired smoke 
   const smoke = async () => (outage ? { ok: false, error: '503 provider unavailable' } : { ok: true, error: null });
   // The first launch fails the smoke test, and the failure folds into the registry.
   await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }),
-    /pi-p failed its smoke test: 503 provider unavailable; it is tested again after 60 minutes/);
-  assert.equal(registry.current().accounts[0].smoke?.result, 'fail');
+    /pi-p quota is exhausted.*503 provider unavailable/);
+  assert.equal(registry.current().accounts[0].quota.state, 'exhausted');
   // The dispatch's preflight is what kept the role shut: inspectProfileAccounts reads
   // fleetRoleHealth before any launch, so with the failure fresh every profile of the role reads
   // unavailable — no launch, and the retest selectFleetSession runs never fires.
   const health: Record<string, { available: boolean; reason: string | null }> = {};
-  const preflight = (now?: () => number): FleetProbe => ({ registry: registry.client, quota: false, cacheMs: 0, ...(now ? { now } : {}) });
+  const preflight = (now?: () => number): FleetProbe => ({ registry: registry.client, quota: false, cacheMs: 0, smoke, ...(now ? { now } : {}) });
   const fresh = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight());
   assert.equal(fresh['producer-profile'].available, false);
-  assert.match(fresh['producer-profile'].reason!, /pi-p failed its smoke test: 503 provider unavailable/);
-  assert.match((chooseSession(registry.current(), { role: 'producer', host: config.hostId }, Date.now()) as { reason: string }).reason, /failed its smoke test/);
+  assert.match(fresh['producer-profile'].reason!, /pi-p quota is exhausted.*503 provider unavailable/);
+  assert.match((chooseSession(registry.current(), { role: 'producer', host: config.hostId }, Date.now()) as { reason: string }).reason, /quota is exhausted/);
   // Once the failure has aged past the delay the preflight admits a launch again — the launch is
   // what runs the retest — while the choice itself still refuses until a fresh pass is folded.
   const later = Date.now() + smokeRetestMs + 1_000;
+  outage = false;
   const due = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight(() => later));
-  assert.equal(due['producer-profile'].available, true, 'the expired failure no longer bars the role: the next launch retests it');
+  assert.equal(due['producer-profile'].available, true, 'the passing live check releases the role');
   assert.equal(due['producer-profile'].accounts?.[0].healthy, true);
   assert.equal(due['producer-profile'].accounts?.[0].reason, null);
-  assert.match((chooseSession(registry.current(), { role: 'producer', host: config.hostId }, later) as { reason: string }).reason,
-    /failed its smoke test/, 'the choice still refuses until a fresh pass is folded');
-  // The launch the preflight admitted runs the retest, and its pass clears the failure.
-  outage = false;
+  assert.equal(chooseSession(registry.current(), { role: 'producer', host: config.hostId }, later).account?.name, 'pi-p', 'preflight folds the live pass');
   const chosen = await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke, now: () => later });
   assert.equal(chosen?.account.name, 'pi-p');
   assert.equal(registry.current().accounts[0].smoke?.result, 'pass');
   await registry.client.end(registry.current().sessions.at(-1)!.id, 'the producer run ended', 'result');
-  // The rule itself, on the clock: a retest that fails again folds a fresh failure, which shuts
-  // the preflight for another delay before it is due for its own retest.
-  registry.current().accounts[0].smoke = { result: 'fail', reason: '503 again', at: new Date(later).toISOString(), by: 'executor' };
-  const refailed = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight(() => later + 1));
-  assert.equal(refailed['producer-profile'].available, false, 'a retest that failed again is a fresh failure, not a due one');
-  assert.match((chooseSession(registry.current(), { role: 'producer', host: config.hostId }, later + 1) as { reason: string }).reason, /503 again/);
-  const dueAgain = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight(() => later + smokeRetestMs));
-  assert.equal(dueAgain['producer-profile'].available, true, 'the second failure is due for its own retest an hour later');
+  outage = true;
+  const refailed = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight(() => later + smokeRetestMs));
+  assert.equal(refailed['producer-profile'].available, false, 'a failed live recheck holds the account again');
+  outage = false;
+  const dueAgain = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight(() => later + 2 * smokeRetestMs));
+  assert.equal(dueAgain['producer-profile'].available, true, 'the next passing check releases it');
 });
 
 test('unit:registry-account-key — --no-key combined with --key-file or --key-variable is refused rather than silently winning (GY-515)', async () => {

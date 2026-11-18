@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, readdirSync, readFileSync } from 'node:fs';
 import type { Readable } from 'node:stream';
 import { maskSecrets } from './redaction.js';
+import { sessionScopeProperties } from './session-share.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { unknownWorkCode } from './model/refusal.js';
 
@@ -19,12 +20,12 @@ export interface Containment {
   empty: () => boolean;
 }
 
-export function systemdContainment(command: string, args: string[], run: typeof execFileSync = execFileSync): Containment {
+export function systemdContainment(command: string, args: string[], run: typeof execFileSync = execFileSync, properties = sessionScopeProperties()): Containment {
   run('systemctl', ['--user', 'show-environment'], { stdio: 'ignore' });
   const unit = `graphyard-watch-${process.pid}-${randomUUID()}.scope`;
   return {
     command: 'systemd-run', unit,
-    args: ['--user', '--scope', '--quiet', `--unit=${unit}`, '--', command, ...args],
+    args: ['--user', '--scope', '--quiet', `--unit=${unit}`, ...properties, '--', command, ...args],
     signal: signal => { run('systemctl', ['--user', 'kill', '--kill-whom=all', `--signal=${signal}`, unit], { stdio: 'ignore' }); },
     empty: () => {
       const query = ['--user', 'show', '--property=LoadState', '--property=ActiveState', unit];

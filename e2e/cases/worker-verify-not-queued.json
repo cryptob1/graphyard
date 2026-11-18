@@ -1,0 +1,15 @@
+{
+  "id": "worker-verify-not-queued",
+  "title": "A worker's own build and tests never queue behind trials holding the host's heavy-job slots",
+  "description": "Two merge trials hold both ordinary host heavy-job slots and a batch gate holds the reservation; a worker session's npm run build and its affected tests complete at once without waiting, and master status names the jobs and projects holding the slots and the limit they share.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a worker builds and tests while trials fill the host budget, and master status names the holders",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/worker-verify-not-queued.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

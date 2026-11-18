@@ -186,7 +186,7 @@ export const runtimeLimitNotices = (runtime: string | null | undefined): readonl
 const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s*(?:\d{3}\s*)?[-–—:]*\s*/i;
 
 /** A zone-less calendar wall clock, matched only where the reset parser would read one without a zone: not beside a zone the provider did name (`… 08:27:35 UTC`, `…T08:27:35+08:00`) and not the truncated head of a longer time (`08:27:35` must never become `08:27Z:35`). */
-const zonelessWallClock = /(\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?![.:]\d|\s*(?:Z|UTC|[+-]\d{2}:?\d{2}))/g;
+const zonelessWallClock = /(\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?!\d|[.:]\d|\s*(?:Z|UTC|[+-]\d{2}:?\d{2}))/g;
 /** Whether a notice names its zone in parentheses (`… 08:27:35 (America/Los_Angeles)`): the reset parser reads the wall clock in that zone, so the UTC default must not override it. The same shape and validity test as the parser's own. */
 function namesZone(text: string): boolean {
   const zone = /\(\s*([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+|UTC)\s*\)/.exec(text)?.[1];
@@ -238,3 +238,23 @@ export function detectHeadlessExhaustion(output: string, runtime: string | null 
   const errors = output.split('\n').map(line => { try { return JSON.parse(line)?.error?.message; } catch { return null; } }).filter(message => typeof message === 'string');
   return (reply ? detectRuntimeExhaustion(reply, runtime, now) : null) ?? (errors.length ? detectRuntimeExhaustion(errors.join('\n'), runtime, now) : null) ?? detectRuntimeExhaustion(output, runtime, now);
 }
+
+/**
+ * Each runtime's not-logged-in message, as its one-shot form prints it before exiting non-zero:
+ * Cursor ("Authentication required. Please run 'agent login' first"), Claude Code ("Not logged in ·
+ * Please run /login", "Invalid API key · Please run /login"), Codex ("Not logged in", "run codex
+ * login"), OpenCode ("opencode auth login"), Pi ("No API key found") and Muse, which names the login
+ * file it reads and found missing (`~/.config/muse/auth.json`, GY-3414) or says "missing meta
+ * credentials: run `muse login`" (GY-3441).
+ */
+const loggedOutMessage = /authentication required|not logged in|not authenticated|please run .{0,20}login|(codex|agent|auth|muse) login|missing \w+ credentials|no api key found|\bauth\.json\b.{0,60}\b(?:does not exist|not found|is missing)\b|\b(?:no such file or directory|does not exist|not found)\b.{0,80}\bauth\.json\b/i;
+/** The line of a failed run's output that says its account is not logged in, or null. Only short output is read: a login refusal is the whole of what the agent printed, never a line inside its work. */
+export function detectLoggedOut(output: string): string | null {
+  if (output.length > 4000) return null;
+  const line = output.split('\n').map(text => text.trim()).find(text => loggedOutMessage.test(text));
+  return line ? line.slice(0, 300) : null;
+}
+
+
+/** Parse only a reset stated by this provider; a missing reset remains unknown. */
+export const runtimeResetTime = (text: string, runtime: string, now: number) => parseResetTime(runtimeAdapter(runtime)?.zonelessUtcResets && !namesZone(text) ? text.replace(zonelessWallClock, '$1Z') : text, now);

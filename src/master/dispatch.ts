@@ -18,13 +18,12 @@ import { runtimeLoginHomes } from './profiles.js';
 import { loadMasterConfig, readWorkerCredential } from './config.js';
 import { atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { credentialMaskFor, CredentialMaskError, type MaskProbe } from './confinement.js';
-import { accountLaunch, agentLaunchPlan, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
+import { accountLaunch, agentLaunchPlan, NoHealthyAccountError, onSelectedSession, recordObservedExhaustion, selectAccount, sharedGitDirectory } from './environments.js';
 import type { FleetProbe } from '../fleet.js';
 import { repinPath, type CanaryOffer } from '../model/registry.js';
 import { reviewStandards } from '../review-prompt.js';
 import { launcherCoordinatorRoot, preservePartialWork, prepareConfinedGitPaths, sessionConfinement } from './launch.js';
 import { defaultHeadlessExec, HeadlessConfigurationError, startHeadlessWorker, type HeadlessExec } from '../headless-session.js';
-import { exhaustionHold, markHostAccountExhausted } from '../host-accounts.js';
 import { liveRun } from '../runner/registry.js';
 import { runTranscript } from '../model/sessions.js';
 import { detectHeadlessExhaustion } from './runtime-prompt.js';
@@ -194,7 +193,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   // without it could hand the same spent account back, and the loop's retry takes it from there.
   // On the snapshot's clock, as dispatchability is judged, and the choice reads holds at the same instant.
   const holdAt = options.probe?.now?.() ?? Date.parse(observedAt), clock = { now: () => holdAt };
-  await holdRepeatedLimitAccount(config, work, holdAt, { registry: options.probe?.registry }).catch((error: unknown) => {
+  await holdRepeatedLimitAccount(config, work, holdAt, { registry: options.probe?.registry, smoke: options.probe?.smoke }).catch((error: unknown) => {
     throw new Error(`${work.key}'s last worker launches each ended on ${repeatedLimitAccount(work, holdAt)?.account ?? 'one account'}'s limit notice, and the hold that keeps the next launch off it could not be placed: ${failureText(error).slice(0, 300)}; nothing was claimed`, { cause: error });
   });
   let startError: unknown = null;
@@ -230,7 +229,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     options.onRuntime?.(launch.kind ?? profile.kind ?? 'unknown');
     try {
       assertClaimDeadline(work.key, options.claimBy);
-      result = await launchWorker(root, config, work, profile, launch, prepare, release, { settleReservation: async reason => chosen.release?.(reason), onRun: options.onRun, sandboxProbe: options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), claimBy: options.claimBy, coordinatorRoot,
+      result = await launchWorker(root, config, work, profile, launch, prepare, release, { probe: options.probe, settleReservation: async reason => chosen.release?.(reason), onRun: options.onRun, sandboxProbe: options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), claimBy: options.claimBy, coordinatorRoot,
         renew: options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), renewIntervalMs: options.renewIntervalMs, verificationMaps: options.verificationMaps ?? readVerificationMaps, rework, cycle: observedAt,
         diagnosis: options.diagnosis ?? '', maskProbe: options.maskProbe, headless: options.headless ?? defaultHeadlessExec(), startupMs: options.startupMs, capacity: options.capacity });
     } catch (error) {
@@ -330,8 +329,8 @@ export async function readProfileLaunchRecords(root: string, profiles: { name: s
 }
 
 
-interface WorkerLaunchOptions { settleReservation?: (reason: string) => Promise<unknown>; onRun?: DispatchOptions['onRun']; sandboxProbe: SandboxExec | 'host' | null; claimBy?: number; coordinatorRoot?: string; renew: LeaseRenewer | null; renewIntervalMs?: number; verificationMaps: NonNullable<DispatchOptions['verificationMaps']>; rework: AppliedRework | null; cycle?: string; diagnosis: string; maskProbe?: MaskProbe; headless: HeadlessExec; startupMs?: number; capacity?: DispatchOptions['capacity'] }
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, { settleReservation, onRun, sandboxProbe, claimBy, coordinatorRoot, renew, renewIntervalMs, verificationMaps, rework, cycle, diagnosis, maskProbe, headless, startupMs, capacity }: WorkerLaunchOptions) {
+interface WorkerLaunchOptions { probe?: FleetProbe; settleReservation?: (reason: string) => Promise<unknown>; onRun?: DispatchOptions['onRun']; sandboxProbe: SandboxExec | 'host' | null; claimBy?: number; coordinatorRoot?: string; renew: LeaseRenewer | null; renewIntervalMs?: number; verificationMaps: NonNullable<DispatchOptions['verificationMaps']>; rework: AppliedRework | null; cycle?: string; diagnosis: string; maskProbe?: MaskProbe; headless: HeadlessExec; startupMs?: number; capacity?: DispatchOptions['capacity'] }
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string, blocker?: string) => Promise<void>, { probe, settleReservation, onRun, sandboxProbe, claimBy, coordinatorRoot, renew, renewIntervalMs, verificationMaps, rework, cycle, diagnosis, maskProbe, headless, startupMs, capacity }: WorkerLaunchOptions) {
   const mergeWriter = 'control-plane' as const;
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
@@ -344,6 +343,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   try { prepared = await prepare(root, work.key, profile.name, undefined, claimBy, keep, cycle); }
   catch (error) { await keepAlive?.stop(); throw error; }
   keep(prepared.epoch);
+  let limitCheck: ReturnType<typeof checkStoppedLimit> | undefined;
   try { return await launchPrepared(); } finally { await keepAlive?.stop(); }
   async function launchPrepared() {
     // The session has no GitHub credential and must still reach no keyring.
@@ -418,18 +418,19 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
    * ended and its supervisor released its lease, so its work is kept on its branch and the handoff
    * and the account hold are recorded on the item, where the next attempt's brief reads them.
    */
-  async function stoppedOnLimit(output: string) {
+  function stoppedOnLimit(output: string) { return limitCheck ??= checkStoppedLimit(output); }
+  async function checkStoppedLimit(output: string) {
     const notice = detectHeadlessExhaustion(output, launch.kind!, Date.now());
-    if (!notice) return null;
+    if (!notice || !launch.account) return null;
+    const checkedAt = Date.now();
+    const hold = await recordObservedExhaustion(config, launch.account, { at: new Date(checkedAt).toISOString(), reason: notice.reason, resetsAt: notice.resetsAt,
+      role: 'worker', profile: profile.name, work: work.key }, checkedAt, { registry: probe?.registry, smoke: probe?.smoke });
+    if (Date.parse(hold.until) <= checkedAt) return null;
+    notice.reason = hold.reason;
+    notice.resetsAt = hold.resetsAt;
     const partialWork = await preservePartialWork(prepared.path, `${work.key} attempt ${prepared.epoch} stopped on its provider's limit notice`);
     await capacity?.({ event: 'exhausted', role: 'worker', epoch: prepared.epoch, profile: profile.name, account: launch.account ?? null, runtime: launch.kind ?? null,
       reason: `the headless worker stopped on its provider's limit notice: ${notice.reason}`.slice(0, 500), resetsAt: notice.resetsAt ?? null, partialWork });
-    // GY-3333: the hold is recorded beside the login home too, so every install on this host reads
-    // the account as exhausted until the same reset rather than rediscovering it with a session.
-    if (launch.home) {
-      try { markHostAccountExhausted(launch.home, { by: config.repository ?? config.url, reason: notice.reason, at: new Date().toISOString(), ...exhaustionHold(notice.resetsAt, Date.now()) }); }
-      catch { /* the control-plane hold stands; only the shared record could not be written */ }
-    }
     return notice;
   }
   /**

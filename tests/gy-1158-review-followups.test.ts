@@ -119,7 +119,7 @@ test('unit:gy-1158-finding-4 — reconcile stale exhausted observations per plan
 
   // Checking ineligibility for accA: accA's stale exhaustion is also reconciled to available
   const ineligibilityA = accountIneligibility(baseReg, accA, now, 'host-a');
-  assert.equal(ineligibilityA, null, 'acc-host-a is eligible because newest observation on the shared plan is available');
+  assert.match(ineligibilityA!, /quota is exhausted/, 'a different account cannot release this account');
 });
 
 test('unit:gy-1158-finding-5 — observeAccount detects sibling accounts by passing allAccounts to deriveAccountPlan', async () => {
@@ -213,7 +213,7 @@ test('unit:gy-1158-finding-2 — an OpenCode account whose key file is Anthropic
   await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'api', key: 'sk-ant-fixture' } }));
   await writeFile(join(home, 'anthropic.key'), 'sk-ant-fixture\n');
   const runtime: any = { name: 'opencode', launch: { kind: 'opencode', args: [], environment: {}, homeVariable: 'XDG_DATA_HOME', modelFlag: '--model', login: null, loginFile: null } };
-  const account: any = { name: 'opencode-a', runtime: 'opencode', model: 'claude-3-5-sonnet', enabled: true,
+  const account: any = { quota: { state: 'unknown', loggedIn: null }, name: 'opencode-a', runtime: 'opencode', model: 'claude-3-5-sonnet', enabled: true,
     credential: { host: HOST, home, key: { file: 'anthropic.key', variable: 'ANTHROPIC_API_KEY' } } };
   const called: string[] = [];
   const fetchStub = (async (url: string) => { called.push(String(url)); return new Response('{}', { status: 401 }); }) as typeof fetch;
@@ -226,9 +226,9 @@ test('unit:gy-1158-finding-2 — a Pi account with no Z.AI credential is left to
   const home = await temporaryDirectory('pi-keyless');
   await writeFile(join(home, 'auth.json'), '{}');
   const runtime: any = { name: 'pi', launch: { kind: 'pi', args: [], environment: {}, homeVariable: 'PI_CODING_AGENT_DIR', modelFlag: '--model', login: null, loginFile: null } };
-  const account: any = { name: 'pi-k', runtime: 'pi', model: 'glm-flash', enabled: true, credential: { host: HOST, home } };
-  const observed = await observeAccount(account, runtime, { quota: false, cacheMs: 0 });
-  assert.equal(observed.quota.loggedIn, null, 'unknown: an empty auth.json is no Z.AI login, and Pi\'s smoke test decides');
+  const account: any = { quota: { state: 'unknown', loggedIn: null }, name: 'pi-k', runtime: 'pi', model: 'glm-flash', enabled: true, credential: { host: HOST, home } };
+  const observed = await observeAccount(account, runtime, { quota: false, cacheMs: 0, smoke: async () => ({ ok: false, error: 'No API key found' }) });
+  assert.equal(observed.quota.loggedIn, false, 'the smoke request confirms the missing login');
 });
 
 test('unit:gy-1158-finding-4 — eligibility is a pure read: a stale exhaustion is superseded without rewriting the account', () => {
@@ -246,11 +246,11 @@ test('unit:gy-1158-finding-4 — eligibility is a pure read: a stale exhaustion 
   foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 100, resetsAt: null }], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-30 * minute) });
   foldObservation(b, { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null }, { actor: 'coordinator', at: iso(-5 * minute) });
   const before = structuredClone(a.quota);
-  assert.equal(accountIneligibility(registry, a, now, 'host-a'), null);
+  assert.match(accountIneligibility(registry, a, now, 'host-a')!, /quota is exhausted/);
   assert.deepEqual(a.quota, before, 'the read leaves the account\'s recorded quota as it was');
   // A newer exhaustion on the plan holds every account on it.
   foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 100, resetsAt: null }], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-1 * minute) });
-  assert.match(accountIneligibility(registry, b, now, 'host-b')!, /acc-b quota is exhausted on plan .*acc-a quota is exhausted: quota exceeded/);
+  assert.equal(accountIneligibility(registry, b, now, 'host-b'), null);
 });
 
 test('unit:gy-1158-finding-2 — an OpenCode account logged in to another provider stays logged in whatever its model name', async () => {
@@ -259,7 +259,7 @@ test('unit:gy-1158-finding-2 — an OpenCode account logged in to another provid
     const home = await temporaryDirectory('opencode-other-provider');
     await mkdir(join(home, 'opencode'), { recursive: true });
     await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'api', key: 'sk-ant-fixture' } }));
-    const account: any = { name: 'opencode-a', runtime: 'opencode', model, enabled: true, credential: { host: HOST, home, ...(key ? { key } : {}) } };
+    const account: any = { quota: { state: 'unknown', loggedIn: null }, name: 'opencode-a', runtime: 'opencode', model, enabled: true, credential: { host: HOST, home, ...(key ? { key } : {}) } };
     const called: string[] = [];
     const fetchStub = (async (url: string) => { called.push(String(url)); return new Response('{}', { status: 401 }); }) as typeof fetch;
     const observed = await observeAccount(account, runtime, { fetch: fetchStub, cacheMs: 0, now: () => now });
@@ -274,7 +274,7 @@ test('unit:gy-1158-finding-2 — an OpenCode account logged in through OAuth sta
     const home = await temporaryDirectory('opencode-oauth');
     await mkdir(join(home, 'opencode'), { recursive: true });
     await writeFile(join(home, 'opencode/auth.json'), JSON.stringify(entry));
-    const account: any = { name: 'opencode-a', runtime: 'opencode', model: 'sonnet', enabled: true, credential: { host: HOST, home } };
+    const account: any = { quota: { state: 'unknown', loggedIn: null }, name: 'opencode-a', runtime: 'opencode', model: 'sonnet', enabled: true, credential: { host: HOST, home } };
     const called: string[] = [];
     const fetchStub = (async (url: string) => { called.push(String(url)); return new Response('{}', { status: 401 }); }) as typeof fetch;
     const observed = await observeAccount(account, runtime, { fetch: fetchStub, cacheMs: 0, now: () => now });
@@ -284,7 +284,7 @@ test('unit:gy-1158-finding-2 — an OpenCode account logged in through OAuth sta
   const empty = await temporaryDirectory('opencode-empty-auth');
   await mkdir(join(empty, 'opencode'), { recursive: true });
   await writeFile(join(empty, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'oauth' } }));
-  const account: any = { name: 'opencode-a', runtime: 'opencode', model: 'sonnet', enabled: true, credential: { host: HOST, home: empty } };
+  const account: any = { quota: { state: 'unknown', loggedIn: null }, name: 'opencode-a', runtime: 'opencode', model: 'sonnet', enabled: true, credential: { host: HOST, home: empty } };
   const observed = await observeAccount(account, runtime, { cacheMs: 0, now: () => now, quota: false });
   assert.equal(observed.quota.loggedIn, false, 'an entry without credential material is no login');
 });
@@ -294,7 +294,7 @@ test('unit:gy-1158-finding-2 — an explicitly declared Z.AI plan still requires
   await mkdir(join(home, 'opencode'), { recursive: true });
   await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ anthropic: { type: 'api', key: 'sk-ant-fixture' } }));
   const runtime: any = { name: 'opencode', launch: { kind: 'opencode', args: [], environment: {}, homeVariable: 'XDG_DATA_HOME', modelFlag: '--model', login: null, loginFile: null } };
-  const account: any = { name: 'opencode-b', runtime: 'opencode', model: 'sonnet', plan: 'zai-team', enabled: true, credential: { host: HOST, home } };
+  const account: any = { quota: { state: 'unknown', loggedIn: null }, name: 'opencode-b', runtime: 'opencode', model: 'sonnet', plan: 'zai-team', enabled: true, credential: { host: HOST, home } };
   const observed = await observeAccount(account, runtime, { cacheMs: 0, now: () => now, quota: false });
   assert.equal(observed.quota.loggedIn, false, 'a declared Z.AI plan without a Z.AI key is not logged in');
 });

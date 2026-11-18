@@ -1,3 +1,5 @@
+import { headlessArgs, headlessArgv, HeadlessConfigurationError } from './headless-argv.js';
+export { headlessKind, headlessArgs, headlessArgv, HeadlessConfigurationError } from './headless-argv.js';
 // Concern: headless sessions — reviews, and since GY-3259 workers (at the end of this file). A reviewer no longer needs a Herdr pane,
 // a TUI start wait or a CLI call to post: its runtime runs once, non-interactively, as one child
 // process in the session's checkout, under the same coordinator confinement and credential mask a
@@ -13,18 +15,16 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { basename, join, resolve } from 'node:path';
 import { z } from 'zod';
 import { withAutonomyContract } from './autonomy.js';
-import { assertLaunchable, launchRecipe, requestPlaceholder, type RegisteredLaunch } from './harness.js';
-import { launchProgram, sessionConfinement } from './master/launch.js';
-import { realRuntimeBinary } from './runtime-binary.js';
+import { assertLaunchable, launchRecipe, type RegisteredLaunch } from './harness.js';
+import { sessionConfinement } from './master/launch.js';
 import { detectHeadlessExhaustion } from './master/runtime-prompt.js';
 import { detectLoggedOut } from './master/logged-out.js';
 import type { ExhaustionSignal } from './model/capacity.js';
 import type { CredentialMask } from './master/confinement.js';
 import { endRun, liveRun, registerRun, sessionTestBudget, type AdoptedRun } from './runner/registry.js';
-import { detachedLaunch, processIdentity, readRunMeta, runAlive, runContainment, runEnvironment, runFiles, signalRun, type RunMeta } from './runner/pi.js';
+import { sessionLaunch, processIdentity, readRunMeta, runAlive, runContainment, runEnvironment, runFiles, signalRun, type RunMeta } from './runner/pi.js';
 import { runRecord } from './runner/types.js';
 import { underTestRunner } from './runtime-environment.js';
-import { acceptedFlags, runtimeAdapter } from './master/runtimes.js';
 import { confinedRuntimeArgs } from './worker-sandbox.js';
 import { runtimeReport } from './model/token-costs.js';
 import { noteRunUsage } from './usage-capture.js';
@@ -36,41 +36,6 @@ import { noteRunUsage } from './usage-capture.js';
  * stopping the child.
  */
 export type HeadlessExec = (command: string, args: string[], options: { cwd: string; env: Record<string, string>; timeoutMs: number; signal: AbortSignal; run: string; detached: AbortSignal }) => Promise<string>;
-
-/**
- * How each runtime takes one request and exits: a subcommand before its own flags, the flags that
- * select print mode after them, and flags its one-shot form does not accept. The request is the
- * last argument, or takes a registry contract's `{request}` place. A runtime without a built-in form requires a registry headless contract.
- */
-export const headlessKind = (kind: string | undefined, contract?: RegisteredLaunch | null): kind is string => !!kind && (!!runtimeAdapter(kind)?.headless || !!contract?.headlessArgs);
-export class HeadlessConfigurationError extends Error {}
-
-/**
- * Explicit argv replaces the interactive argv and built-in form. A leading subcommand precedes policy flags.
- * Of the form's optional flags, only `accepted` ones are passed, once each, whether the form or the profile names them (GY-3425).
- */
-export function headlessArgs(kind: string, args: readonly string[], prompt: string, contract?: RegisteredLaunch | null, accepted: readonly string[] = []): string[] {
-  if (contract?.headlessArgs) {
-    const words = contract.headlessArgs;
-    if (words.filter(word => word === requestPlaceholder).length !== 1) throw new HeadlessConfigurationError(`${kind}: launch.headlessArgs must contain exactly one {request}`);
-    const subcommand = words[0] !== requestPlaceholder && !words[0]?.startsWith('-') ? 1 : 0;
-    return [...words.slice(0, subcommand), ...args.filter(arg => arg !== requestPlaceholder), ...words.slice(subcommand).map(arg => arg === requestPlaceholder ? prompt : arg)];
-  }
-  const form = runtimeAdapter(kind)?.headless;
-  if (!form) throw new HeadlessConfigurationError(`The ${kind} runtime has no one-task contract. Set launch.headlessArgs with exactly one {request} using graphyard master registry runtime set NAME --headless-arg=ARG --reason REASON; reviews never use Herdr.`);
-  const drop = form.drop ?? [], optional = form.optional ?? [];
-  const kept = args.filter((arg, index) => !drop.some(flag => arg === flag || arg.startsWith(`${flag}=`) || args[index - 1] === flag) && !optional.includes(arg));
-  const placed = kept.includes(requestPlaceholder);
-  return [...form.before, ...kept.map(arg => arg === requestPlaceholder ? prompt : arg), ...form.flags, ...optional.filter(flag => accepted.includes(flag)), ...(placed ? [] : [prompt])];
-}
-
-/** The headless command line of one run: the installed runtime, asked once which of its form's optional flags it takes. */
-export async function headlessArgv(launch: { kind: string; args: readonly string[]; contract?: RegisteredLaunch | null }, request: string, env: NodeJS.ProcessEnv): Promise<string[]> {
-  const form = runtimeAdapter(launch.kind)?.headless;
-  const program = realRuntimeBinary(form?.program ?? launchProgram(launch.kind), env);
-  const accepted = launch.contract?.headlessArgs || !form ? [] : await acceptedFlags(program, form.before, form.optional ?? [], env);
-  return [program, ...headlessArgs(launch.kind, launch.args, request, launch.contract, accepted)];
-}
 
 /** The answer's text is bounded: what the run printed past this is ignored. */
 const outputLimit = 1024 * 1024;
@@ -84,7 +49,7 @@ const readText = (file: string) => { try { return readFileSync(file, 'utf8'); } 
 export const spawnHeadless: HeadlessExec = async (command, args, options) => {
   mkdirSync(options.run, { recursive: true, mode: 0o700 });
   rmSync(runFiles(options.run).exit, { force: true });
-  const id = basename(options.run), containment = runContainment(), launch = detachedLaunch(options.run, id, command, args, containment);
+  const id = basename(options.run), containment = runContainment(), launch = sessionLaunch(options.run, id, command, args, containment);
   let failure: string | null = null;
   const child = spawn(launch.file, launch.args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'ignore', 'ignore'], detached: true });
   child.on('error', error => { failure = `${command} could not be started: ${error.message}`; });
@@ -187,7 +152,7 @@ export interface HeadlessSession<T> {
   root: string; route: HeadlessRoute; context: Record<string, string>;
   exec: HeadlessExec;
   /** Holds the run's account until the notice's reset, as a pane launch's limit-notice exit does (dispatch/effects.ts `holdAccount`), so the request's next launch takes the next account. */
-  holdAccount?: (notice: ExhaustionSignal) => Promise<unknown>;
+  holdAccount?: (notice: ExhaustionSignal) => Promise<{ until?: string; reason?: string; resetsAt?: string | null } | void>;
   /**
    * The run's agent exited saying its account is not logged in (GY-3218): holds that account under
    * the agent's message and answers with the launch on the role's next eligible account, where the
@@ -284,9 +249,12 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
         const raw = output ?? (error as { output?: string })?.output ?? String((error as Error)?.message ?? error), printed = runtimeReport(raw).reply ?? raw;
         const notice = detectHeadlessExhaustion(raw, launch.kind, Date.now());
         if (notice) {
-          await input.holdAccount?.(notice);
-          if (input.moveAccount && !controller.signal.aborted) { launch = await prepareAccount(await input.moveAccount(`the headless run stopped on its provider's limit notice: ${notice.reason}`, 'limit')); attempt = 0; continue; }
-          throw new Error(`the headless run stopped on its provider's limit notice: ${notice.reason}; its account is held until ${notice.resetsAt ?? 'its reset'}`);
+          const hold = await input.holdAccount?.(notice);
+          if (!hold?.until || Date.parse(hold.until) > Date.now()) {
+            const reason = hold?.reason ?? notice.reason, resetsAt = hold?.until ?? notice.resetsAt;
+            if (input.moveAccount && !controller.signal.aborted) { launch = await prepareAccount(await input.moveAccount(`the headless run stopped on its provider's limit notice: ${reason}`, 'limit')); attempt = 0; continue; }
+            throw new Error(`the headless run stopped on its provider's limit notice: ${reason}; its account is held until ${resetsAt ?? 'its reset'}`);
+          }
         }
         // A failed run whose agent said it is not logged in (GY-3218): its account is held and the request runs on the next.
         const loggedOut = output === null && input.moveAccount && !controller.signal.aborted ? detectLoggedOut(printed) : null;

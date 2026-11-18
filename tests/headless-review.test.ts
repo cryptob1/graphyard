@@ -18,6 +18,7 @@ import { loadMasterConfig, observedExhaustions, setupMaster } from '../src/maste
 import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, unpostedVerdict } from '../src/reviewer.js';
 import { reviewBindingFile } from '../src/review-post.js';
 import { liveRun } from '../src/runner/registry.js';
+import { realRuntimeBinary } from '../src/runtime-binary.js';
 import { headlessArgs, headlessKind, headlessRunsDirectory, spawnHeadless, type HeadlessExec } from '../src/headless-session.js';
 import { readRunMeta, runAlive } from '../src/runner/pi.js';
 import { runDaemon } from '../src/daemon/run.js';
@@ -126,7 +127,7 @@ test('integration:headless-review — a review request is one headless run whose
   const [running] = (await readReviewLedger(root)).reviews;
   const token = JSON.parse(await readFile(join(running!.sessionDirectory, reviewBindingFile), 'utf8')).verdictToken as string;
   const [child] = fake.runs;
-  assert.equal(child!.command, 'claude');
+  assert.equal(child!.command, realRuntimeBinary('claude', child!.env), 'the installed Claude binary, including a resolved mise shim');
   assert.deepEqual(child!.args.slice(-4, -1), ['-p', '--output-format', 'json'], 'print mode with its JSON report, the request its last argument');
   const prompt = child!.args.at(-1)!;
   assert.match(prompt, /\[AC-1\] The flag reads headless/, 'the request names the criteria');
@@ -263,7 +264,7 @@ test('integration:headless-review — a run that stops on its provider\'s limit 
   const runs: string[][] = [];
   // The runtime exits non-zero with the notice on its output, as `claude -p` does on a spent account.
   const exec: HeadlessExec = async (command, args) => { runs.push([command, ...args]); throw Object.assign(new Error('claude exited with code 1'), { output: `You've hit your session limit · resets ${resetsAt.toISOString()}\n` }); };
-  const launched = await launchReview(root, work, 'reviewer-claude', [], now(), { run, headless: exec, requestId: 'headless-request-7' });
+  const launched = await launchReview(root, work, 'reviewer-claude', [], now(), { run, headless: exec, probe: { smoke: async () => ({ ok: false, error: `You've hit your session limit; resets at ${resetsAt.toISOString()}` }) }, requestId: 'headless-request-7' });
   const record = await settled(launched.review);
   assert.equal(runs.length, 1, 'a spent account is not run again');
   assert.equal(record.state, 'failed');
@@ -272,6 +273,6 @@ test('integration:headless-review — a run that stops on its provider\'s limit 
   assert.ok(held, 'the account is held');
   assert.equal(held.until, resetsAt.toISOString());
   // The next launch skips the held account: with no other account on the profile it is refused before anything runs.
-  await assert.rejects(launchReview(root, await stored(work.id), 'reviewer-claude', [], now(), { run, headless: exec, requestId: 'headless-request-7' }), /No healthy agent account for reviewer profile reviewer-claude/);
+  await assert.rejects(launchReview(root, await stored(work.id), 'reviewer-claude', [], now(), { run, headless: exec, probe: { smoke: async () => ({ ok: false, error: `You've hit your session limit; resets at ${resetsAt.toISOString()}` }) }, requestId: 'headless-request-7' }), /No healthy agent account for reviewer profile reviewer-claude/);
   assert.equal(runs.length, 1);
 });

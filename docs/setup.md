@@ -6,6 +6,7 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 
 - Docker and Compose: on an AppArmor host up loads the `graphyard-trial` profile with sudo.
 - Docker and Compose are needed even for `--local`; test merges run in them.
+- Fair sharing: each worker, reviewer and producer session gets the same CPU and disk weight and a memory share (memory in proportion to the host's cores divided by the live sessions, never under two cores). A lone session may use the whole machine; on a full machine each gets about the same CPU. The loop, the master, the server and the database weigh more, so they answer under load. `master status` → `sessionUsage` and Workers → Session usage show each session's use beside its share; the overload alarm names a session only when the machine is saturated and it has used over twice its share for five minutes.
 
 ## More hosts
 
@@ -24,6 +25,10 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 - Where a SAML organization or org policy blocks deploy keys, `--push-auth gh` pushes with your gh login instead of a deploy key.
 - Setup invites or revokes viewers and maintainers.
 - Sharing one machine across installs: the [shared server guide](shared-server.md).
+
+## Delivery feedback
+
+Work's **Taste** feed shows recent deliveries with why and evidence: **Looks good** records your call, **Send back** turns your note into a follow-up item and a proposed master lesson; nothing waits on a taste.
 
 ## Publishing
 
