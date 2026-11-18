@@ -52,9 +52,16 @@ const backoffKey = (runtime: string, item: Pick<Work, 'id'>) => `${runtime}:${it
  * aside) backs the item off on every runtime as well, so rotating runtimes cannot relaunch it.
  */
 const sameReason = (a: string, b: string) => a.replace(/\d+/g, '#') === b.replace(/\d+/g, '#');
-export function recordLaunchFailure(state: DaemonState, runtime: string | null, item: Pick<Work, 'id'>, reason: string, now: number) {
-  const record = (key: string, failures: number) => { state.launchBackoff[key] = { failures, reason: reason.slice(0, 500), until: new Date(now + launchBackoffMs(failures)).toISOString() }; };
-  const all = backoffKey(anyRuntime, item), repeated = Object.entries(state.launchBackoff).some(([key, entry]) => key.endsWith(`:${item.id}`) && sameReason(entry.reason, reason.slice(0, 500)));
+/**
+ * GY-3475: a reason over its 500 characters keeps its end as well as its start. A failed child's
+ * line opens with the command it ran and closes with the error itself, so a cut that kept only the
+ * start left master status and the stall alarm quoting a command line with git's error gone.
+ */
+const boundReason = (reason: string) => reason.length <= 500 ? reason : `${reason.slice(0, 120)}…${reason.slice(-379)}`;
+export function recordLaunchFailure(state: DaemonState, runtime: string | null, item: Pick<Work, 'id'>, failure: string, now: number) {
+  const reason = boundReason(failure);
+  const record = (key: string, failures: number) => { state.launchBackoff[key] = { failures, reason, until: new Date(now + launchBackoffMs(failures)).toISOString() }; };
+  const all = backoffKey(anyRuntime, item), repeated = Object.entries(state.launchBackoff).some(([key, entry]) => key.endsWith(`:${item.id}`) && sameReason(entry.reason, reason));
   const key = backoffKey(runtime ?? anyRuntime, item);
   record(key, (state.launchBackoff[key]?.failures ?? 0) + 1);
   if (repeated && key !== all) record(all, (state.launchBackoff[all]?.failures ?? 1) + 1);

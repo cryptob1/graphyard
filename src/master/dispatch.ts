@@ -25,6 +25,7 @@ import { reviewStandards } from '../review-prompt.js';
 import { launcherCoordinatorRoot, preservePartialWork, prepareConfinedGitPaths, sessionConfinement } from './launch.js';
 import { defaultHeadlessExec, HeadlessConfigurationError, startHeadlessWorker, type HeadlessExec } from '../headless-session.js';
 import { liveRun } from '../runner/registry.js';
+import { releaseOfPath, resolvedLauncher } from '../install/cli-release.js';
 import { runTranscript } from '../model/sessions.js';
 import { detectHeadlessExhaustion } from './runtime-prompt.js';
 import { detectLoggedOut } from './logged-out.js';
@@ -570,12 +571,14 @@ export const workerCommand: WorkerCommand = async (command, args, options = {}) 
 };
 
 /**
- * A failed `worktree` command as the launch failure: the item, the epoch, and what the command
- * wrote to stderr — the CLI's error, which carries git's — never only the command line (GY-1078).
+ * A failed `worktree` command as the launch failure: the item, the epoch, the CLI that ran the
+ * command (GY-3475: its release commit, else its path), and what the command wrote to stderr —
+ * the CLI's error, which carries git's — never only the command line (GY-1078).
  */
-export function worktreeFailure(key: string, epoch: number, error: unknown) {
+export function worktreeFailure(key: string, epoch: number, error: unknown, cliPath: string) {
   const stderr = typeof (error as { stderr?: unknown } | null)?.stderr === 'string' ? (error as { stderr: string }).stderr.trim() : '';
-  return `Worker launch failed: the worktree for ${key} epoch ${epoch} could not be created: ${stderr || failureText(error)}`;
+  const cli = resolvedLauncher(cliPath) ?? cliPath;
+  return `Worker launch failed: the worktree for ${key} epoch ${epoch} could not be created (CLI ${releaseOfPath(cli)?.slice(0, 12) ?? cli}): ${stderr || failureText(error)}`;
 }
 
 /** The launch's renewal of its claim (GY-1287): the worker's own `heartbeat`, under the profile's credential. */
@@ -616,7 +619,7 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
     // The worktree command's stderr is captured rather than inherited, so the failure the loop
     // records names git's own error instead of only the command line that failed (GY-1078).
     const workspace = JSON.parse(String(await Promise.resolve(run(process.execPath, [config.cliPath, 'worktree', key, String(claimedEpoch), base], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] }))
-      .catch(error => { throw new Error(worktreeFailure(key, claimedEpoch, error)); })));
+      .catch(error => { throw new Error(worktreeFailure(key, claimedEpoch, error, config.cliPath)); })));
     if (!workspace.path || !isAbsolute(workspace.path)) throw new Error('Worker launcher did not receive an assigned workspace');
     // The checkout is the attempt's; the dependency tree does not have to be. Sharing is a
     // convenience for the session that follows, so a refusal is reported, never fatal.
