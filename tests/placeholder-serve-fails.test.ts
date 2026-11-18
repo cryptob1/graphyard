@@ -46,6 +46,7 @@ test('e2e:placeholder-serve-fails — a case against the placeholder serve fails
   // The repository declares the serve that runs its application.
   const port = await freePort();
   const config = JSON.parse(await readFile(join(root, 'graphyard.json'), 'utf8'));
+  config.featureMap = [{ name: 'Home', url: '/', traps: [] }];
   config.e2e.serve = { command: `node -e "require('http').createServer((q,r)=>r.end('the app')).listen(${port},'127.0.0.1')"`, url: `http://127.0.0.1:${port}/`, readySeconds: 30 };
   await writeFile(join(root, 'graphyard.json'), JSON.stringify(config));
   git(root, 'commit', '-q', '-am', 'declare the serve');

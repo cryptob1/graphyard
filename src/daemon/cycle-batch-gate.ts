@@ -1,3 +1,4 @@
+import { featureMapCaseId } from '../app-feature-check.js';
 // Concern: the loop's batch gate on main (GY-3119): one gate at a time beside the cycle, the
 // scheduled diagnostics beside it, both over the merge writer's trial container and git.
 import type { Work } from '../model.js';
@@ -196,7 +197,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
     files: async (from, to) => lines(await git(['diff', '--name-only', from, to])),
     catalog,
     core: async commit => {
-      try { return JSON.parse(await git(['show', `${commit}:graphyard.json`])).gate?.core ?? []; } catch { return []; }
+      try { return [...new Set([featureMapCaseId, ...(JSON.parse(await git(['show', `${commit}:graphyard.json`])).gate?.core ?? [])])]; } catch { return [featureMapCaseId]; }
     },
     run: (commit, checks, files, timeoutMs, signal) => trialChecks(reads, commit, checks, files, timeoutMs, trusted, false, signal),
     revert: async (landing, gated, check) => {

@@ -27,7 +27,7 @@ const bare = (supervision = 'autonomous') => ({
 
 test('unit:setup-checklist-control-plane — the Setup checklist names no GitHub App or reviewer App step for any install, judges no branch protection and no merger', () => {
   const control = setupChecklist(bare());
-  assert.deepEqual(control.map(item => item.id), ['account:worker', 'account:reviewer', 'master-loop']);
+  assert.deepEqual(control.map(item => item.id), ['account:worker', 'account:reviewer', 'real-app', 'master-loop']);
   assert.equal(control.find(item => item.id === 'account:worker')!.done, true, 'the worker account is still judged');
   assert.equal(control.find(item => item.id === 'account:reviewer')!.done, false, 'the reviewing account is still required');
   // GY-1978: a supervised install's heads are reviewed by an agent and merged by the control plane too, so its checklist is the same.

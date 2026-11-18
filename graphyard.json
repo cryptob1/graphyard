@@ -80,7 +80,10 @@
     }
   },
   "gate": {
-    "core": ["create-work-item", "smoke"]
+    "core": [
+      "create-work-item",
+      "smoke"
+    ]
   },
   "product": {
     "ui": [
@@ -147,5 +150,56 @@
       "fixture-static-home": "fixture-site",
       "fixture-compose-app": "fixture-app"
     }
-  }
+  },
+  "featureMap": [
+    {
+      "name": "Dashboard",
+      "url": "/",
+      "traps": [
+        "Sign in to see project work."
+      ]
+    },
+    {
+      "name": "Work",
+      "url": "/api/board",
+      "traps": [
+        "Requires a signed-in principal. The dashboard opens it at /#work."
+      ]
+    },
+    {
+      "name": "Master",
+      "url": "/api/status",
+      "traps": [
+        "Runtime observations require the master loop. The dashboard opens it at /#master."
+      ]
+    },
+    {
+      "name": "Tests",
+      "url": "/api/tests",
+      "traps": [
+        "A fresh project may have no recorded runs. The dashboard opens it at /#tests."
+      ]
+    },
+    {
+      "name": "Replay",
+      "url": "/api/work-replay",
+      "traps": [
+        "An empty project has no history to replay. The dashboard opens it at /#replay."
+      ]
+    },
+    {
+      "name": "Costs",
+      "url": "/api/costs",
+      "traps": [
+        "Costs are unknown until runtime usage is reported. The dashboard opens it at /#costs."
+      ]
+    },
+    {
+      "name": "Ready control plane",
+      "url": "/healthz?ready",
+      "traps": [
+        "Startup migrations must finish before readiness succeeds."
+      ]
+    }
+  ]
 }

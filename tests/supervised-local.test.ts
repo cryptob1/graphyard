@@ -34,6 +34,7 @@ interface World { calls: { args: string[]; stdin?: string; env?: Record<string, 
 const status = (w: World) => w.installed ? {
   github: true, githubRepository: 'acme/shop',
   fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
+  serving: { onboarding: { onboarded: true, fault: null, features: [] } },
   setup: { protection: 'checks', loop: w.loop },
 } : null;
 function dependencies(w: World, root: string, events: UpEvent[]): UpDependencies {
@@ -87,7 +88,7 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   // The checklist (GY-1978): supervised and autonomous installs ask for the same steps — a writing and a reviewing account, and the running coordinator.
   const bare = status({ calls: [], installed: true, loop: true, supervised: 0 });
   const supervisedIds = setupChecklist(bare).map(item => item.id);
-  assert.deepEqual(supervisedIds, ['account:worker', 'account:reviewer', 'master-loop']);
+  assert.deepEqual(supervisedIds, ['account:worker', 'account:reviewer', 'real-app', 'master-loop']);
   assert.ok(setupChecklist(bare).every(item => item.done), 'a local install with a writing and a reviewing account is green');
   const autonomous = setupChecklist(bare);
   assert.ok(!setupChecklist({ ...bare!, fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }], accounts: bare!.fleet.accounts } }).find(item => item.id === 'account:reviewer')!.done, 'a supervised install still needs its reviewing account');

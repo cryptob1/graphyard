@@ -1,3 +1,4 @@
+import { appOnboarding, type AppOnboarding } from './model/onboarding-work.js';
 // The continuous deploy builds, restarts and checks health before publishing the ready CLI.
 // Failed builds leave the healthy pairing alone; failed restarts use schema-aware rollback.
 // The master loop restarts onto the serving tip recorded here (daemon/run.ts restartCause).
@@ -414,6 +415,7 @@ export type GitRead = (args: readonly string[]) => Promise<string>;
  * the URL and the failure are the declared serve's alone.
  */
 export interface ServingReport {
+  onboarding: AppOnboarding;
   /** Nothing serves this repository: no deploy record names it and no serve pass has served or failed. */
   unconfigured: boolean;
   /** The served commit (the declared serve's when one is recorded, else the deploy record's); null when nothing serves. */
@@ -448,7 +450,12 @@ export async function servingReport(root: string | null | undefined, repository:
       try { const count = (await git(['rev-list', '--count', `${commit}..${main}`])).trim(); pending = /^\d+$/.test(count) ? Number(count) : null; } catch { /* unreadable */ }
     }
   }
+  let onboarding = appOnboarding(null);
+  if (main && git) {
+    try { onboarding = appOnboarding(JSON.parse(await git(['show', `${main}:graphyard.json`]))); } catch { /* missing or invalid main declaration stays not onboarded */ }
+  }
   return {
+    onboarding,
     unconfigured: !commit,
     commit, main,
     deployedAt: serve?.commit ? serve.started ?? serve.at : configured ? record!.at : null,

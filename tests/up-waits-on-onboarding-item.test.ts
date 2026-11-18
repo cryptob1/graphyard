@@ -62,7 +62,8 @@ function dependencies(root: string, events: UpEvent[], w: UpWorld, over: Partial
       githubRepository: 'acme/shop',
       mergeWriter: { merger: 'control-plane' },
       fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-b'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, eligible: true }, { name: 'claude-b', enabled: true, loggedIn: true, eligible: true }] },
-      setup: { protection: 'checks', loop: true },
+      serving: { onboarding: { onboarded: true, fault: null, features: [] } },
+  setup: { protection: 'checks', loop: true },
     }),
     // No pull request is ever read: any gh invocation fails the run.
     gh: async () => { throw new Error('gh ran during up'); },

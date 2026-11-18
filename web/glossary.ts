@@ -23,6 +23,7 @@ export const glossary = {
   'gates removed this week': 'Lessons the master turned into code — a lint rule, type or test — in the last seven days, so agents no longer have to be told them.',
   'reverts this week': 'Merged changes the check on main took back out in the last seven days because they broke something.',
   'bootstrap obligation': 'A proof that was put off when Graphyard was first set up. The next change to the same files must provide it.',
+  'feature map': 'The list of an app’s features in graphyard.json, each with the page or command that reaches it and its known traps. Every batch and deploy check walks it.',
   'post-deploy check': 'A test run against the live site after a change is deployed (e2e:deploy-smoke).',
   'end-to-end test': 'A test that uses the finished product the way a person would, from start to finish, usually through a browser. Its proof names start with e2e:.',
   'unit test': 'A fast test of one piece of code on its own. Its proof names start with unit:.',

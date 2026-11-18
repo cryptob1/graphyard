@@ -7,7 +7,14 @@ import { type RepositoryConfig, repositoryConfigFile } from '../model/documentat
  * (model/repository-policy.ts, GY-1843). A `documentation` policy written before GY-2875 is ignored.
  * `app.healthUrl` (GY-3452) is where an install that deploys elsewhere answers its live commit.
  */
+const featureMap = z.array(z.object({
+  name: z.string().trim().min(1),
+  url: z.string().regex(/^\/(?!\/)/).optional(),
+  command: z.string().trim().min(1).optional(),
+  traps: z.array(z.string()),
+}).strict().refine(feature => !!(feature.url || feature.command), 'A feature needs a URL path or command')).min(1);
 export const repositoryConfigSchema = z.object({
+  featureMap: featureMap.optional(),
   documentation: z.unknown().optional(),
   delivery: deliveryPolicySchema.optional(),
   app: z.object({ healthUrl: z.url().max(500) }).strict().optional(),
