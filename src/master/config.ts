@@ -480,7 +480,8 @@ export async function reresolveHerdrWorkspace(root: string, config: Pick<MasterC
   return switched;
 }
 export type WorkspaceSwitch = NonNullable<Awaited<ReturnType<typeof reresolveHerdrWorkspace>>>;
-export interface ConfigReload { config: MasterConfig; changed: string[]; refused: string | null; at: string; workspace?: WorkspaceSwitch | null }
+/** `cliPath`: the CLI master.json now names when it differs from the one the loop is bound to; the loop restarts onto it once it is the serving release (GY-3454). */
+export interface ConfigReload { config: MasterConfig; changed: string[]; refused: string | null; at: string; workspace?: WorkspaceSwitch | null; cliPath?: string }
 export function liveMasterConfig(root: string, initial: MasterConfig, load: (root: string) => Promise<MasterConfig> = loadMasterConfig, clock: () => number = Date.now,
   reresolve: (root: string, config: MasterConfig) => Promise<WorkspaceSwitch | null> = reresolveHerdrWorkspace) {
   // A switch a dispatcher reload made waits here for the cycle's reload, which records it.
@@ -496,12 +497,12 @@ export function liveMasterConfig(root: string, initial: MasterConfig, load: (roo
       if (cycle) pending = null;
       // A refused reload keeps every loaded setting, the Herdr scope included: loading applies the
       // file's workspace, so the scope the loop runs under is put back whenever the reload is refused (GY-1441).
-      const keep = (refused: string): ConfigReload => { applyHerdrConfig(live.current); return { config: live.current, changed: [], at, refused, workspace }; };
+      const keep = (refused: string, cliPath?: string): ConfigReload => { applyHerdrConfig(live.current); return { config: live.current, changed: [], at, refused, workspace, ...(cliPath ? { cliPath } : {}) }; };
       let next: MasterConfig;
       try { next = await load(root); }
       catch (error) { return keep(`.graphyard/master.json could not be reloaded (${error instanceof Error ? error.message : String(error)}); the loop keeps the settings it last loaded`); }
       const { changed, bound } = masterConfigChanges(live.current, next);
-      if (bound.length) return keep(`.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change`);
+      if (bound.length) return keep(`.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change`, bound.includes('cliPath') ? next.cliPath : undefined);
       live.current = next;
       applyHerdrConfig(next);
       return { config: next, changed, refused: null, at, workspace };
