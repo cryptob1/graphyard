@@ -55,7 +55,7 @@ test('e2e:usage-ceiling-holds — an account at 100% weekly is no role\'s next a
     seven_day: { utilization: init.headers.Authorization.endsWith('claude-spent') ? 100 : 20, resets_at: reset } }), { status: 200 })) as unknown as typeof fetch;
   const document = await call(coordinator, 'agent-registry/document') as AgentRegistry;
   const observations = await Promise.all(document.accounts.map(async account => ({ account: account.name,
-    quota: (await observeAccount(account, runtime, { fetch: usage, cacheMs: 0, smoke: async () => ({ ok: true }), opencodeAuth: null, opencodeModels: null }, document.accounts, 'claude-opus-5')).quota })));
+    quota: (await observeAccount(account, runtime, { fetch: usage, cacheMs: 0, smoke: async () => ({ ok: true, error: '' }), opencodeAuth: null, opencodeModels: null }, document.accounts, 'claude-opus-5')).quota })));
   await call(coordinator, 'agent-registry/observe', { host: HOST, observations });
 
   // `graphyard master registry` as the operator runs it.

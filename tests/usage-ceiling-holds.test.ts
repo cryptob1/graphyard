@@ -32,7 +32,7 @@ test('integration:usage-ceiling-holds — a window at the ceiling holds through 
     return new Response(JSON.stringify({ five_hour: { utilization: 0, resets_at: new Date(start + hour).toISOString() }, seven_day: { utilization: percent, resets_at: reset } }), { status: 200 });
   }) as unknown as typeof fetch;
   let smokes = 0;
-  const smoke = async () => { smokes++; return { ok: true as const }; };
+  const smoke = async () => { smokes++; return { ok: true, error: '' }; };
   const runtime = proposedRuntimes.find(entry => entry.name === 'claude')!;
   let registry = applyRegistryMutation(emptyRegistry(), 'apply', {
     runtimes: [runtime], models: [{ name: 'opus', id: 'claude-opus-5' }],
