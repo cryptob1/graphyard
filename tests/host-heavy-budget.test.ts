@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
-import { heavyCommand, heavyJobLimit, heldSlots, hostHeavyJobsDirectory, slotsDirectoryVariable, verificationBin, verificationEnvironment, waitStep, withHeavyJob } from '../src/master/verification-slots.js';
+import { gateSlot, heavyCommand, heavyJobLimit, heldSlots, hostHeavyJobsDirectory, requestHeavyDrain, resumeHeavyDrain, slotsDirectoryVariable, verificationBin, verificationEnvironment, waitStep, withHeavyJob } from '../src/master/verification-slots.js';
 
 // GY-3290: every Graphyard project of one user on one host shares one heavy-job budget. On
 // 13 November 2026 a 24-core host shared by several projects sat at load 50–86 and local
@@ -61,8 +61,9 @@ appendFileSync(process.env.RUN_LOG, 'end ' + id + '\\n');\n`);
     session: (install: typeof installs[number], id: string, script: string, nested = false) => track(id, install.project, spawn('npm', ['run', script],
       { cwd: install.root, stdio: ['ignore', 'ignore', 'pipe'], env: { ...base, ...verificationEnvironment(install.project, base), RUN_LOG: log, JOB_ID: id, ...(nested ? { NESTED: '1' } : {}) } })),
     /** The install's loop or deploy watch: its own process, running one job through the entry point `mode` names. */
-    launch: (install: typeof installs[number], mode: string, id: string) => track(id, install.project, spawn(process.execPath, ['--import', 'tsx', launcher, mode, id, install.root, install.managed],
-      { stdio: ['ignore', 'ignore', 'pipe'], env: { ...base, RUN_LOG: log, FIXTURE_PROJECT: install.project } })),
+    launch: (install: typeof installs[number], mode: string, id: string, held = false) => track(id, install.project, spawn(process.execPath, ['--import', 'tsx', launcher, mode, id, install.root, install.managed],
+      { stdio: ['ignore', 'ignore', 'pipe'], env: { ...base, ...(held ? { RUN_GO: join(scratch, `go-${id}`) } : {}), RUN_LOG: log, FIXTURE_PROJECT: install.project } })),
+    release: (id: string) => writeFileSync(join(scratch, `go-${id}`), ''),
     events: () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(line => line.split(' ') as [string, string]),
   };
 }
@@ -73,7 +74,7 @@ function peak(events: [string, string][]) {
   return most;
 }
 
-test('e2e:host-heavy-budget — two installs on one host launch eight heavy jobs from their own processes, and never more than two run at once', { timeout: 180_000 }, async () => {
+test('e2e:host-heavy-budget — two installs on one host launch eight heavy jobs from their own processes, and two ordinary jobs plus one gate or deploy run at once', { timeout: 180_000 }, async () => {
   const fixture = await host(), [app, site] = fixture.installs;
   // Both installs resolve the one host directory, outside both repositories and both managed roots.
   const environments = fixture.installs.map(install => verificationEnvironment(install.project, { PATH: '/usr/bin', GRAPHYARD_DATA_HOME: fixture.data }));
@@ -92,16 +93,16 @@ test('e2e:host-heavy-budget — two installs on one host launch eight heavy jobs
     fixture.launch(app, 'trial', 'GY-1'), fixture.launch(site, 'trial', 'GY-2'), fixture.launch(app, 'gate', 'gate-app'),
     fixture.launch(app, 'preview', 'preview-app'), fixture.launch(site, 'deploy', 'deploy-site'), fixture.launch(app, 'deploy', 'deploy-app'),
   ];
-  // Every process reaches the budget before any job ends: two run, and the other six say what they wait for.
+  // Every process reaches the budget before any job ends: three run, and the other five say what they wait for.
   const waiting = /waits for a host heavy-job slot|waiting for a host heavy-job slot/;
   await until(() => fixture.events().length + jobs.filter(job => waiting.test(job.stderr())).length >= jobs.length, 'all eight run or wait');
-  assert.equal(fixture.events().length, 2, `two run while six wait: ${JSON.stringify(fixture.events())}`);
+  assert.equal(fixture.events().length, 3, `three run while five wait: ${JSON.stringify(fixture.events())}`);
   fixture.go();
   const codes = await Promise.all(jobs.map(job => job.closed));
   assert.deepEqual(codes, jobs.map(() => 0), jobs.map(job => `${job.id}: ${job.stderr()}`).join('\n'));
   const events = fixture.events(), ids = ['suite-app', 'suite-site', 'GY-1', 'GY-2', 'gate-app', 'preview-app', 'deploy-site', 'deploy-app'];
   for (const event of ['start', 'end']) assert.deepEqual(events.filter(entry => entry[0] === event && !entry[1].startsWith('nested-')).map(entry => entry[1]).sort(), [...ids].sort(), `every queued job ${event}s`);
-  assert.equal(peak(events), 2, `never more than two heavy jobs at once across both installs, and both slots used: ${JSON.stringify(events)}`);
+  assert.equal(peak(events), 3, `never more than three heavy jobs at once across both installs, and both slots used: ${JSON.stringify(events)}`);
   // Nested work ran inside its parent, on its parent's slot: it neither waited nor counted.
   for (const id of ['suite-app', 'suite-site']) {
     const order = events.filter(entry => entry[1].endsWith(id)).map(entry => entry.join(' '));
@@ -109,7 +110,7 @@ test('e2e:host-heavy-budget — two installs on one host launch eight heavy jobs
   }
   // A job that waited said what it waits for and which jobs of which projects hold it — the other install's among them.
   const waits = jobs.flatMap(job => job.stderr().split('\n').filter(line => waiting.test(line)).map(line => ({ job, line })));
-  assert.equal(new Set(waits.map(({ job }) => job.id)).size, 6, `six of eight waited: ${waits.map(({ job }) => job.id).join(', ')}`);
+  assert.equal(new Set(waits.map(({ job }) => job.id)).size, 5, `five of eight waited: ${waits.map(({ job }) => job.id).join(', ')}`);
   for (const { line } of waits) assert.match(line, /held by .+\(acme\/(app|site)\)/);
   assert.ok(waits.some(({ job, line }) => line.includes(`(${job.project === 'acme/app' ? 'acme/site' : 'acme/app'})`)), 'a waiter names a holder of the other project');
   assert.ok(waits.some(({ line }) => line.includes('every Graphyard project on this host shares 2 at once') && line.includes(join(fixture.directory, 'limit'))), 'and the shared limit, with where it is set');
@@ -197,4 +198,33 @@ test('e2e:host-heavy-budget — a lowered limit keeps running jobs and admits no
   process.env[slotsDirectoryVariable] = fixture.directory;
   try { assert.deepEqual(sessionSlotsGrant(), [fixture.directory]); } finally { delete process.env[slotsDirectoryVariable]; }
   assert.ok(existsSync(fixture.directory));
+});
+
+
+test('integration:gate-slot-across-installs — every install gate and deploy uses the host reservation while another install fills the ordinary budget', { timeout: 120_000 }, async () => {
+  const fixture = await host(), [core, lumina] = fixture.installs;
+  const started = (id: string) => fixture.events().some(([event, name]) => event === 'start' && name === id);
+  const trial = fixture.launch(core, 'trial', 'core-trial', true);
+  const secondTrial = fixture.launch(core, 'trial', 'core-trial-2', true);
+  await until(() => started('core-trial') && started('core-trial-2'), 'Core fills both ordinary slots');
+  const queued = fixture.launch(core, 'trial', 'core-queued', true);
+  await until(() => /host heavy-job slot/.test(queued.stderr()), 'another Core trial waits');
+  assert.equal(started('core-queued'), false);
+  assert.ok(!heldSlots(fixture.directory).some(entry => entry.slot === gateSlot), 'item work leaves the reservation free');
+  requestHeavyDrain(fixture.directory, 'quiet window', 'master');
+  for (const install of [lumina, core]) for (const mode of ['gate', 'deploy']) {
+    const id = `${install.project.replace('/', '-')}-${mode}`;
+    const job = fixture.launch(install, mode, id, true);
+    await until(() => started(id), `${id} starts despite item load and drain`, 15_000);
+    const reserved = heldSlots(fixture.directory).find(entry => entry.slot === gateSlot);
+    assert.equal(reserved?.owner?.project, install.project, 'both installs use the same host reservation');
+    assert.equal(heldSlots(fixture.directory).filter(entry => entry.slot < gateSlot).length, 2);
+    assert.equal(started('core-queued'), false, 'queued item work cannot take the reservation');
+    fixture.release(id);
+    assert.equal(await job.closed, 0, job.stderr());
+  }
+  resumeHeavyDrain(fixture.directory);
+  fixture.release('core-trial'); fixture.release('core-trial-2'); fixture.release('core-queued');
+  assert.deepEqual(await Promise.all([trial.closed, secondTrial.closed, queued.closed]), [0, 0, 0]);
+  assert.deepEqual(heldSlots(fixture.directory), []);
 });

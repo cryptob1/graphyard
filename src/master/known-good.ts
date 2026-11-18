@@ -62,11 +62,11 @@ export async function pinKnownGood(git: KnownGoodGit, sha: string, run: ChildRun
   if (existsSync(target)) await worktree('remove', '--force', target);
   await worktree('add', '--detach', target, sha);
   try {
-    // One heavy job of the host budget (GY-3290); the build's own type check runs on its slot.
+    // One heavy job of the host budget (GY-3290); the build's own type check runs on its slot. GY-3450: the deploy path's reserved slot.
     await withHeavyJob(`deploy build ${short(sha)}`, async () => {
       await run('npm', ['ci'], { cwd: target, timeoutMs: 20 * 60_000 });
       await run('npm', ['run', 'build'], { cwd: target, timeoutMs: 20 * 60_000 });
-    });
+    }, { reserved: true });
     if (!existsSync(join(target, 'dist', 'cli.js'))) { mkdirSync(join(target, 'dist'), { recursive: true }); writeFileSync(join(target, 'dist', 'cli.js'), launcher); }
   } catch (error) {
     await worktree('remove', '--force', target).catch(() => rmSync(target, { recursive: true, force: true }));

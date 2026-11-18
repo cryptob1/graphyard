@@ -8,7 +8,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { standingStepFailures, workerGrowthKey, masterLaunchKey, masterLaunchBackoffAfter } from '../daemon/cycle.js';
-import { fetchRefusalKey } from '../daemon/cycle-batch-gate.js';
+import { fetchRefusalKey, gateStallKey } from '../daemon/cycle-batch-gate.js';
 import { implementationWaiting } from '../daemon/cpu-pressure.js';
 import { overloadAlarm, overloaded, sessionFigures } from '../session-share.js';
 import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
@@ -200,6 +200,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // GY-3383: the gate record once — a held batch gate is one attention line naming the hold and its reason.
   const gateRecord = readGateRecord(gateRecordPath(root));
   const heldGateAttention = gateHoldAttention(gateRecord, now);
+  // GY-3450: a gate in flight whose checks have not started for five minutes, naming who holds the host's heavy-job slots.
+  const gateStalled = state?.actions[gateStallKey]?.state === 'failed' ? [{ subject: 'the batch gate', text: state.actions[gateStallKey]!.detail, next: 'Free a host heavy-job slot (stop the stuck holder it names); the alarm clears once a gate check starts' }] : [];
   // GY-3438: a session using far more than its share of a saturated machine for five minutes raises the overload alarm, naming it.
   const overloadAttention = overloaded(state?.sessions ?? [], now).map(session => ({ subject: session.name ?? session.unit, text: `Overload: ${overloadAlarm(session, now)}`, next: 'The session is only held to its share, not stopped; see what it runs on the Workers page' }));
   return {
@@ -207,7 +209,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     stallAlarm: state?.actions[stallAlarmKey]?.detail ?? null,
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...launchFailures, ...reworked, ...couldNotRunReviews, ...(cursor ? reviewLaunchAttention(open, cursor, now) : []), ...backedOff, ...unspecifiedModelAttention(fleet), ...loggedOutAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...heldGateAttention, ...overloadAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...launchFailures, ...reworked, ...couldNotRunReviews, ...(cursor ? reviewLaunchAttention(open, cursor, now) : []), ...backedOff, ...unspecifiedModelAttention(fleet), ...loggedOutAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...heldGateAttention, ...gateStalled, ...overloadAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
