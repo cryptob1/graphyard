@@ -77,6 +77,7 @@ test(`${proof} — a host that drops mid-shard has that shard re-queued on anoth
 test(`${proof} — the shim's probe reads a host's cores, load, steal and hottest sensor; a host that does not answer is away, and this machine always takes shards`, async () => {
   const probe = ['user 1001 gy-compute', 'cores 16', 'load 3.5', 'cpu  100 0 100 700 0 0 0 100 0 0', 'temp k10temp 71000', 'temp nvme 80000', 'runs 1'].join('\n');
   const run: ChildRun = async (command, args) => {
+    if (command === 'ssh' && args[0] === '-G') return `hostname ${args.at(-1)!.split('@').at(-1)}\nuser gy-compute\n`;
     if (command === 'ssh' && args.at(-2) === 'gy-compute@box') return probe;
     if (command === 'ssh') throw Object.assign(new Error('ssh: connect to host gone port 22: Connection refused'), { status: 255 });
     throw new Error('no Docker here');
@@ -85,6 +86,7 @@ test(`${proof} — the shim's probe reads a host's cores, load, steal and hottes
   assert.deepEqual({ ...here!, name: 'here' }, { name: 'here', cores: 8, busy: 0, steal: 0, celsius: null, limit: trialHotCelsius, away: false });
   assert.deepEqual(box, { name: 'gy-compute@box', cores: 16, busy: 3.5, steal: 0.1, celsius: 71, limit: trialHotCelsius, away: false });
   assert.equal(gone!.away, true);
+  assert.match(gone!.reason!, /Connection refused/);
 });
 
 test(`${proof} — in a trial, a host's shard that dies without a verdict is re-queued on this machine with no fault, its log tail kept in the trial log`, { timeout: 120_000 }, async () => {
