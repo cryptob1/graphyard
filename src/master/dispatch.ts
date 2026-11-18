@@ -395,7 +395,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         kind: launch.kind!, args: [...args, ...sessionHarness.args], contract: launch.contract, credentialMask, role: sessionHarness.role, directory: prepared.path, prompt, root, exec: headless, coordinatorRoot,
         environment: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile!, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_HERDR_AGENT_KIND: launch.kind!, ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}), ...withVerificationPath(sessionHarness.environment, launch.environment) },
         supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run), startupMs,
-        settle: async ({ output }) => { await stoppedOnLimit(output).catch(() => null); await settleReservation?.(`the ${launch.kind} worker run ended`); } });
+        settle: async ({ output, ok }) => { await stoppedOnLimit(output, ok).catch(() => null); await settleReservation?.(`the ${launch.kind} worker run ended`); } });
       const run: WorkerRun = { epoch: prepared.epoch, run: started.id, runtime: launch.kind!, account: launch.account ?? null, outcome: null };
       await onRun?.(run).catch(() => {});
       if (started.ended) {
@@ -419,9 +419,9 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
    * ended and its supervisor released its lease, so its work is kept on its branch and the handoff
    * and the account hold are recorded on the item, where the next attempt's brief reads them.
    */
-  function stoppedOnLimit(output: string) { return limitCheck ??= checkStoppedLimit(output); }
-  async function checkStoppedLimit(output: string) {
-    const notice = detectHeadlessExhaustion(output, launch.kind!, Date.now());
+  function stoppedOnLimit(output: string, ok: boolean) { return limitCheck ??= checkStoppedLimit(output, ok); }
+  async function checkStoppedLimit(output: string, ok: boolean) {
+    const notice = detectHeadlessExhaustion(output, launch.kind!, Date.now(), ok);
     if (!notice || !launch.account) return null;
     const checkedAt = Date.now();
     const hold = await recordObservedExhaustion(config, launch.account, { at: new Date(checkedAt).toISOString(), reason: notice.reason, resetsAt: notice.resetsAt,
@@ -440,7 +440,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
    * 0 simply finished early; any other early exit fails the launch.
    */
   async function settleEarlyExit({ output, ok }: { output: string; ok: boolean }) {
-    const notice = await stoppedOnLimit(output);
+    const notice = await stoppedOnLimit(output, ok);
     if (notice) throw new HeadlessWorkerExit(`the ${launch.kind} worker stopped at once on its provider's limit notice: ${notice.reason}`, true, prepared.epoch);
     if (ok) return;
     const loggedOut = detectLoggedOut(output);

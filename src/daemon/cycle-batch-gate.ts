@@ -353,7 +353,9 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       if (adopted) return adopted.trial(progress, timing, signal);
       await reads.ensureTrialImage?.();
       const launched = launch({ key: gateKey, head: sha, mergeSha: sha, baseTip: null, changedFiles: [...files], proofs, e2eProofs: e2eProofsOf(item),
-        reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeout, reads.cores) });
+        reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeout, reads.cores),
+        // GY-3507: the run's own clock is the gate's, never multiplied by the busy slots' share.
+        ...(timeout ? { timeoutMs: timeout } : {}) });
       gated.inFlight = { ...gated.inFlight!, run: { commit: sha, input, directory: launched.directory } };
       await mergeGateRecord(file, latest => ({ ...gated, ...diagnosticFields(latest, gated) })).catch(() => undefined);
       return launched.trial(progress, timing, signal);
