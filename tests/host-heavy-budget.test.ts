@@ -205,7 +205,7 @@ test('integration:gate-slot-across-installs — every install gate and deploy us
   const fixture = await host(), [core, lumina] = fixture.installs;
   const started = (id: string) => fixture.events().some(([event, name]) => event === 'start' && name === id);
   const trial = fixture.launch(core, 'trial', 'core-trial', true);
-  const verification = fixture.launch(core, 'trial', 'core-trial-2', true);
+  const secondTrial = fixture.launch(core, 'trial', 'core-trial-2', true);
   await until(() => started('core-trial') && started('core-trial-2'), 'Core fills both ordinary slots');
   const queued = fixture.launch(core, 'trial', 'core-queued', true);
   await until(() => /host heavy-job slot/.test(queued.stderr()), 'another Core trial waits');
@@ -225,6 +225,6 @@ test('integration:gate-slot-across-installs — every install gate and deploy us
   }
   resumeHeavyDrain(fixture.directory);
   fixture.release('core-trial'); fixture.release('core-trial-2'); fixture.release('core-queued');
-  assert.deepEqual(await Promise.all([trial.closed, verification.closed, queued.closed]), [0, 0, 0]);
+  assert.deepEqual(await Promise.all([trial.closed, secondTrial.closed, queued.closed]), [0, 0, 0]);
   assert.deepEqual(heldSlots(fixture.directory), []);
 });

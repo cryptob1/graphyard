@@ -86,7 +86,7 @@ export interface AcquireOptions {
  * GY-3304: the host's heavy-work drain — `master drain REASON` writes it beside the slots, `master resume`
  * removes it. GY-3445: it sits in its own `drain/` folder, which only the master session's confinement
  * leaves writable; every other session that takes slots reads it. While it stands no new heavy job starts on the host: merge trials, revert trials,
- * declared checks, host worker verification and sessions' own suites and type checks wait;
+ * declared checks, host worker verification and sessions' whole suites wait;
  * jobs already running finish, and claims, heartbeats and status go on. GY-3450: the deploy path (batch gate, deploy build and restart) is never drained. A file, so a restart keeps it.
  */
 export interface HeavyDrain { reason: string; requestedBy: string; at: string }
