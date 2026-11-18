@@ -190,8 +190,9 @@ function parseZaiMessage(message: string): ProviderUsageResult {
   const resetMatch = /reset(?:s)? at\s+([0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T\s][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)?)/i.exec(message);
   let resetsAt: string | null = null;
   if (resetMatch) {
+    // A refusal names Beijing's wall clock with no zone (GY-3495).
     const raw = resetMatch[1].replace(' ', 'T');
-    const parsed = Date.parse(raw.includes('Z') || /[+-]\d{2}/.test(raw) ? raw : raw + 'Z');
+    const parsed = Date.parse(raw.includes('Z') || /[+-]\d{2}:?\d{2}$/.test(raw) || !raw.includes('T') ? raw : raw + '+08:00');
     if (!Number.isNaN(parsed)) resetsAt = new Date(parsed).toISOString();
   }
   const is5h = /5-?hour|hourly|prompt|tokens?/i.test(message);
@@ -238,9 +239,10 @@ export function parseZaiUsage(response: unknown): ProviderUsageResult {
         : typeof limit.percent === 'number' ? limit.percent
         : typeof limit.used_percent === 'number' ? limit.used_percent : null;
       if (percent === null) continue;
-      const window = limit.window ?? (limit.type === 'TOKENS_LIMIT' || limit.unit === 3 ? '5h'
-        : limit.type === 'TIME_LIMIT' || limit.unit === 5 ? '7d'
-        : String(limit.type || 'window'));
+      // The provider's own type and unit name the window (GY-3495): unit 3 is five-hour, 6 weekly. The monthly
+      // TIME_LIMIT counts tool calls, not model use, so it never holds a launch.
+      if (limit.type === 'TIME_LIMIT') continue;
+      const window = limit.window ?? (limit.unit === 3 ? '5h' : limit.unit === 6 ? '7d' : String(limit.type || 'window').toLowerCase());
       const rawReset = limit.nextResetTime ?? limit.resetsAt ?? limit.resets_at;
       const resetsAt = typeof rawReset === 'number' ? new Date(rawReset < 1e11 ? rawReset * 1000 : rawReset).toISOString()
         : typeof rawReset === 'string' ? new Date(rawReset).toISOString()

@@ -186,7 +186,7 @@ const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s
 
 /** A zone-less calendar wall clock, matched only where the reset parser would read one without a zone: not beside a zone the provider did name (`… 08:27:35 UTC`, `…T08:27:35+08:00`) and not the truncated head of a longer time (`08:27:35` must never become `08:27Z:35`). */
 const zonelessWallClock = /(\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?!\d|[.:]\d|\s*(?:Z|UTC|[+-]\d{2}:?\d{2}))/g;
-/** Whether a notice names its zone in parentheses (`… 08:27:35 (America/Los_Angeles)`): the reset parser reads the wall clock in that zone, so the UTC default must not override it. The same shape and validity test as the parser's own. */
+/** Whether a notice names its zone in parentheses (`… 08:27:35 (America/Los_Angeles)`): the reset parser reads the wall clock in that zone, so the Beijing default must not override it. The same shape and validity test as the parser's own. */
 function namesZone(text: string): boolean {
   const zone = /\(\s*([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+|UTC)\s*\)/.exec(text)?.[1];
   if (!zone) return false;
@@ -221,7 +221,7 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
     const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
     // The runtime's zone-less resets are its provider's UTC wall clock (GY-1817); every other shape parses as before.
     // A notice that names no reset at all — Z.AI's 429 rate-limit envelope — is held for the envelope's own default (GY-2943).
-    return { reason: line.slice(0, 300), resetsAt: limitSignalReset(line, parseResetTime(runtimeAdapter(runtime)?.zonelessUtcResets && !namesZone(context) ? context.replace(zonelessWallClock, '$1Z') : context, now), now) };
+    return { reason: line.slice(0, 300), resetsAt: limitSignalReset(line, parseResetTime(runtimeAdapter(runtime)?.zonelessBeijingResets && !namesZone(context) ? context.replace(zonelessWallClock, '$1+08:00') : context, now), now) };
   }
   return null;
 }
@@ -262,4 +262,4 @@ export function detectLoggedOut(output: string): string | null {
 
 
 /** Parse only a reset stated by this provider; a missing reset remains unknown. */
-export const runtimeResetTime = (text: string, runtime: string, now: number) => parseResetTime(runtimeAdapter(runtime)?.zonelessUtcResets && !namesZone(text) ? text.replace(zonelessWallClock, '$1Z') : text, now);
+export const runtimeResetTime = (text: string, runtime: string, now: number) => parseResetTime(runtimeAdapter(runtime)?.zonelessBeijingResets && !namesZone(text) ? text.replace(zonelessWallClock, '$1+08:00') : text, now);

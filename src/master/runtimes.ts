@@ -27,7 +27,7 @@ export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note
  * - `request`/`role`: where the session's first request and role file go on its command line (launch.ts).
  * - `screen`: the runtime's own start screen, so a slow start is told from a dead one.
  * - `endedStates`: what its session listing calls an ended session, beyond the shared set.
- * - `limitNotices`: the provider-authored usage-limit notices it prints; `zonelessUtcResets` when those name a UTC wall clock with no zone.
+ * - `limitNotices`: the provider-authored usage-limit notices it prints; `zonelessBeijingResets` when those name Beijing's wall clock with no zone (Z.AI's).
  * - `home`: the login-home variable an account home is set on, and the runtime's own default home: the environment kinds.
  * - `usage`: reads an account home's login and provider quota; `sharedPlan` when its accounts share a Z.AI plan.
  * - `identity`: the login file whose provider ids name the subscription an account home is logged in to.
@@ -43,7 +43,7 @@ export interface RuntimeAdapter {
   screen?: RegExp;
   endedStates?: readonly string[];
   limitNotices?: readonly RegExp[];
-  zonelessUtcResets?: boolean;
+  zonelessBeijingResets?: boolean;
   home?: { variable: string; default: (home: string) => string };
   usage?: (environment: ProbedHome, probe: EnvironmentProbe, context: { plan: string | null; now: number }) => Promise<AccountReading>;
   sharedPlan?: boolean;
@@ -190,8 +190,8 @@ const builtInAdapters = {
     // `Ask anything…` input prompt and a hint bar opening with `tab agents`.
     screen: /\btab agents\b|Ask anything…/,
     limitNotices: [...providerUsageErrors, zaiLimitExhausted], // OpenCode 1.18's `Weekly/Monthly Limit Exhausted` (GY-973)
-    // Its Z.AI `provider.quota` error names `2026-11-20 12:49:15` with no zone, in UTC, as pi's does (GY-3389).
-    zonelessUtcResets: true,
+    // Its Z.AI `provider.quota` error names `2026-11-20 12:49:15` with no zone, in Beijing time, as pi's does (GY-3495).
+    zonelessBeijingResets: true,
     home: { variable: 'XDG_DATA_HOME', default: home => process.env.XDG_DATA_HOME ?? resolve(home, '.local/share') },
     usage: (environment, probe, { plan, now }) => opencodeAccount(environment, probe, { id: plan, now }),
     sharedPlan: true,
@@ -203,8 +203,8 @@ const builtInAdapters = {
       tradeoff: 'pi runs every tool it proposes in the assigned worktree; it has no approval step to turn off.' },
     request: reference => reference,
     limitNotices: [...providerUsageErrors, zaiLimitEnvelope], // pi on Z.AI: `Error: 429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. …"}` (GY-1817)
-    // pi's 429 code 1310 names `2026-10-17 08:27:35` with no zone, in UTC (GY-1817).
-    zonelessUtcResets: true,
+    // pi's 429 code 1310 names `2026-10-17 08:27:35` with no zone, in Beijing time (GY-3495).
+    zonelessBeijingResets: true,
     usage: (environment, probe, { plan, now }) => opencodeAccount(environment, probe, { id: plan, now }),
     sharedPlan: true,
   },

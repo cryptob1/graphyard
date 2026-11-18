@@ -173,7 +173,7 @@ async function readAccount(account: FleetAccount, runtime: FleetRuntime, probe: 
     if (runtime.launch.kind === 'pi' && !health.loggedIn) return { health, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null } };
     // A logged-in account that is not ready (its model is unavailable) is held like a logged-out one, with its reason (GY-3414).
     return { health, quota: { loggedIn: health.loggedIn && health.quota !== 'exhausted' ? health.healthy : health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
-      resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: health.reason ? health.reason.slice(0, 500) : null, identity: health.identity } };
+      resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: (health.reason ?? (health.quota === 'unknown' && health.loggedIn ? health.note : null))?.slice(0, 500) ?? null, identity: health.identity } };
   }
   if (!runtime.launch.loginFile) return unknown;
   const file = resolve(home, runtime.launch.loginFile), loggedIn = await access(file).then(() => true, () => false);
@@ -199,7 +199,9 @@ export async function checkAccountLive(account: FleetAccount, runtime: FleetRunt
     try { result = await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs })))(target); }
     catch (error) { result = { ok: false, error: String(error) }; }
     const reason = result.ok ? null : (result.error || 'The live request failed').replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim().slice(0, 500);
-    const reset = reason ? runtimeResetTime(reason, runtime.launch.kind, now) : null;
+    // A spent window's own reset, as the provider's usage endpoint answered it, wins over a time read from the refusal's text (GY-3495).
+    const spent = usage.filter(window => window.percent >= (probe.ceilingPercent ?? defaultQuotaCeilingPercent) && !!window.resetsAt && Date.parse(window.resetsAt) > now).map(window => window.resetsAt!).sort().at(-1);
+    const reset = reason ? spent ?? runtimeResetTime(reason, runtime.launch.kind, now) : null;
     const nextCheck = reset && Date.parse(reset) > now ? reset : new Date(now + accountCheckIntervalMs).toISOString();
     const quota: QuotaObservation = { loggedIn: result.ok || !detectLoggedOut(reason ?? ''), state: result.ok ? 'available' : 'exhausted', usage, since: new Date(now).toISOString(),
       resetsAt: result.ok ? null : nextCheck, reason, ...(result.ok ? {} : { session: reset && Date.parse(reset) > now ? 'named' as const : 'guessed' as const }) };
