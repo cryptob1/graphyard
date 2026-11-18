@@ -31,6 +31,7 @@ import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterion
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { cpuPressureHeld, trialCapNow } from './cpu-pressure.js';
+import { standingLimit } from '../master/profiles.js';
 import { reportTrialHostFault, reportTrialImageFault, reportTrialNetworkFault, reportTrialSandboxFault } from './control-plane.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
@@ -1004,7 +1005,8 @@ export async function mergeWriterStep(cycle: Cycle) {
   // GY-3182: a slot free beside running flights starts the next due head now, without waiting for them
   // to settle; the heads they carry are out of the queue and their open intents out of the reconcile.
   // GY-3401: at the CPU temperature limit, half the cap; the figures ride the CPU reading to master status and the Workers page.
-  const fullCap = trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory));
+  // GY-3446: a temporary trialCap the master set lowers it until it expires.
+  const fullCap = Math.min(trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory)), standingLimit(cycle.config?.run.trialCap, cycle.now()) ?? Infinity);
   const parallel = trialCapNow(state, fullCap);
   if (state.cpuPressure) state.cpuPressure.trialCap = { now: parallel, full: fullCap };
   const gateSlots = batchGateBusySlots(state);

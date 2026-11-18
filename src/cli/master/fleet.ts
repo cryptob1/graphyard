@@ -8,6 +8,7 @@ import { writeHarnessPermissions } from '../../harness.js';
 import { reviewerCommand } from '../master-reviewer.js';
 import { registryCommand, workersCommand } from '../master-registry.js';
 import { unhandled, type MasterSession } from './session.js';
+import { heavyJobsDirectory, setStrictCap } from '../../master/verification-slots.js';
 
 /** Launch profiles, the master session, reviewer launches and the master's harness rules. */
 export async function fleetCommand(session: MasterSession): Promise<unknown> {
@@ -21,7 +22,12 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   }
   if (id === 'worker' && args[0] === 'add' && args[1]) return print(await saveWorkerProfile(root, JSON.parse(await readFile(args[1], 'utf8')), credential => masterApi('status', credential)));
   if (id === 'producer') return print(await producerCommand(root, args, credential => masterApi('status', credential)));
-  if (id === 'config') return print(await saveMasterSettings(root, masterSettingsFromArgs(args)));
+  if (id === 'config') {
+    // GY-3446: hostHeavyJobs is the host-wide strict cap every Graphyard install here shares, kept beside the heavy-job slots, not in master.json.
+    const { hostHeavyJobs, ...settings } = masterSettingsFromArgs(args);
+    const strict = hostHeavyJobs === undefined ? {} : { hostHeavyJobs: setStrictCap(heavyJobsDirectory(), hostHeavyJobs, String(session.coordinator?.actor?.id ?? master.masterAgentName)) };
+    return print({ ...(Object.keys(settings).length || hostHeavyJobs === undefined ? await saveMasterSettings(root, settings) : {}), ...strict });
+  }
   if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
   if (id === 'workers') return print(await workersCommand(args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
   if (id === 'reviewer') return reviewerCommand(root, master, args, print);
