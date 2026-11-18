@@ -93,6 +93,7 @@ export async function shardHosts(label: string, names: string[], images: Record<
     await executable(join(root, 'hosts', name, 'bin', 'docker'), dockerStandIn(join(root, 'hosts', name, 'docker')));
   }
   await executable(join(bin, 'ssh'), `#!/bin/sh
+if [ "$1" = -G ]; then exec /usr/bin/ssh "$@"; fi
 for last; do :; done
 for arg; do case "$arg" in *@*) target="$arg";; esac; done
 host="\${target#*@}"; dir="${root}/hosts/$host"

@@ -4,6 +4,7 @@ import { chmod, link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from '../model.js';
+import { answerableHumanProof } from '../model/human-proof.js';
 import { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk, type HumanRequestRow } from '../model/human-request.js';
 import { configHome, installDirectory, readInstallRecord, readToken } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
@@ -146,22 +147,28 @@ export const answerHumanCommand: CliCommand = {
   name: 'answer',
   scope: 'work',
   help: [
-    '  answer GY-N [REQUEST] [--decline] ANSWER...',
+    '  answer GY-N [REQUEST] [--owner-said WORDS] [--decline] ANSWER...',
+    '                                Relay the owner’s own words with --owner-said; also answers human proofs.',
     '                                Answer the item\'s open human-only request (operator). The item',
     '                                resumes on its own: the loop dispatches it on its next cycle.',
     '                                --decline keeps it parked with your reason as its blocker',
   ],
   async run(context, work) {
-    const open = (work as Work).humanRequest;
-    if (!open) throw new Error(`${work.key} has no open human-only request; graphyard human-requests lists the ones that wait`);
     const args = [...context.args];
-    // The request id is optional on the command line: an item has at most one open request.
-    const request = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args[0] ?? '') ? args.shift()! : open.id;
+    const flag = args.indexOf('--owner-said');
+    const ownerSaid = flag < 0 ? undefined : args.splice(flag, 2)[1];
+    if (flag >= 0 && (!ownerSaid?.trim() || ownerSaid.startsWith('--'))) throw new Error('--owner-said needs the owner\'s own words');
+    const open = (work as Work).humanRequest;
+    const proof = (work as Work).humanProofs?.find(entry => answerableHumanProof(work as Work, entry));
+    const request = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args[0] ?? '') ? args.shift()! : open?.id ?? proof?.id;
+    if (!request) throw new Error(`${work.key} has no open human-only request`);
     const declined = args.includes('--decline');
-    // The CLI keeps free words; the buttons are the page's (GY-738).
     const answer = args.filter(arg => arg !== '--decline').join(' ').trim();
-    if (!answer) throw new Error('Use answer GY-N [REQUEST] [--decline] ANSWER...');
-    return context.print(await workMutation(context, work)('answer', { request, outcome: declined ? 'declined' : 'provided', answer }));
+    if (!answer) throw new Error('Use answer GY-N [REQUEST] [--owner-said WORDS] [--decline] ANSWER...');
+    const check = (work as Work).humanProofs?.some(entry => entry.id === request);
+    return context.print(await workMutation(context, work)(check ? 'human-proof' : 'answer', check
+      ? { request, outcome: declined ? 'fail' : 'pass', note: answer, ownerSaid }
+      : { request, outcome: declined ? 'declined' : 'provided', answer, ownerSaid }));
   },
 };
 /**

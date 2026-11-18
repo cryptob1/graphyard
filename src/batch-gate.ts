@@ -16,7 +16,7 @@
 // does not apply — and the batch recut. A recut that fails again holds the last verified commit
 // served and wakes the master until main moves, and any held gate is one master status attention
 // line. A timeout is the host's, not the change's: it never holds, and the loop retries at once on
-// main's newest tip (GY-3444); the bound counts the gate's own work, not its waits for a slot or CPU. The
+// main's newest tip (GY-3444); the bound counts the gate's own work, not its own checks' waits for a slot (GY-3474). The
 // full suite and catalog run daily against the verified
 // commit as diagnostics that file items and never block; the three preview cases run with them on
 // the host, the verified commit in its own scratch install (GY-3193), and each one's last run and
@@ -30,7 +30,7 @@
 // names its current step; master status shows both (GY-3141).
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { EnvironmentFault } from './app-environments.js';
 import { formatAge } from './model/duration.js';
 import type { Work } from './model.js';
@@ -80,7 +80,7 @@ export interface GateRecord {
    * finishes it after a restart instead of cutting a new batch (GY-3135). The `files`, `checks` and
    * `results` fields are optional only for records an older loop wrote.
    */
-  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]>; whole?: boolean; /** The run's current step, named before each phase (GY-3141). */ step?: string; /** GY-3444: the time its checks waited for a trial slot or CPU, or the loop was down, which its bound does not count. */ waitedMs?: number;
+  inFlight: { tip: string; startedAt: string; files?: string[]; checks?: string[]; results?: Record<string, string[]>; whole?: boolean; /** The run's current step, named before each phase (GY-3141). */ step?: string; /** GY-3474: what its current check is doing now: its own wait for a slot, or its trial run's latest step. */ progress?: string; /** GY-3444: the time its own checks waited to start, or the loop was down, which its bound does not count. */ waitedMs?: number;
     /** GY-3444: when the loop last saw the run going, so the time a restart took is not the gate's own. */ seenAt?: string;
     /** GY-3444: the detached trial run of its current check, which the loop after a restart adopts. */ run?: { commit: string; /** A digest of the check's proofs and files. */ input: string; directory: string } } | null;
   /** The last settled run (GY-3141), so status names why nothing has verified instead of guessing. */
@@ -169,7 +169,7 @@ export interface GatePorts {
    * affected test as `test:<file>`. The run is bounded by `timeoutMs`, what is left of the gate's own limit.
    */
   run(commit: string, checks: readonly string[], files: readonly string[], timeoutMs: number, signal?: AbortSignal): Promise<string[]>;
-  /** GY-3444: whether the gate's checks wait for a trial slot or CPU now: time the gate's bound does not count. */
+  /** GY-3444, GY-3474: whether the gate's own check waits to start now — for a host slot or its container's start: time the gate's bound does not count. */
   waiting?(): boolean;
   /** Reverts the landing from main through the serve-revert path (trial, leased push, re-land filed); answers the revert, why it is held, or a retry (main moved under the push). */
   revert(landing: ServeLanding & { item: Work }, tip: string, check: string): Promise<{ revertSha: string } | { held: string } | { retry: string }>;
@@ -324,12 +324,13 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
   const results: Record<string, string[]> = adopted?.results ?? {};
   record.inFlight = adopted ? { ...adopted, files, checks, results, whole } : { tip, startedAt: at(), files, checks, results, whole };
   // GY-3444: the time the loop was down — between its last sight of the run and this adoption — is not the gate's own.
-  if (adopted?.seenAt) record.inFlight.waitedMs = (adopted.waitedMs ?? 0) + Math.max(0, ports.now() - Date.parse(adopted.seenAt));
+  // GY-3474: the adoption is a sight of the run, so a batch adopted again before its next sight never counts the same gap twice.
+  if (adopted?.seenAt) record.inFlight = { ...record.inFlight, seenAt: at(), waitedMs: (adopted.waitedMs ?? 0) + Math.max(0, ports.now() - Date.parse(adopted.seenAt)) };
   await ports.checkpoint?.();
   // The run's current step, named before each phase and kept in the record, so a reader mid-flight sees where the gate is (GY-3141).
   const step = async (label: string) => { record.inFlight = { ...record.inFlight!, step: label.slice(0, 200) }; await ports.checkpoint?.(); };
   // The clock is the batch's own, so a restart between steps never lengthens the gate. GY-3444: it
-  // counts the gate's own work — the time its checks waited for a slot or CPU is added back, and kept
+  // counts the gate's own work — the time its own checks waited to start is added back, and kept
   // on the record so a restart keeps it too.
   const bound = gateBoundMs(record), deadline = () => Date.parse(record.inFlight!.startedAt) + bound + (record.inFlight!.waitedMs ?? 0);
   const finished = results;
@@ -507,6 +508,8 @@ export function gateSummary(record: GateRecord | null) {
   return { verified: record.verified?.slice(0, 12) ?? null, verifiedAt: record.verifiedAt,
     // GY-3444: a run in flight holds first claim on trial slots and pauses implementation launches until it settles.
     inFlight: record.inFlight ? { tip: record.inFlight.tip.slice(0, 12), startedAt: record.inFlight.startedAt, step: record.inFlight.step ?? null,
+      // GY-3474: what its current check is doing — waiting or its run's step — the detached run's own directory name, and the wait its bound leaves out.
+      progress: record.inFlight.progress ?? null, run: record.inFlight.run ? basename(record.inFlight.run.directory) : null, waitedMs: record.inFlight.waitedMs ?? 0,
       holds: 'first claim on trial slots; implementation launches paused until the gate settles' } : null,
     // GY-3141: the last settled run's outcome with its reason or failing check, beside the run in flight's current step.
     lastOutcome: record.lastOutcome ? { ...record.lastOutcome, tip: record.lastOutcome.tip ? record.lastOutcome.tip.slice(0, 12) : null } : null,

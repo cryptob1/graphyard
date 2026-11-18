@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createServer, type Server } from 'node:net';
 import { join } from 'node:path';
+import { stat } from 'node:fs/promises';
 import { defaultChildRun } from '../src/child-runner.js';
 import { hostPrepareScript } from '../src/hosts.js';
 import { remoteShardSession } from '../src/merge-writer/remote-shards.js';
@@ -52,6 +53,7 @@ test(`${proof} — a shard runs through the trial launcher in its run directory 
   const listening: Server = await new Promise(resolve => { const server = createServer(socket => socket.end('host answered\n')).listen(0, '127.0.0.1', () => resolve(server)); });
   const port = (listening.address() as { port: number }).port;
   const { root, sha } = await shardRepository('host-shim-verbs-repo', ['tests/a.test.ts']);
+  const homeMode = (await stat(hosts.home('box'))).mode;
   const session = remoteShardSession({ root, sha, image, run: defaultChildRun, deadline: Date.now() + 50_000 });
   // The shard tries a private-range address, the tailnet range and this host; each must fail.
   const reach = `const net = require('node:net'); const targets = [['10.0.0.1', 80], ['192.168.1.1', 80], ['100.64.0.1', 80], ['127.0.0.1', ${port}]];
@@ -65,7 +67,7 @@ socket.on('error', error => done(error.code)); socket.on('timeout', () => done('
     for (const host of ['10.0.0.1', '192.168.1.1', '100.64.0.1', '127.0.0.1']) assert.match(ended.out, new RegExp(`^blocked ${host.replace(/\./g, '\\.')} `, 'm'), ended.out);
     const [create] = await dockerCreates(hosts.state('box'));
     const words = create!.join(' ');
-    for (const flag of ['--network=none', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--read-only', '--pids-limit=4096', '--user 0:0']) assert.ok(words.includes(flag), `${flag}: ${words}`);
+    for (const flag of ['--network=none', '--cap-drop=ALL', '--security-opt=no-new-privileges', '--read-only', '--pids-limit=4096', '--user 1000:0']) assert.ok(words.includes(flag), `${flag}: ${words}`);
     assert.match(words, /--cpus=\d+ /);
     assert.ok(Number(/--cpus=(\d+)/.exec(words)![1]) <= Number(/^cores (\d+)$/m.exec(shim('probe').stdout)![1]), 'CPUs are clamped to the host\'s cores');
     assert.match(words, /--memory=\d+m /);
@@ -73,6 +75,20 @@ socket.on('error', error => done(error.code)); socket.on('timeout', () => done('
     assert.match(words, new RegExp(`--host unix:///run/user/${process.getuid!()}/docker\\.sock`), 'the user\'s rootless Docker');
     const mounts = create!.filter((_, index) => create![index - 1] === '--mount');
     assert.equal(mounts.length, 1, words);
+    const runDirectory = /src=([^,]+)/.exec(mounts[0]!)![1]!;
+    for (const path of [runDirectory, join(runDirectory, 'repo'), join(runDirectory, 'repo', 'tests')]) {
+      assert.equal((await stat(path)).mode & 0o2070, 0o2070, `mapped group can write and traverse ${path}`);
+    }
+    assert.equal((await stat(join(runDirectory, 'repo', 'tests', 'a.test.ts'))).mode & 0o060, 0o060);
+    assert.equal((await stat(hosts.home('box'))).mode, homeMode, 'host home permissions stay unchanged');
     assert.match(mounts[0]!, new RegExp(`^type=bind,src=${hosts.home('box')}/\\.graphyard/runs/trial-\\w+,dst=`), 'only the run directory is mounted');
   } finally { await session.close(); listening.close(); }
+});
+
+// GY-3456: the production refusal named this exact valid command. Keep the installed script's
+// dispatch and warm-image validation exercised together, without opening any extra verb/image.
+test('integration:remote-ssh-confined — the prepared shim accepts the reported prepare-run warm-image command', () => {
+  const result = shim('prepare-run 4a46888f-graphyard b14b433253349f3fa4dd97f9893b49f9622c7d33 graphyard-warm:98f889ed5f9e-961b8cf1ad0e');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^need-pack -/);
 });

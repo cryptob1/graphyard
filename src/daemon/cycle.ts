@@ -12,7 +12,7 @@ import { workersAllowed } from '../master/worker-pool.js';
 import { assertDispatchable, HeadlessWorkerExit, workerRunHandle, type WorkerRun } from '../master/dispatch.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
-import { checkoutTrustLine } from '../harness.js';
+import { checkoutTrustLine, type CheckoutTrustFleet } from '../harness.js';
 import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
 import { capacityRefusal } from '../fleet.js';
@@ -578,9 +578,9 @@ export const workerGrowthKey = 'workers:grow';
  * opened per retry — until the check answers empty: the operator's trust record or the role's
  * arguments changed, and the launches go ahead again on their own.
  */
-async function untrustedCheckoutRoles(cycle: Cycle): Promise<ReadonlySet<string>> {
+async function untrustedCheckoutRoles(cycle: Cycle, registry: CheckoutTrustFleet | null): Promise<ReadonlySet<string>> {
   const { state, effects, clock } = cycle;
-  const refusals = await Promise.resolve(effects.checkoutTrust?.()).catch(() => []);
+  const refusals = await Promise.resolve(effects.checkoutTrust?.(registry)).catch(() => []);
   cycle.checkoutTrustRefused = new Set((refusals ?? []).map(entry => entry.role));
   if (!cycle.checkoutTrustRefused.size) {
     if (state.actions[checkoutTrustKey]) { delete state.actions[checkoutTrustKey]; await effects.persist(state); }
@@ -629,7 +629,7 @@ async function dispatchStep(cycle: Cycle) {
   const ahead: { key: string; priority: number; done: Promise<void> }[] = [];
   // GY-3225: an untrusted checkout carrying repository Claude configuration holds the roles it
   // names for the cycle, with one standing attention line (untrustedCheckoutRoles).
-  const refusedRoles = await untrustedCheckoutRoles(cycle);
+  const refusedRoles = await untrustedCheckoutRoles(cycle, registry);
   // GY-3335: a finished head a blocked worker named is the loop's to resubmit: once the master has
   // unblocked the item, the launcher beside this cycle re-runs complete's verification on the host
   // and submits the head as the next attempt, so no worker session and no worker slot is spent
@@ -1047,10 +1047,20 @@ async function masterPaneFailover(cycle: Cycle, handle: RuntimeSession, open: Wo
   const bare = handle.agent === null && !exited;
   master.misses = bare ? master.misses + 1 : 0;
   if (!notice && !exited && !(bare && master.misses >= 2)) return;
-  const reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : bare ? 'its pane held a bare shell with no agent on two consecutive cycles, so the session is gone' : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
+  let reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : bare ? 'its pane held a bare shell with no agent on two consecutive cycles, so the session is gone' : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
   const key = cycle.config.forPerson ? `master:failover:${cycle.config.forPerson}` : 'master:failover';
   try {
-    if (notice && master.account && sessions.exhaust) await sessions.exhaust(master.account, notice);
+    if (notice && master.account && sessions.exhaust) {
+      const checked = await sessions.exhaust(master.account, notice);
+      if (checked?.available || checked?.until && Date.parse(checked.until) <= clock) {
+        if (!exited && !(bare && master.misses >= 2)) return;
+        notice = null;
+        reason = 'its session exited; its account passed the live check';
+      } else if (checked?.until) {
+        notice = { ...notice, reason: checked.reason ?? notice.reason, resetsAt: checked.until };
+        reason = `its account failed the live request: ${notice.reason}`;
+      }
+    }
     if (handle.pane_id) await Promise.resolve(effects.closeSession(handle.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
     state.master = { ...master, agentName: null, pane: null, runtime: null, adopted: false, rotations: master.rotations + 1, misses: 0,
       lastEnd: { cause: notice ? 'exhausted' : 'exited', at: new Date(clock).toISOString(), detail: reason.slice(0, 500) },

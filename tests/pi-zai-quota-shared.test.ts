@@ -18,7 +18,7 @@ const iso = (offsetMs = 0) => new Date(clock + offsetMs).toISOString();
 const reset = iso(3 * 86_400_000);
 const keys = { opencode: 'opencode-credit-key', pi: 'pi-own-key' };
 
-test('unit:pi-zai-quota-shared — a Pi account on a zai/ model reads the shared Z.AI credit: exhausted until its reset and ineligible for the worker role, then available again', async () => {
+test('unit:pi-zai-quota-shared — a Pi account on a zai/ model checks its own request before a shared Z.AI credit reading can hold it, then releases on a passing check', async () => {
   const opencodeHome = await temporaryDirectory('zai-opencode'), piHome = await temporaryDirectory('zai-pi');
   await mkdir(join(opencodeHome, 'opencode'), { recursive: true });
   await writeFile(join(opencodeHome, 'opencode/auth.json'), JSON.stringify({ 'zai-coding-plan': { key: keys.opencode } }));
@@ -42,7 +42,7 @@ test('unit:pi-zai-quota-shared — a Pi account on a zai/ model reads the shared
   const observe = async (offsetMs: number) => {
     for (const account of [opencode, pi]) {
       const runtime = registry.runtimes.find(entry => entry.name === account.runtime)!;
-      const { quota } = await observeAccount(account, runtime, { fetch: probe, cacheMs: 0, now: () => clock + offsetMs }, registry.accounts, 'zai/glm-5.3-flash');
+      const { quota } = await observeAccount(account, runtime, { fetch: probe, cacheMs: 0, smoke: async () => ({ ok: credit.percentage < 100, error: `Usage limit reached; resets at ${reset}` }), now: () => clock + offsetMs }, registry.accounts, 'zai/glm-5.3-flash');
       foldObservation(account, quota, { actor: 'coordinator', at: iso(offsetMs) });
     }
   };
@@ -53,7 +53,7 @@ test('unit:pi-zai-quota-shared — a Pi account on a zai/ model reads the shared
   assert.ok(accountIneligibility(registry, pi, clock + 1_000, 'host'), 'the Pi account is not eligible for the worker role');
 
   credit = { percentage: 10, nextResetTime: Date.parse(reset) };
-  await observe(60_000);
+  await observe(3 * 86_400_000);
   assert.equal(pi.quota?.state, 'available', 'available again once the probe reports the credit available');
-  assert.equal(accountIneligibility(registry, pi, clock + 61_000, 'host'), null);
+  assert.equal(accountIneligibility(registry, pi, clock + 3 * 86_400_000 + 1_000, 'host'), null);
 });

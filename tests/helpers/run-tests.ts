@@ -8,7 +8,7 @@ import { parseShard, shardFiles } from '../../scripts/ci-tests.mjs';
 import { hostAccountsVariable } from '../../src/host-accounts.js';
 import { isolatedTestEnvironment, reserveTestPorts, sharedClusterPort, suiteRunEnvironment, testPortSpan, type ReserveOptions } from '../../src/cli/test-isolation.js';
 import { hostMemoryFloor, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
-import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
+import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, readStrictCap, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker } from '../../src/tmp-reclaim.js';
 import { stopServersUnder } from '../../src/postgres-stop.js';
 
@@ -251,10 +251,11 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
 /**
  * GY-3447: the host heavy-job slot a session's run takes, named, or null. Only a whole suite (no
  * file, list or shard selecting part of it) is a heavy job; a type check (`npm run build`) and
- * selected files start at once, under the session's share of the host's test parallelism.
+ * selected files start at once, under the session's share of the host's test parallelism — except under a
+ * host strict cap (GY-3446), when a selected run takes a slot too.
  */
-export const heavyRunLabel = (mode: 'test' | 'browser' | 'typecheck', args: string[]) =>
-  mode === 'typecheck' || args.length ? null : mode === 'browser' ? 'npm run test:browser' : 'npm test';
+export const heavyRunLabel = (mode: 'test' | 'browser' | 'typecheck', args: string[], strict = false) =>
+  mode === 'typecheck' || args.length && !strict ? null : `${mode === 'browser' ? 'npm run test:browser' : 'npm test'}${args.length ? ` ${args.join(' ')}` : ''}`;
 
 /** `tsc --noEmit` under the caller's environment, marked as holding the slot this process took. */
 export async function typecheck(cwd = process.cwd(), args: string[] = []) {
@@ -267,7 +268,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const browserPaths = process.argv.length > 2 && process.argv.slice(2).every(arg => arg.startsWith('browser-tests'));
   const mode = process.argv[2] === '--browser' || browserPaths ? 'browser' : process.argv[2] === '--typecheck' ? 'typecheck' : 'test';
   const args = process.argv.slice(mode === 'test' || browserPaths ? 2 : 3);
-  const label = heavyRunLabel(mode, args), held = label ? await sessionVerificationSlot(label) : null;
+  const directory = process.env[slotsDirectoryVariable], label = heavyRunLabel(mode, args, !!directory && !!readStrictCap(directory)), held = label ? await sessionVerificationSlot(label) : null;
   // The breadth the host affords is computed with the slot already held, so a run that starts later
   // sees this one's declaration; it is declared back onto the slot for the runs after it (GY-1821).
   const breadth = mode === 'test' ? sessionSuiteBreadth(await hostSuiteBreadth()) : null;

@@ -17,11 +17,10 @@
 // GY-3426: the reading is the package sensor (the hottest core only where no package sensor exists),
 // averaged over the cycles of the last 60 s — one core spikes to 95-100C for a second whenever
 // anything starts, and comparing that instant to the limit held nearly every launch on a 60C host.
-import { readdir, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import type { DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
-import { cpuSensorNames, trialHotCelsius } from '../merge-writer/trial-load.js';
+import { trialHotCelsius } from '../merge-writer/trial-load.js';
+import { standingLimit, type MasterRun } from '../master/profiles.js';
 import { sessionTestBudget } from '../runner/registry.js';
 import { overloadAlarm, overloaded, readSessionUsage } from '../session-share.js';
 
@@ -37,10 +36,13 @@ export const implementationHotCelsius = trialHalfCelsius;
 /** GY-3426: the guard compares the average of the readings taken over this window to the limit. */
 export const heatWindowMs = 60_000;
 
+/** GY-3446: the launch heat limit now — a temporary `launchHotCelsius` the master set while it stands, else the default. */
+const hotLimit = (state: Pick<DaemonState, 'cpuPressure'>) => state.cpuPressure?.hotCelsius ?? launchHotCelsius;
+
 /** The one status line master status carries while launches wait — heat first, then pressure — or null when nothing holds them. */
 export function cpuWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | null {
   const cpu = state.cpuPressure;
-  if (cpu?.celsius != null && cpu.celsius >= launchHotCelsius) return `launches waiting: CPU ${cpu.celsius}C`;
+  if (cpu?.celsius != null && cpu.celsius >= hotLimit(state)) return `launches waiting: CPU ${cpu.celsius}C`;
   if (cpu?.avg60 != null && cpu.avg60 > cpuPressureCeiling) return `launches waiting: CPU pressure ${Math.round(cpu.avg60)} percent`;
   return null;
 }
@@ -48,10 +50,10 @@ export const cpuPressureHeld = (state: Pick<DaemonState, 'cpuPressure'>) => cpuW
 /** GY-3437: the line that holds new implementation sessions — every launch's line, else the lower implementation heat limit's. */
 export function implementationWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | null {
   const celsius = state.cpuPressure?.celsius;
-  return cpuWaiting(state) ?? (celsius != null && celsius >= implementationHotCelsius ? `implementation launches waiting: CPU ${celsius}C; reviews and trials go on` : null);
+  return cpuWaiting(state) ?? (celsius != null && celsius >= hotLimit(state) - (launchHotCelsius - implementationHotCelsius) ? `implementation launches waiting: CPU ${celsius}C; reviews and trials go on` : null);
 }
 /** GY-3401, GY-3416: whether the hottest CPU sensor sits at the trial halving limit. */
-export const cpuHot = (state: Pick<DaemonState, 'cpuPressure'>) => (state.cpuPressure?.celsius ?? -Infinity) >= trialHalfCelsius;
+export const cpuHot = (state: Pick<DaemonState, 'cpuPressure'>) => (state.cpuPressure?.celsius ?? -Infinity) >= hotLimit(state) - (launchHotCelsius - trialHalfCelsius);
 /**
  * GY-3401: the merge writer's trial cap this cycle. A hot CPU no longer stops every trial: trials
  * running finish, and no new one starts beyond half the cap (at least one, GY-3437) until the reading falls below the limit.
@@ -63,18 +65,7 @@ export function trialCapNow(state: Pick<DaemonState, 'cpuPressure'>, full: numbe
   return cpuHot(state) ? Math.max(1, Math.floor(full / 2)) : full;
 }
 
-/** The CPU package sensor under `hwmon` in whole degrees (the hottest core where no package sensor exists); null where none is readable. */
-export async function cpuCelsius(hwmon = '/sys/class/hwmon'): Promise<number | null> {
-  const read = (path: string) => readFile(path, 'utf8').then(text => text.trim(), () => '');
-  const readings = (await Promise.all((await readdir(hwmon).catch(() => [] as string[])).map(async sensor => {
-    if (!cpuSensorNames.includes(await read(join(hwmon, sensor, 'name')))) return [];
-    const inputs = (await readdir(join(hwmon, sensor)).catch(() => [] as string[])).filter(name => name.startsWith('temp') && name.endsWith('_input'));
-    return (await Promise.all(inputs.map(async name => ({ text: await read(join(hwmon, sensor, name)), label: await read(join(hwmon, sensor, name.replace('_input', '_label'))) }))))
-      .filter(({ text }) => /^\d+$/.test(text)).map(({ text, label }) => ({ celsius: Math.floor(Number(text) / 1000), package: /^(Package id|Tctl|Tdie)/.test(label) }));
-  }))).flat();
-  const packages = readings.filter(reading => reading.package), chosen = packages.length ? packages : readings;
-  return chosen.length ? Math.max(...chosen.map(reading => reading.celsius)) : null;
-}
+export { cpuCelsius } from '../merge-writer/trial-load.js';
 
 /** 'some avg60' of /proc/pressure/cpu: the kernel's own average of the time some task waited for a CPU. */
 export function pressureAvg60(text: string): number | null {
@@ -103,15 +94,16 @@ export function stealPercent(previous: { total: number; steal: number } | null, 
  * loses only one reading, and the package sensor's 60 s average with the readings it is taken over (GY-3373, GY-3426). With neither readable (not Linux) the record clears — launches run and
  * the pages show nothing, exactly as before — and a hold that begins or ends is one journal line.
  */
-export async function cpuPressureStep(cycle: { state: DaemonState; effects: DaemonEffects; now: () => number; log: (line: string) => void }) {
+export async function cpuPressureStep(cycle: { config?: { run: Pick<MasterRun, 'launchHotCelsius'> }; state: DaemonState; effects: DaemonEffects; now: () => number; log: (line: string) => void }) {
   const { state, effects, now, log } = cycle;
   const reading = await Promise.resolve(effects.cpuPressure?.()).catch(() => null) ?? null;
   const avg60 = reading?.pressure ? pressureAvg60(reading.pressure) : null, at = now(), previous = state.cpuPressure, was = implementationWaiting(state);
   const samples = reading?.celsius == null ? [] : [...(previous?.samples ?? []).filter(([when]) => at - when < heatWindowMs && when <= at), [at, reading.celsius] as [number, number]];
   const celsius = samples.length ? Math.round(samples.reduce((sum, [, value]) => sum + value, 0) / samples.length) : null;
-  const stat = avg60 !== null && reading?.stat ? cpuStatTotals(reading.stat) : null;
+  const stat = avg60 !== null && reading?.stat ? cpuStatTotals(reading.stat) : null, hot = standingLimit(cycle.config?.run.launchHotCelsius, at);
   state.cpuPressure = avg60 === null && celsius === null ? null
-    : { at: new Date(at).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat, celsius, samples, testBudget: sessionTestBudget(), trialCap: previous?.trialCap ?? null };
+    : { at: new Date(at).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat, celsius, samples, testBudget: sessionTestBudget(), trialCap: previous?.trialCap ?? null,
+      ...(hot === undefined ? {} : { hotCelsius: hot }) };
   const waiting = implementationWaiting(state);
   if (waiting?.split(':')[0] !== was?.split(':')[0]) log(`[graphyard-master] cycle ${state.cycle}: ${!waiting ? 'launches resume' : waiting === cpuWaiting(state) ? `${waiting}; no new worker, reviewer or trial starts until it falls` : waiting}`);
 }

@@ -384,18 +384,19 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
   // /etc/resolv.conf commonly points into the otherwise hidden /run tree. Bind
   // only that public resolver file back, never systemd's directory or sockets.
   const resolver = existsSync('/etc/resolv.conf') ? realpathSync('/etc/resolv.conf') : null;
-  // GY-3384: the system ssh include directory holds files owned by ids the user namespace cannot
-  // map (root reads as nobody inside), and ssh refuses a config file its owner check rejects —
-  // "Bad owner or permissions on /etc/ssh/ssh_config.d/*.conf" — so every git over SSH failed
-  // inside a confined session. An empty directory in its place leaves ssh its defaults; the
-  // system config itself is never owner-checked, and the session's scratch HOME has no include
-  // to check.
-  const sshIncludes = isDirectoryPath('/etc/ssh/ssh_config.d') ? ['--tmpfs', '/etc/ssh/ssh_config.d'] : [];
+  // GY-3384, GY-3470: system ssh include files are owned by ids the user namespace cannot map
+  // (root reads as nobody inside), and ssh refuses an included file its owner check rejects —
+  // "Bad owner or permissions on /etc/ssh/ssh_config.d/20-omarchy-keepalive.conf" — so every git
+  // over SSH failed inside a confined session. The session's system configuration is therefore an
+  // explicit empty one, which includes nothing: ssh keeps its defaults (known-hosts files and
+  // host-key checking among them) and every option a command passes it, such as a deploy key's
+  // -i and StrictHostKeyChecking=accept-new. The system config itself is never owner-checked.
+  const sshConfig = existsSync('/etc/ssh/ssh_config') ? ['--ro-bind', '/dev/null', '/etc/ssh/ssh_config'] : [];
   // GY-3108: Antigravity (agy) ignores AGY_CONFIG_DIR and reads its login only from
   // `$HOME/.gemini/antigravity-cli`, so the account's login home is bound there.
   const home = variable('HOME', '/tmp/home'), agy = variable('AGY_CONFIG_DIR', '')[2];
   const agyHome = agy && join(home[2], '.gemini', 'antigravity-cli') !== agy ? ['--bind', agy, join(home[2], '.gemini', 'antigravity-cli')] : [];
-  return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...sshIncludes,
+  return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...sshConfig,
     '--tmpfs', '/run', ...(resolver?.startsWith('/run/') ? ['--ro-bind', resolver, resolver] : []), '--bind', scratch, '/tmp', '--bind', scratch, '/var/tmp',
     ...variable('TMPDIR', '/tmp'), ...variable('TMP', '/tmp'), ...variable('TEMP', '/tmp'),
     '--dir', '/tmp/home', ...home, ...agyHome,
