@@ -170,7 +170,7 @@ test('unit:pi-runner — pi launches and reports usage through its adapter', asy
 
   const at = Date.parse('2026-10-15T01:10:00Z');
   const signal = detectRuntimeExhaustion('Error: 429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-17 08:27:35"}', 'pi', at);
-  assert.equal(signal?.resetsAt, '2026-10-17T08:27:35.000Z', 'the adapter limit notice and its zone-less UTC reset report the account spent');
+  assert.equal(signal?.resetsAt, '2026-10-17T00:27:35.000Z', 'the adapter limit notice and its zone-less Beijing-time reset report the account spent');
 
   const home = await temporaryDirectory('pi-adapter-home');
   try {

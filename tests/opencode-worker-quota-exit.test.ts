@@ -23,7 +23,7 @@ test('integration:opencode-worker-quota-exit — the Z.AI quota error event hold
   const item = await workers.stored(work.id);
   const spent = item.capacity?.exhaustions?.find(entry => entry.epoch === 1);
   assert.equal(spent?.account, 'opencode-spent');
-  assert.equal(spent?.resetsAt, '2026-11-20T12:49:15.000Z', 'held until the reset Z.AI named, in UTC');
+  assert.equal(spent?.resetsAt, '2026-11-20T04:49:15.000Z', 'held until the reset Z.AI named, in Beijing time');
   assert.equal((await workers.registry.snapshot(workers.hostId)).accounts.find(entry => entry.name === 'opencode-spent')?.eligible, false, 'the spent account is held');
   assert.ok(!item.sessions!.some(session => /exited at once/.test(session.outcome ?? '')), 'no launch failure is recorded');
   await writeFile(join(workers.homes.get('next-account')!, 'release'), '');
