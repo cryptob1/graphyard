@@ -10,7 +10,7 @@ import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
-import { type FleetClient, type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
+import { type FleetClient, type FleetLaunchAccount, type FleetProbe, checkAccountLive, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { externalCredential, loadStoredMasterConfig } from './config.js';
 import { atomicPrivateText, atomicPrivateWrite, readCredentialFile } from '../private-file.js';
@@ -18,8 +18,7 @@ import { installDirectory, readInstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { failureText } from '../disk-space.js';
 import { shellQuote } from '../shell-quote.js';
-import { heldObservation, describeObservedExhaustion, providerIdentity } from './account-identity.js';
-import { markHostAccountExhausted } from '../host-accounts.js';
+import { describeObservedExhaustion, providerIdentity } from './account-identity.js';
 import { getCachedPlanUsage, setCachedPlanUsage } from '../provider-usage.js';
 export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
 // The per-provider login and quota probes live in ./environment-quota.ts, reached through each runtime's adapter.
@@ -195,7 +194,7 @@ const environmentLogSchema = z.object({
 }).strict();
 /** A runtime limit notice reported to the registry, with its reset or a one-hour fallback. */
 export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null; identity?: string | null; home?: string; kind?: string; reported?: boolean }
-export const unknownResetHoldMs = 3_600_000;
+export const unknownResetHoldMs = 1_800_000;
 export interface AccountSelection { environment: string | null; kind: string | null; at: string; work: string | null }
 export type EnvironmentLog = { version: 1; environments: Record<string, EnvironmentHealth>; skipped: AccountSkip[]; selected: Record<string, AccountSelection>; exhausted: Record<string, ObservedExhaustion>; /** When an operator last released each account's hold (GY-3100): no notice read before it holds the account again. */ released?: Record<string, string> };
 /** A profile that names no accounts launches on whatever its own environment selects; its exhaustion is held under this name. */
@@ -227,7 +226,7 @@ export async function readEnvironmentLog(config: Pick<MasterConfig, 'credentialF
 }
 /** Report a runtime's exhaustion directly to the registry; failures remain errors for reconciliation to retry. */
 export async function recordObservedExhaustion(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId' | 'repository'>>, environment: string, observed: Omit<ObservedExhaustion, 'until'>, now = Date.now(),
-  report?: { registry?: Pick<FleetClient, 'observe'> & Partial<Pick<FleetClient, 'document'>>; fetch?: typeof fetch }) {
+  report?: { registry?: Pick<FleetClient, 'observe'> & Partial<Pick<FleetClient, 'document'>>; fetch?: typeof fetch; smoke?: FleetProbe['smoke'] }) {
   const reset = observed.resetsAt ? Date.parse(observed.resetsAt) : Number.NaN;
   const future = Number.isFinite(reset) && reset > now;
   const entry: ObservedExhaustion = { ...observed, resetsAt: future ? observed.resetsAt : null,
@@ -236,18 +235,10 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
   if (!registry?.observe || !config.hostId) throw new Error('Reporting account exhaustion requires the control-plane registry');
   const document = registry.document ? await registry.document() : null;
   const account = document?.accounts.find(account => account.name === environment && account.credential.host === config.hostId);
-  if (entry.identity === undefined) {
-    const runtime = document?.runtimes.find(runtime => runtime.name === account?.runtime);
-    const identity = account?.credential.home && runtime ? await providerIdentity(runtime.launch.kind, account.credential.home) : undefined;
-    entry.identity = identity === undefined ? account?.quota.identity : identity;
-  }
-  // GY-3333: the hold is recorded beside the login home too, so every install on this host reads
-  // the account as exhausted until the same reset rather than rediscovering it with a session.
-  if (account?.credential.home) {
-    try { markHostAccountExhausted(account.credential.home, { by: config.repository ?? config.url ?? config.hostId, reason: entry.reason, at: entry.at, until: entry.until, session: entry.resetsAt ? 'named' : 'guessed' }); }
-    catch { /* the registry hold stands; only the shared record could not be written */ }
-  }
-  await registry.observe({ host: config.hostId, observations: [{ account: environment, quota: heldObservation(environment, entry) }] });
+  const runtime = document?.runtimes.find(runtime => runtime.name === account?.runtime);
+  if (!account || !runtime) throw new Error(`Cannot check unregistered account ${environment}`);
+  const quota = await checkAccountLive(account, runtime, { smoke: report?.smoke, now: () => now }, document?.models.find(model => model.name === account.model)?.id);
+  await registry.observe({ host: config.hostId, observations: [{ account: environment, quota }] });
   return entry;
 }
 /** Current exhaustion is read from the registry, never from the executor's environment log. */

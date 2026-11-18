@@ -1,6 +1,6 @@
 import type { Work } from './work.js';
 import { fleetRoles, rolePolicy, roleRuntimeRefusal } from './registry.js';
-import { exhaustedTwin, exhaustionEvidence, foldObservation } from './account-quota.js';
+import { exhaustionEvidence, foldObservation } from './account-quota.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
 import { workerOrder, planSpreadOrder, fleetOrder, roleUnsupported } from './worker-preference.js';
@@ -123,21 +123,7 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   if (account.quota.loggedIn === false) return `${account.name} is not logged in${account.quota.session === 'login' ? `: its agent reported "${account.quota.reason}"; held until cleared with master registry account quota ${account.name} available` : ''}`;
   const pi = registry.runtimes.some(runtime => runtime.name === account.runtime && smokeTestedKinds.includes(runtime.launch.kind));
   if (account.smoke?.result === 'fail' && !(options.expiredSmokeRetestable && pi && smokeFailureDue(account, now))) return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
-  const plan = deriveAccountPlan(account, registry.accounts);
-  const planAccounts = registry.accounts.filter(other => other.name === account.name || deriveAccountPlan(other, registry.accounts).planId === plan.planId);
-  const held = (other: FleetAccount) => !!exhaustionEvidence(other.quota, now);
-  // An operator hold on the plan wins, and so does a session's exhaustion report until its reset (GY-1581): no probe outranks either. Otherwise the
-  // newest probe on the plan decides, so a stale exhaustion one host reported without a reset is superseded by a later probe elsewhere (GY-1158).
-  // Another account's guessed report holds nothing here, never even as a probe: its host resends it every selection, so it is always the newest. A pure read.
-  const guessed = (other: FleetAccount) => other.quota.session === 'guessed' && other.name !== account.name, reported = (other: FleetAccount) => !!other.quota.session && !guessed(other) && held(other);
-  const probes = planAccounts.filter(other => other.quota.source === 'probe' && other.quota.observedAt && other.quota.state !== 'unknown' && !guessed(other))
-    .sort((a, b) => Date.parse(b.quota.observedAt!) - Date.parse(a.quota.observedAt!));
-  const exhausted = planAccounts.find(other => other.quota.source === 'operator' && held(other)) ?? [account, ...planAccounts].find(reported)
-    ?? (probes.length ? [probes[0]].find(held) : [account, ...planAccounts].find(other => !guessed(other) && held(other)));
-  if (exhausted?.name === account.name) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
-  if (exhausted) return `${account.name} quota is exhausted on plan ${plan.planName} (${exhausted.name} quota is ${exhausted.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${until(exhausted.quota.resetsAt)}${exhausted.quota.reason ? `: ${exhausted.quota.reason}` : ''})`;
-  const twin = exhaustedTwin(registry, account, now);
-  if (twin) return `${account.name} quota is exhausted${until(twin.quota.resetsAt)}: it is the same provider login as ${twin.name}, whose quota is ${twin.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${twin.quota.reason ? ` (${twin.quota.reason})` : ''}`;
+  if (exhaustionEvidence(account.quota, now)) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
   // GY-3333: sessions other installs on this host hold on the same login home count toward the
   // account's own limit — one home serves at most its maxSessions sessions across every install.
@@ -204,6 +190,7 @@ export function foldObservations(registry: AgentRegistry, request: Pick<Selectio
     // An executor only vouches for the logins on its own host.
     if (!account || account.credential.host !== request.host) continue;
     if (foldObservation(account, observed.quota, context)) changed = true;
+    if (observed.quota.since && observed.quota.state === 'available' && account.smoke?.result === 'fail') { account.smoke = null; changed = true; }
     if (observed.smoke) { account.smoke = { result: observed.smoke.result, reason: observed.smoke.reason, at: context.at, by: context.actor }; changed = true; }
     // A passing smoke test answered on the account, so its agent's not-logged-in report no longer holds (GY-3441).
     if (observed.smoke?.result === 'pass' && account.quota.session === 'login' && account.quota.loggedIn === false) account.quota = { ...account.quota, loggedIn: null, session: undefined, reason: null };

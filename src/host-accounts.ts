@@ -147,3 +147,16 @@ export function hostAccountExhaustion(home: string, now = Date.now()): HostAccou
   const mark = ownerOf<HostAccountExhaustion>(join(accountDirectory(home), 'exhausted.json'));
   return mark && Date.parse(mark.until) > now ? mark : null;
 }
+
+/** The last real request on this login, shared by all installs on the host. */
+export interface HostAccountCheck { at: string; nextCheck: string; quota: import('./model/registry.js').QuotaObservation }
+export function hostAccountCheck(home: string): HostAccountCheck | null {
+  return ownerOf<HostAccountCheck>(join(accountDirectory(home), 'check.json'));
+}
+export function recordHostAccountCheck(home: string, check: HostAccountCheck) {
+  const directory = accountDirectory(home);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, 'check.json'), pending = `${path}.${randomUUID()}.pending`;
+  writeFileSync(pending, JSON.stringify(check), { mode: 0o600 });
+  renameSync(pending, path);
+}
