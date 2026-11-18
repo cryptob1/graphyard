@@ -93,7 +93,7 @@ export const aclGuidance = 'Replace TEAMMATE@example.com with the person\'s Tail
 
 export const teamAccessSummary = 'One machine, many installs, one port each. Two locks: the Tailscale share lets a person\'s devices reach this machine (as far as your tailnet policy allows), and each install still needs its own Graphyard sign-in.';
 export const missingShareGuidance = 'No Tailscale share link is saved for this machine yet, so Invite cannot make a complete message. In the Tailscale admin console open Machines, choose this machine, pick Share, copy the link and paste it here; every install on this machine then uses it.';
-export const missingTailnetGuidance = (port: string) => `Tailscale is not serving this machine's port ${port}, this install's, so nobody else can open this install. Install Tailscale (https://tailscale.com/download), sign in, and rerun graphyard up.`;
+export const missingTailnetGuidance = (port: string) => `Tailscale is not serving this machine's port ${port}, where this install runs, so nobody else can open it. Install Tailscale (https://tailscale.com/download), sign in, and rerun graphyard up.`;
 
 /**
  * The one invitation message Setup copies: both links, the install it opens and both expiries, so the
