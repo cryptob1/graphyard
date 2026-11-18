@@ -54,7 +54,7 @@ function board(): Work[] {
 function dashboard(work: Work[], overrides: Partial<Dashboard> = {}): Dashboard {
   return {
     token: 'fixture', work, board: boardFromStatus(work, NOW, fixtureStatus('admin')), status: fixtureStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop,
-    filter: null, setFilter: noop, selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop,
+    filter: null, setFilter: noop, shippedFilter: null, setShippedFilter: noop, selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop,
     observedAt: NOW, jobs: [], query: '', setQuery: noop, operatorAgents: [], operatorAgentsError: null, features: {} as any,
     events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop,
     sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'),

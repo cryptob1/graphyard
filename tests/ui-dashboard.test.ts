@@ -36,6 +36,7 @@ function dashboard(overrides: Partial<Dashboard> = {}, role = 'admin'): Dashboar
   const work = overrides.work ?? board();
   const d: Dashboard = {
     token: 'fixture', work, status: boardStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
+    shippedFilter: null, setShippedFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: { validation: null, releases: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop,
     sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, role), refresh: async () => {},
