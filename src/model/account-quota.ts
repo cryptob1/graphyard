@@ -27,6 +27,7 @@ export function exhaustionEvidence(quota: Pick<ObservedQuota, 'state' | 'usage' 
  * passive usage/login-file readings do not contradict a failed request. */
 export function foldObservation(account: FleetAccount, observed: QuotaObservation, context: { actor: string; at: string }) {
   const held = account.quota, now = Date.parse(context.at);
+  if (observed.state === 'exhausted' && observed.since && account.quotaDecision && Date.parse(observed.since) <= Date.parse(account.quotaDecision.at)) return false;
   if (!observed.since) {
     const loginHold = held.session === 'login' && held.loggedIn === false && (!observed.identity || observed.identity === held.identity);
     const quotaHold = held.state === 'exhausted' && (held.source === 'operator' || !!held.session) && (!held.resetsAt || Date.parse(held.resetsAt) > now);

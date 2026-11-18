@@ -24,12 +24,12 @@ test('quota-live-check: only each login’s live request holds it, across instal
     for (const kind of ['claude', 'codex', 'cursor', 'opencode', 'pi', 'muse', 'agy']) {
       const home = await temporaryDirectory(kind, root), provider = join(home, 'provider.cjs');
       const state = join(home, 'reply.json');
-      await writeFile(provider, `#!/usr/bin/env node\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst home = process.env.TEST_LOGIN;\nconst reply = JSON.parse(fs.readFileSync(path.join(home, 'reply.json')));\nfs.appendFileSync(path.join(home, 'calls'), JSON.stringify(process.argv.slice(2))+'\\n');\nif (!reply.ok) { console.error(reply.error); process.exit(1); }\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'OK'}]}}));\n`);
+      await writeFile(provider, `#!/usr/bin/env node\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst home = process.env.TEST_LOGIN;\nif (process.env.TEST_HOME_VARIABLE && process.env[process.env.TEST_HOME_VARIABLE] !== home) { console.error('wrong login home'); process.exit(1); }\nif (process.env.TEST_KIND === 'agy' && fs.realpathSync(path.join(process.env.HOME, '.gemini/antigravity-cli')) !== home) process.exit(1);\nconst reply = JSON.parse(fs.readFileSync(path.join(home, 'reply.json')));\nfs.appendFileSync(path.join(home, 'calls'), JSON.stringify(process.argv.slice(2))+'\\n');\nif (!reply.ok) { console.error(reply.error); process.exit(1); }\nconsole.log(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'OK'}]}}));\n`);
       await chmod(provider, 0o700);
       const runtime = structuredClone(proposedRuntimes.find(runtime => runtime.name === kind) ?? { ...proposedRuntimes.find(runtime => runtime.name === 'pi')!, name: kind });
       runtime.launch.kind = kind;
       assert.ok(runtime, kind);
-      runtime.launch.environment = { ...runtime.launch.environment, TEST_LOGIN: home };
+      runtime.launch.environment = { ...runtime.launch.environment, TEST_LOGIN: home, ...(kind !== 'agy' && runtime.launch.homeVariable ? { TEST_HOME_VARIABLE: runtime.launch.homeVariable } : {}), TEST_KIND: kind };
       const registries = stores.map(store => new AgentRegistry(store));
       for (const registry of registries) await registry.mutate(operator, 'apply', {
         runtimes: [runtime], models: [{ name: 'fixture', id: null }],
@@ -51,6 +51,7 @@ test('quota-live-check: only each login’s live request holds it, across instal
         return observed.quota;
       };
       await reply(true); await signal();
+      assert.equal((await document()).accounts.find(account => account.name === kind)!.quota.state, 'available', `${kind}: a quoted limit cannot hold a passing account`);
       assert.equal((await check()).state, 'available', `${kind}: quoted narrative does not hold`);
       assert.equal(calls, 1);
       assert.equal((await check(1)).state, 'available'); assert.equal(calls, 1, 'second install reuses host result');
@@ -74,6 +75,8 @@ test('quota-live-check: only each login’s live request holds it, across instal
       marked.quota.observedAt = new Date(now + 1).toISOString();
       const released = await observeAccount(marked, runtime, { now: () => now + 1, smoke, quota: false });
       assert.equal(released.quota.state, 'available', `${kind}: passing request releases operator mark`);
+      await registries[0].observe(operator, { host: 'host', observations: [{ account: kind, quota: released.quota }] }, randomUUID());
+      assert.equal((await document()).accounts.find(account => account.name === kind)!.quota.state, 'available');
       now++;
       await reply(false, 'Not logged in. Please run login'); await signal();
       assert.equal((await check()).loggedIn, false);
@@ -81,4 +84,18 @@ test('quota-live-check: only each login’s live request holds it, across instal
       assert.equal((await check()).loggedIn, true, `${kind}: login refreshes on next check`);
     }
   } finally { for (const store of stores) await store.close(); }
+});
+
+
+test('quota-live-check: quoted output from a real worker does not hold a passing login', async () => {
+  const { headlessWorkers } = await import('./helpers/headless-workers.js');
+  const workers = await headlessWorkers('quota-live-worker');
+  try {
+    await workers.configure([{ name: 'quotes-limit', kind: 'opencode', printed: 'Error: 429 FreeUsageLimitError: Free usage limit reached.', smokePass: true }]);
+    const work = await workers.readyItem('GY-3467');
+    await assert.rejects(workers.dispatch(work), /worker exited at once/, 'the failed process is a normal launch failure');
+    const account = (await workers.registry.snapshot(workers.hostId)).accounts.find(account => account.name === 'quotes-limit')!;
+    assert.equal(account.quota, 'available');
+    assert.equal((await workers.stored(work.id)).capacity?.exhaustions?.length ?? 0, 0, 'quoted output does not park the work as out of credits');
+  } finally { await workers.stop(); }
 });

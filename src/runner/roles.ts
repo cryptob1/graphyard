@@ -1,4 +1,4 @@
-import { headlessArgv } from '../headless-session.js';
+import { headlessArgv } from '../headless-argv.js';
 import { ChildProcessError, runChild } from '../child-runner.js';
 import { randomUUID } from 'node:crypto';
 import { confinedRuntimeArgs } from '../worker-sandbox.js';
@@ -118,8 +118,9 @@ export async function smokeRegistryAccount(account: FleetLaunchAccount, options:
       const [command, ...argv] = await headlessArgv({ kind: account.kind, args, contract: account.fleet.contract }, 'Reply with the single word OK.', env);
       const output = await runChild(options.command ?? command, [...(options.commandArgs ?? []), ...argv], { env, cwd: options.cwd ?? account.home ?? undefined, timeoutMs: options.timeoutMs ?? 120_000 });
       // Print-mode runtimes can report provider errors with exit zero (OpenCode).
-      const failure = output.split('\n').some(line => { try { const event = JSON.parse(line); return event.type === 'error' || event.is_error === true; } catch { return false; } });
-      return { ok: !!output.trim() && !failure, error: failure ? output.slice(-500) : output.trim() ? null : 'The smoke request returned no answer' };
+      const failure = output.split('\n').some(line => { try { const event = JSON.parse(line); return event.type === 'error' || event.type === 'turn.failed' || event.is_error === true; } catch { return false; } });
+      const answered = /\bOK\b/i.test(output);
+      return { ok: answered && !failure, error: failure ? Object.values(key).reduce((text, secret) => text.replaceAll(secret, '[redacted]'), output).slice(-500) : answered ? null : 'The smoke request returned no answer' };
     } catch (error) {
       const message = error instanceof ChildProcessError ? error.stderr || error.stdout || error.message : String(error);
       return { ok: false, error: Object.values(key).reduce((text, secret) => text.replaceAll(secret, '[redacted]'), message).slice(-500) };

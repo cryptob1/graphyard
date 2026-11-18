@@ -192,7 +192,7 @@ const environmentLogSchema = z.object({
   exhausted: z.unknown().optional(),
   released: z.unknown().optional(),
 }).strict();
-/** A runtime limit notice reported to the registry, with its reset or a one-hour fallback. */
+/** A runtime limit notice reported to the registry, with its reset or a 30-minute recheck. */
 export interface ObservedExhaustion { at: string; until: string; resetsAt: string | null; reason: string; role: LaunchRole; profile: string; work: string | null; identity?: string | null; home?: string; kind?: string; reported?: boolean }
 export const unknownResetHoldMs = 1_800_000;
 export interface AccountSelection { environment: string | null; kind: string | null; at: string; work: string | null }
@@ -227,10 +227,6 @@ export async function readEnvironmentLog(config: Pick<MasterConfig, 'credentialF
 /** Report a runtime's exhaustion directly to the registry; failures remain errors for reconciliation to retry. */
 export async function recordObservedExhaustion(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'environments' | 'url' | 'hostId' | 'repository'>>, environment: string, observed: Omit<ObservedExhaustion, 'until'>, now = Date.now(),
   report?: { registry?: Pick<FleetClient, 'observe'> & Partial<Pick<FleetClient, 'document'>>; fetch?: typeof fetch; smoke?: FleetProbe['smoke'] }) {
-  const reset = observed.resetsAt ? Date.parse(observed.resetsAt) : Number.NaN;
-  const future = Number.isFinite(reset) && reset > now;
-  const entry: ObservedExhaustion = { ...observed, resetsAt: future ? observed.resetsAt : null,
-    reason: observed.reason.slice(0, 500), until: new Date(future ? reset : now + unknownResetHoldMs).toISOString() };
   const registry = report?.registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }, report?.fetch ?? fetch) : null);
   if (!registry?.observe || !config.hostId) throw new Error('Reporting account exhaustion requires the control-plane registry');
   const document = registry.document ? await registry.document() : null;
@@ -239,7 +235,7 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
   if (!account || !runtime) throw new Error(`Cannot check unregistered account ${environment}`);
   const quota = await checkAccountLive(account, runtime, { smoke: report?.smoke, now: () => now }, document?.models.find(model => model.name === account.model)?.id);
   await registry.observe({ host: config.hostId, observations: [{ account: environment, quota }] });
-  return entry;
+  return { ...observed, at: quota.since!, reason: quota.reason ?? 'The live request passed', resetsAt: quota.session === 'guessed' ? null : quota.resetsAt, until: quota.resetsAt ?? new Date(now).toISOString() };
 }
 /** Current exhaustion is read from the registry, never from the executor's environment log. */
 export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, now = Date.now(), registry?: Pick<FleetClient, 'document'>): Promise<Record<string, ObservedExhaustion>> {

@@ -49,7 +49,7 @@ export interface HeadlessWorkers {
   stored: (id: string) => Promise<Work>;
   readyItem: (key: string) => Promise<Work>;
   /** One registry account per entry, each with a stub model executable for its runtime kind. */
-  configure: (entries: { name: string; kind: string; failure?: string; result?: string; printed?: string; wait?: boolean; afterWait?: string }[]) => Promise<void>;
+  configure: (entries: { name: string; kind: string; failure?: string; result?: string; printed?: string; smokePass?: boolean; wait?: boolean; afterWait?: string }[]) => Promise<void>;
   /** One host dispatch invocation: the real launcher, its origin fetch answered from the local base. */
   dispatch: (work: Work) => Promise<Awaited<ReturnType<typeof dispatchWork>>>;
   submitted: (id: string, epoch: number) => Promise<Work>;
@@ -107,7 +107,7 @@ export async function headlessWorkers(label: string, leaseSeconds = 120): Promis
     await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
     return work;
   }
-  async function configure(entries: { name: string; kind: string; failure?: string; result?: string; printed?: string; wait?: boolean; afterWait?: string }[]) {
+  async function configure(entries: { name: string; kind: string; failure?: string; result?: string; printed?: string; smokePass?: boolean; wait?: boolean; afterWait?: string }[]) {
     const accounts = (await registry.document(coordinator)).accounts.filter(account => !entries.some(entry => entry.name === account.name)).map(({ quota, quotaDecision, smoke, unjudged, ...account }) => ({ ...account, enabled: false }));
     const runtimes = [];
     for (const entry of entries) {
@@ -127,6 +127,7 @@ export async function headlessWorkers(label: string, leaseSeconds = 120): Promis
 import fs from 'node:fs';
 import { execFileSync } from 'node:child_process';
 const home = process.env.RUNTIME_HOME, args = process.argv.slice(2);
+if (args.includes('Reply with the single word OK.')) { const error = ${JSON.stringify(entry.smokePass ? '' : entry.failure ?? entry.result ?? entry.printed ?? '')}; if (error) { console.error(error); process.exit(1); } console.log('OK'); process.exit(0); }
 fs.appendFileSync(home + '/starts', '1');
 fs.writeFileSync(home + '/started.json', JSON.stringify({ args, cwd: process.cwd(), tty: !!process.stdout.isTTY }));
 const [, key, epoch] = /complete (GY-\\d+) (\\d+) --head/.exec(args.join(' ')) ?? [];

@@ -1,13 +1,5 @@
-// Concern: GY-3333 — an agent account is a host-level resource. One machine runs several Graphyard
-// installs that point at the same login homes (~/.coding_agents/NAME), and each install's registry
-// counts that account's live sessions and quota holds only for itself. The records here are the
-// shared truth beside those homes, in the style of the machine-wide trial slots under ~/.gy: a live
-// session is a locked file its install's launcher process holds (the kernel drops the lock — and so
-// the session — when that process dies, so nothing leaks), and an account one install marks
-// exhausted until a time is read by every install until that time. Each install keeps its own
-// registry and roles; only the session count and the quota state are shared. No daemon, no new
-// service, no new setting: an install alone on a host, or a host whose shared directory cannot be
-// written, behaves exactly as before.
+// Host-level account state shared by every install using the same login home: locked live
+// session records for concurrency, and the latest real request with its next check time.
 import { createHash, randomUUID } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -113,39 +105,6 @@ export async function hostAccountSessions(home: string): Promise<HostAccountSess
     } catch { /* an unreadable record holds nothing */ } finally { closeSync(fd); }
   }
   return sessions;
-}
-
-/** An account one install marked exhausted: it holds every install until `until`, and names who marked it and why. */
-export interface HostAccountExhaustion { by: string; reason: string; at: string; until: string; /** Whether the provider named the reset (`named`) or the marking install assumed one (`guessed`). */ session: 'named' | 'guessed' }
-/**
- * The hold a limit notice places, as a host record carries it: until the reset the provider named,
- * or for the hour every executor assumes when it named none (`unknownResetHoldMs`, written out to
- * keep this module free of the master's import cycle).
- */
-const unnamedResetHoldMs = 3_600_000;
-export const exhaustionHold = (resetsAt: string | null, now: number): { until: string; session: 'named' | 'guessed' } => {
-  const reset = resetsAt ? Date.parse(resetsAt) : Number.NaN;
-  return Number.isFinite(reset) && reset > now ? { until: resetsAt!, session: 'named' } : { until: new Date(now + unnamedResetHoldMs).toISOString(), session: 'guessed' };
-};
-
-/**
- * Record beside the login home that this install holds the account exhausted until `until`
- * (GY-3333): the account's quota state is shared by every install on the host, so a limit one
- * install's session reported is not rediscovered by another install's session. A later mark
- * replaces an earlier one; a mark whose time has passed is read by nobody.
- */
-export function markHostAccountExhausted(home: string, mark: HostAccountExhaustion) {
-  const directory = accountDirectory(home);
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  const path = join(directory, 'exhausted.json'), pending = `${path}.${randomUUID()}.pending`;
-  writeFileSync(pending, JSON.stringify(mark));
-  renameSync(pending, path);
-}
-
-/** The hold another install left on the account at `home`, or null when none still holds. */
-export function hostAccountExhaustion(home: string, now = Date.now()): HostAccountExhaustion | null {
-  const mark = ownerOf<HostAccountExhaustion>(join(accountDirectory(home), 'exhausted.json'));
-  return mark && Date.parse(mark.until) > now ? mark : null;
 }
 
 /** The last real request on this login, shared by all installs on the host. */

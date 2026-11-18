@@ -94,7 +94,7 @@ async function effectsFor(config: MasterConfig, agents: { name?: string; pane_id
       // The production hold, on the fixture's own environment log beside the fixture credential file.
       exhaust: async (account, notice) => {
         observed.exhausted.push({ account, reason: notice.reason, resetsAt: notice.resetsAt });
-        await recordObservedExhaustion(config, account, { at: iso(clock), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }, clock, { registry: registry.client });
+        await recordObservedExhaustion(config, account, { at: iso(clock), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }, clock, { registry: registry.client, smoke: async () => ({ ok: false, error: `${notice.reason}; resets at ${notice.resetsAt}` }) });
       },
       end: async (session, reason) => { observed.ended.push({ session, reason }); await registry.client.end(session, reason); },
     },

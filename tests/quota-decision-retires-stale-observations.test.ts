@@ -22,7 +22,7 @@ test('unit:quota-decision-retires-stale-observations — an exhaustion observed 
   const credentialFile = join(root, 'coordinator.token');
   await writeFile(credentialFile, 'token', { mode: 0o600 });
   const config = { credentialFile, hostId: HOST } as Pick<MasterConfig, 'credentialFile' | 'hostId'>;
-  const hold = await recordObservedExhaustion(config, 'opencode-c', { at: iso(t0), resetsAt: '2026-11-05T13:00:00Z', reason: 'Usage limit reached · limit resets 1pm', role: 'worker', profile: 'builder', work: 'GY-1' }, t0, { registry: { observe: async () => registry } as never });
+  const hold = await recordObservedExhaustion(config, 'opencode-c', { at: iso(t0), resetsAt: '2026-11-05T13:00:00Z', reason: 'Usage limit reached · limit resets 1pm', role: 'worker', profile: 'builder', work: 'GY-1' }, t0, { registry: { document: async () => registry, observe: async () => registry }, smoke: async () => ({ ok: false, error: 'Usage limit reached; resets at 2026-11-05T13:00:00Z' }) });
   const replayed = heldOverlay({ 'opencode-c': hold }, 'opencode-c', { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null });
   assert.equal(replayed.since, hold.at, 'a replayed hold names when it was observed');
   const [reported] = registryHoldObservations(registry, HOST, 'opencode-c', hold)!;

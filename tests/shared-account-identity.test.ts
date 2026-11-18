@@ -11,14 +11,7 @@ import { accountIneligibility, chooseSession, emptyRegistry, fleetView, foldObse
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-/**
- * GY-1573: two registry accounts logged in to one provider subscription share one limit. On
- * 2026-10-09 the loop saw claude-a hit its weekly limit at 05:30Z and relaunched GY-1571 on
- * `claude`, the same Claude login, whose own probe still read quota unknown; the session opened
- * straight onto the spent usage-limit menu. Each account now carries the provider identity its
- * executor read from the login, and an exhaustion recorded with a reset holds every account of
- * that identity until the reset, naming the twin; an unknown or different identity is unaffected.
- */
+// Accounts with matching identities still need their own failed request (GY-3467).
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const HOST = 'vishrog';
@@ -43,7 +36,7 @@ const observe = (registry: AgentRegistry, observations: { account: string; state
   foldObservations(registry, { host: HOST, observations: observations.map(({ account, state, resetsAt = null, reason = null, identity }) => ({ account, quota: { loggedIn: true, state, usage: [], resetsAt, reason, ...identity === undefined ? {} : { identity } } })) },
     { actor: 'executor', at: new Date(at).toISOString() });
 
-test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhausted with a reset holds every registry account of the same provider identity until that reset, and master registry names the twin and the exhaustion; a different or unknown identity is unaffected', async () => {
+test('unit:shared-identity-exhaustion-is-local — matching identities do not spread an exhaustion to an unchecked account', async () => {
   const registry = registryOf([{ name: 'claude-a' }, { name: 'claude' }, { name: 'claude-c' }, { name: 'claude-d' }]);
   observe(registry, [
     { account: 'claude-a', state: 'exhausted', resetsAt, reason: notice, identity: shared },
@@ -53,24 +46,23 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   ], spentAt);
   const now = spentAt + 60_000;
   const reason = accountIneligibility(registry, registry.accounts.find(account => account.name === 'claude')!, now, HOST);
-  assert.equal(reason, `claude quota is exhausted until ${resetsAt}: it is the same provider login as claude-a, whose quota is exhausted (${notice})`);
+  assert.equal(reason, null);
   assert.equal(accountIneligibility(registry, registry.accounts.find(account => account.name === 'claude-c')!, now, HOST), null, 'a different identity is unaffected');
   assert.equal(accountIneligibility(registry, registry.accounts.find(account => account.name === 'claude-d')!, now, HOST), null, 'an unknown identity is unaffected');
 
   // `master registry` renders this view: the twin is ineligible, naming claude-a and the observed exhaustion.
   const view = fleetView(registry, now, HOST);
   const twin = view.accounts.find(account => account.name === 'claude')!;
-  assert.equal(twin.eligible, false);
-  assert.match(twin.ineligible!, /same provider login as claude-a/);
-  assert.match(twin.ineligible!, /You've hit your weekly limit/);
-  assert.equal(view.roles.find(role => role.role === 'worker')!.next, 'claude-c');
+  assert.equal(twin.eligible, true);
+  assert.equal(twin.ineligible, null);
+  assert.equal(view.roles.find(role => role.role === 'worker')!.next, 'claude');
   const chosen = chooseSession(registry, { role: 'worker', host: HOST }, now);
-  assert.equal(chosen.account?.name, 'claude-c');
-  assert.deepEqual(chosen.skipped.map(skip => skip.account), ['claude-a', 'claude']);
+  assert.equal(chosen.account?.name, 'claude');
+  assert.deepEqual(chosen.skipped.map(skip => skip.account), ['claude-a']);
 
   // A later probe that cannot read the login file leaves the identity it last read: the login has not been seen to change.
   observe(registry, [{ account: 'claude', state: 'unknown' }], now);
-  assert.match(accountIneligibility(registry, registry.accounts.find(account => account.name === 'claude')!, now, HOST)!, /same provider login as claude-a/);
+  assert.equal(accountIneligibility(registry, registry.accounts.find(account => account.name === 'claude')!, now, HOST), null);
 
   // The hold ends with the reset.
   assert.equal(accountIneligibility(registry, registry.accounts.find(account => account.name === 'claude')!, Date.parse(resetsAt) + 1, HOST), null);
@@ -78,7 +70,7 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   // A home logged in afresh with an API key reads a login naming no account: the former identity goes, and with it the hold.
   const relogged = registryOf([{ name: 'claude-a' }, { name: 'claude' }]);
   observe(relogged, [{ account: 'claude-a', state: 'exhausted', resetsAt, reason: notice, identity: shared }, { account: 'claude', state: 'unknown', identity: shared }], spentAt);
-  assert.match(accountIneligibility(relogged, relogged.accounts.find(account => account.name === 'claude')!, now, HOST)!, /same provider login as claude-a/);
+  assert.equal(accountIneligibility(relogged, relogged.accounts.find(account => account.name === 'claude')!, now, HOST), null);
   observe(relogged, [{ account: 'claude', state: 'unknown', identity: null }], now);
   assert.equal(relogged.accounts.find(account => account.name === 'claude')!.quota.identity, null);
   assert.equal(accountIneligibility(relogged, relogged.accounts.find(account => account.name === 'claude')!, now, HOST), null, 'a changed login is not held under its former identity');
@@ -94,7 +86,7 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   observe(marked, [{ account: 'claude-a', state: 'unknown', identity: shared }, { account: 'claude', state: 'unknown', identity: shared }], spentAt);
   const next = applyRegistryMutation(marked, 'account.quota', { name: 'claude-a', quota: { state: 'exhausted', resetsAt }, reason: 'weekly limit' }, { actor: 'operator', at: new Date(spentAt).toISOString() }).registry;
   assert.equal(next.accounts.find(account => account.name === 'claude-a')!.quota.identity, shared);
-  assert.match(accountIneligibility(next, next.accounts.find(account => account.name === 'claude')!, now, HOST)!, /same provider login as claude-a, whose quota is marked exhausted by operator/);
+  assert.equal(accountIneligibility(next, next.accounts.find(account => account.name === 'claude')!, now, HOST), null);
 
   // An exhaustion with no reset time holds only the account it was recorded on.
   const unbounded = registryOf([{ name: 'claude-a' }, { name: 'claude' }]);
@@ -113,9 +105,9 @@ test('unit:shared-identity-exhaustion-holds-twin — an account recorded exhaust
   observe(hosts, [{ account: 'claude-a', state: 'unknown', identity: shared }], spentAt);
   foldObservations(hosts, { host: 'otherhost', observations: [{ account: 'claude', quota: { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null, identity: shared } }] }, { actor: 'executor', at: new Date(spentAt).toISOString() });
   const reported = await temporaryDirectory('shared-identity-report'); directories.push(reported);
-  const registryClient = { observe: async (request: { host: string; observations: { account: string; quota: QuotaObservation }[] }) => foldObservations(hosts, request, { actor: 'executor', at: new Date(now).toISOString() }) };
-  await recordObservedExhaustion({ credentialFile: join(reported, 'coordinator.token'), hostId: HOST }, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, now, { registry: registryClient });
-  assert.match(accountIneligibility(hosts, hosts.accounts.find(account => account.name === 'claude')!, now, 'otherhost')!, /^claude quota is exhausted until 2026-10-11T05:00:00\.000Z: it is the same provider login as claude-a/);
+  const registryClient = { document: async () => hosts, observe: async (request: { host: string; observations: { account: string; quota: QuotaObservation }[] }) => foldObservations(hosts, request, { actor: 'executor', at: new Date(now).toISOString() }) };
+  await recordObservedExhaustion({ credentialFile: join(reported, 'coordinator.token'), hostId: HOST }, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, now, { registry: registryClient, smoke: async () => ({ ok: false, error: `Usage limit reached; resets at ${resetsAt}` }) });
+  assert.equal(accountIneligibility(hosts, hosts.accounts.find(account => account.name === 'claude')!, now, 'otherhost'), null);
 
 });
 
@@ -131,7 +123,7 @@ async function claudeHomes(root: string) {
   return { 'claude-a': await login('claude-a', 'account-1'), claude: await login('claude', 'account-1'), 'claude-c': await login('claude-c', 'account-2') };
 }
 
-test('unit:shared-identity-dispatch-replay — replaying 2026-10-09 05:30Z (claude-a exhausted, claude on the same login, GY-1571 ready), dispatch selects neither claude-a nor claude and launches on claude-c', async () => {
+test('unit:shared-identity-dispatch-replay — dispatch skips only the account whose own request failed', async () => {
   const scratch = await temporaryDirectory('shared-identity-replay'); directories.push(scratch);
   const homes = await claudeHomes(scratch);
   const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(scratch, 'coordinator.token'), cliPath: launcher,
@@ -154,18 +146,16 @@ test('unit:shared-identity-dispatch-replay — replaying 2026-10-09 05:30Z (clau
     observe: async request => foldObservations(registry, request, { actor: 'executor', at: new Date(now).toISOString() }),
   };
   // 05:30:28Z: the loop reads claude-a's session notice, holds claude-a until its reset and tells the registry at once.
-  await recordObservedExhaustion(config, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, spentAt, { registry: client });
+  await recordObservedExhaustion(config, 'claude-a', { at: new Date(spentAt).toISOString(), resetsAt, reason: notice, role: 'worker', profile: 'builder', work: 'GY-1571' }, spentAt, { registry: client, smoke: async () => ({ ok: false, error: `Usage limit reached; resets at ${resetsAt}` }) });
   assert.equal(registry.accounts.find(account => account.name === 'claude-a')!.quota.state, 'exhausted', 'the registry holds claude-a before any launch asks');
 
   // GY-1571 is ready: the next worker launch asks the registry for a session. Usage is not read (claude's would say unknown).
   const selected = await selectAccount(config, 'worker', { name: 'builder', principal: 'graphyard-claude-2' }, { registry: client, quota: false, cacheMs: 0, now: () => now, work: 'GY-1571' });
-  assert.equal(selected.account?.name, 'claude-c', 'the launch lands on a healthy login');
+  assert.equal(selected.account?.name, 'claude', 'the launch lands on a healthy login');
   const skipped = Object.fromEntries(selected.skipped.map(skip => [skip.environment, skip]));
-  assert.deepEqual(Object.keys(skipped).sort(), ['claude', 'claude-a']);
-  assert.match(skipped['claude-a'].reason, /claude-a exhausted its quota mid-session/);
-  assert.match(skipped.claude.reason, /^claude quota is exhausted until 2026-10-11T05:00:00\.000Z: it is the same provider login as claude-a/);
-  assert.equal(skipped.claude.cause, 'exhausted', 'the twin waits for the reset like any spent account');
-  assert.equal(registry.sessions.at(-1)!.account, 'claude-c');
+  assert.deepEqual(Object.keys(skipped).sort(), ['claude-a']);
+  assert.match(skipped['claude-a'].reason, /Usage limit reached/);
+  assert.equal(registry.sessions.at(-1)!.account, 'claude');
   assert.equal(registry.sessions.at(-1)!.work, 'GY-1571');
 
   await assert.rejects(selectAccount(config, 'reviewer', { name: 'legacy', accounts: ['claude-c'] }, { registry: client, quota: false }), /must be configured in the control-plane registry/);

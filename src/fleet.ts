@@ -1,6 +1,5 @@
-import { parseResetTime } from './model/capacity.js';
-import { detectLoggedOut } from './master/logged-out.js';
-import { foldObservation } from './model/account-quota.js';
+import { detectLoggedOut, runtimeResetTime } from './master/runtime-prompt.js';
+import { foldObservations } from './model/registry-sessions.js';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { access, readdir, realpath, stat } from 'node:fs/promises';
@@ -164,9 +163,6 @@ async function readAccount(account: FleetAccount, runtime: FleetRuntime, probe: 
   const home = account.credential.home, kind = builtinProbe(runtime);
   const unknown = { quota: { loggedIn: null, state: 'unknown' as const, usage: [], resetsAt: null, reason: null }, health: null };
   if (!home) return unknown;
-  // GY-3414: a confined session (the master's) masks every other account's home with an empty,
-  // unreadable tmpfs, so what it reads there is unknown, never a logout.
-  if (await readdir(home).then(entries => !entries.length && !!process.env[masterConfinementVariable], (error: NodeJS.ErrnoException) => error.code === 'EACCES')) return unknown;
   if (kind) {
     const planInfo = deriveAccountPlan(account, allAccounts);
     // A Pi account is read through the OpenCode probe's files only: `opencode auth list` knows nothing of Pi's login.
@@ -188,7 +184,7 @@ async function readAccount(account: FleetAccount, runtime: FleetRuntime, probe: 
 const checksInFlight = new Map<string, Promise<QuotaObservation>>();
 export const accountCheckIntervalMs = 30 * 60_000;
 export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => account.enabled &&
-  (account.quota.state === 'exhausted' || account.quota.loggedIn === false || smokeTestedKinds.includes(runtime.launch.kind) && (!account.smoke || smokeFailureDue(account, now)));
+  (account.quota.state === 'exhausted' || account.quota.loggedIn === false || smokeTestedKinds.includes(runtime?.launch.kind) && (!account.smoke || smokeFailureDue(account, now)));
 
 /** Run a tiny request with precisely this account's launch login; narratives are never evidence. */
 export async function checkAccountLive(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, model: string | null = account.model): Promise<QuotaObservation> {
@@ -202,11 +198,11 @@ export async function checkAccountLive(account: FleetAccount, runtime: FleetRunt
     let result: SmokeResult;
     try { result = await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs })))(target); }
     catch (error) { result = { ok: false, error: String(error) }; }
-    const reason = result.ok ? null : (result.error || 'The live request failed').slice(0, 500);
-    const reset = reason ? parseResetTime(reason, now) : null;
+    const reason = result.ok ? null : (result.error || 'The live request failed').replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim().slice(0, 500);
+    const reset = reason ? runtimeResetTime(reason, runtime.launch.kind, now) : null;
     const nextCheck = reset && Date.parse(reset) > now ? reset : new Date(now + accountCheckIntervalMs).toISOString();
     const quota: QuotaObservation = { loggedIn: result.ok || !detectLoggedOut(reason ?? ''), state: result.ok ? 'available' : 'exhausted', usage: [], since: new Date(now).toISOString(),
-      resetsAt: result.ok ? null : nextCheck, reason, ...(result.ok ? {} : { session: reset ? 'named' as const : 'guessed' as const }) };
+      resetsAt: result.ok ? null : nextCheck, reason, ...(result.ok ? {} : { session: reset && Date.parse(reset) > now ? 'named' as const : 'guessed' as const }) };
     if (home) recordHostAccountCheck(home, { at: new Date(now).toISOString(), nextCheck, quota });
     return quota;
   })().finally(() => checksInFlight.delete(key));
@@ -216,10 +212,24 @@ export async function checkAccountLive(account: FleetAccount, runtime: FleetRunt
 
 export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, allAccounts: readonly FleetAccount[] = [account], model = account.model): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
   const now = probe.now?.() ?? Date.now(), cached = account.credential.home ? hostAccountCheck(account.credential.home) : null;
+  // Preserve the confined master's unreadable-home rule: only the host executor can test these logins.
+  const home = account.credential.home;
+  if (home && await readdir(home).then(entries => !entries.length && !!process.env[masterConfinementVariable], (error: NodeJS.ErrnoException) => error.code === 'EACCES'))
+    return { quota: cached?.quota ?? { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
+
+  if (!account.credential.home && account.quota.since && account.quota.state === 'exhausted' && account.quota.resetsAt && Date.parse(account.quota.resetsAt) > now) {
+    const { source: _source, observedAt: _at, observedBy: _by, ...quota } = account.quota;
+    return { quota, health: null };
+  }
+
   // An operator or session signal after the last request asks for another request immediately.
   const signalled = account.quota.state === 'exhausted' && (account.quota.source === 'operator' || !!account.quota.session && !account.quota.since)
     && (!cached || Date.parse(account.quota.observedAt ?? '') > Date.parse(cached.at));
-  if (cached && !signalled && Date.parse(cached.nextCheck) > now) return { quota: cached.quota, health: null };
+  if (cached && !signalled && Date.parse(cached.nextCheck) > now) {
+    if (cached.quota.state !== 'available') return { quota: cached.quota, health: null };
+    const reading = await readAccount(account, runtime, probe, allAccounts, model);
+    return { ...reading, quota: { ...cached.quota, usage: reading.quota.usage, identity: reading.quota.identity } };
+  }
   const reading = await readAccount(account, runtime, { ...probe, ...(account.quota.loggedIn === false ? { cacheMs: 0 } : {}) }, allAccounts, model);
   if (cached || signalled || needsSmoke(account, runtime, now) || reading.quota.state === 'exhausted')
     return { ...reading, quota: await checkAccountLive(account, runtime, probe, model) };
@@ -244,11 +254,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   }));
   const observations: { account: string; quota: QuotaObservation; health: EnvironmentHealth | null; smoke?: SmokeObservation }[] = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
   const now = probe.now?.() ?? Date.now();
-  // GY-3333: the login homes on this host are shared with every other Graphyard install on it, so
-  // what those installs hold there — live sessions, an exhaustion until a time — is read beside the
-  // home and reported with the selection: the per-account limit counts every install's sessions,
-  // and a quota hold one install marked holds the account everywhere until it resets. A record
-  // directory that cannot be read holds nothing, and the install counts as it did before.
+  // Live sessions on a login home count across every install on this host.
   const install = config.repository ?? config.url ?? host;
   // A session the control plane ended on its own side (a sweep, a removed account) frees its record here too.
   clearEndedHostAccountSessions(install, new Set(liveSessions(registry).map(session => session.id)));
@@ -260,7 +266,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
       for (const session of await hostAccountSessions(home)) if (session.install !== install) hostSessions.push({ account: observation.account, install: session.install, at: session.at });
     } catch { /* an unreadable record holds nothing */ }
   }
-  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, ...probe.prefer ? { prefer: probe.prefer } : {}, ...probe.exclude?.length ? { exclude: probe.exclude } : {}, hostSessions, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(quota.state === 'available' ? { smoke: { result: 'pass' as const, reason: null } } : smoke ? { smoke } : {}) })) });
+  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, ...probe.prefer ? { prefer: probe.prefer } : {}, ...probe.exclude?.length ? { exclude: probe.exclude } : {}, hostSessions, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(quota.since && quota.state === 'available' && local.find(entry => entry.name === account)?.smoke?.result !== 'pass' ? { smoke: { result: 'pass' as const, reason: null } } : smoke ? { smoke } : {}) })) });
   const at = new Date(now).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
   if (!chosen.selected || !chosen.account || !chosen.runtime || !chosen.model || !chosen.session)
@@ -279,27 +285,20 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string, outcome?: RunOutcome) => { record?.clear(); return client.end(chosen.session!.id, reason, outcome).then(() => true, () => false); } };
 }
 
-/**
- * Whether a role can launch from the registry right now, without choosing anything: what the
- * durable loop and `master status` read before they dispatch. Null when the registry does not
- * decide the role. `running` counts the settled document the control plane serves (GY-974): a
- * session whose lease or request has gone is already ended there, so it never holds a slot.
- * A Pi account whose only fault is a smoke failure that has aged past
- * `smokeRetestMs` reads healthy here (GY-515): the launch this admits is what runs the retest,
- * and the choice it asks for still refuses until the fresh result is folded.
- */
+/** Refresh due account checks before judging capacity, including accounts a previous hold
+ * would otherwise prevent from ever reaching selection. No session is created by this read. */
 export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}) {
   let fleet: FleetRead;
   try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null, failover: null }; }
   if (!fleet.managed) return null;
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
-  const observations = await Promise.all(fleet.registry.accounts.filter(account => account.enabled && account.credential.host === host).flatMap(account => {
+  const observations = await Promise.all(fleet.registry.accounts.filter(account => account.enabled && account.credential.host === host && (needsSmoke(account, fleet.registry.runtimes.find(runtime => runtime.name === account.runtime)!, now) || !!account.credential.home && !!hostAccountCheck(account.credential.home))).flatMap(account => {
     const runtime = fleet.registry.runtimes.find(runtime => runtime.name === account.runtime);
     return runtime ? [(async () => ({ account: account.name, ...await observeAccount(account, runtime, probe, fleet.registry.accounts, fleet.registry.models.find(model => model.name === account.model)?.id ?? undefined) }))()] : [];
   }));
   if (observations.length && fleet.client.observe && host) {
     await fleet.client.observe({ host, observations: observations.map(({ account, quota }) => ({ account, quota })) });
-    for (const observed of observations) foldObservation(fleet.registry.accounts.find(account => account.name === observed.account)!, observed.quota, { actor: host, at: new Date(now).toISOString() });
+    foldObservations(fleet.registry, { host, observations }, { actor: host, at: new Date(now).toISOString() });
   }
 
   const accounts = definition.accounts.map(name => {
