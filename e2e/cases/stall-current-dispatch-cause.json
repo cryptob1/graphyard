@@ -1,0 +1,16 @@
+{
+  "id": "stall-current-dispatch-cause",
+  "title": "The stall alarm names the current dispatch hold, not an expired launch failure, and clears once dispatch resumes",
+  "description": "A fixture install whose item recovered from a worktree launch failure (its backoff long expired, a later launch done) and a ready item with a free worker slot held by a running batch gate: after 10 minutes the loop's cycle raises the stall alarm naming the batch gate hold, not the old error, master status shows it first, and it clears once the gate settles and dispatch launches. The implementation heat hold is named the same way, a launch refusal still backing off stays visible, and an unexplained idle queue still alarms.",
+  "tags": ["master"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the alarm names the current hold in master status, never the expired failure, and clears when dispatch resumes",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/stall-current-dispatch-cause.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
