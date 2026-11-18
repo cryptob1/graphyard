@@ -1,5 +1,4 @@
 import { useState, type CSSProperties } from 'react';
-import { mergedAt } from './groups';
 import type { Work } from '../src/model';
 
 /**
@@ -60,22 +59,6 @@ export function BuildLine() {
   return <button type="button" className="build-line" title="Another one" data-decor data-build-line={index} onClick={() => setIndex(value => (value + 1) % LINES.length)}>
     <span key={index} className="typed" style={{ '--chars': line.length } as CSSProperties}>{line}</span>
   </button>;
-}
-
-const day = 24 * 60 * 60 * 1000;
-const startOfDay = (at: number) => { const date = new Date(at); date.setHours(0, 0, 0, 0); return date.getTime(); };
-/** How many items merged today, and for how many days in a row, ending today, at least one did. */
-export function shippedToday(work: Work[], now = Date.now()) {
-  const days = new Set(work.filter(w => w.stage === 'done' && !!(w.delivery?.mergedAt ?? w.observation?.mergedAt)).map(w => startOfDay(mergedAt(w))));
-  const today = startOfDay(now);
-  const count = work.filter(w => w.stage === 'done' && !!(w.delivery?.mergedAt ?? w.observation?.mergedAt) && startOfDay(mergedAt(w)) === today).length;
-  let streak = 0;
-  for (let at = today; days.has(at); at = startOfDay(at - day / 2)) streak++;
-  return { count, streak };
-}
-export function ShippedToday({ work }: { work: Work[] }) {
-  const { count, streak } = shippedToday(work);
-  return <span className="shipped-today" aria-label="Shipped today" data-decor data-shipped-today={count}>🚢 {count} shipped today{streak > 1 ? ` · 🔥 ${streak}-day streak` : ''}</span>;
 }
 
 /** The agent that built an item: the last implementer, or the lease holder. */

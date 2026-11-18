@@ -10,6 +10,8 @@ import type { GitRunner } from './merge-writer/local-observation.js';
 import { serveRecordPath, readServeRecord, type ServeCheck } from './serve-app.js';
 import { servedVerified } from './batch-gate.js';
 import { graphyardRepository } from './scenarios.js';
+import { servedCommit } from './production-watch.js';
+import type { Work } from './model/work.js';
 
 /**
  * What the deploy last served, the tip that failed and is skipped until the base moves past it, and,
@@ -452,4 +454,52 @@ export async function servingReport(root: string | null | undefined, repository:
     pending,
     serve: serve ? { url: serve.url ?? null, failure: serve.failed ? { commit: serve.failed, reason: serve.reason } : null, check: serve.check ?? null } : null,
   };
+}
+
+/** The health URL graphyard.json declares as `app.healthUrl` (GY-3452): an install that deploys elsewhere answers its live commit there. */
+export function declaredHealthUrl(root: string | null | undefined): string | null {
+  if (!root) return null;
+  try {
+    const url = JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8'))?.app?.healthUrl;
+    return typeof url === 'string' && /^https?:\/\//.test(url) ? url : null;
+  } catch { return null; }
+}
+
+let health: { url: string; at: number; commit: string | null } | null = null;
+/**
+ * The commit the health URL answers, asked at most once a minute however often the dashboard polls;
+ * null when it does not answer one. Only the first ask is awaited: later ones refresh in the
+ * background, so a slow health URL never holds /api/status.
+ */
+async function healthCommit(url: string, now: number, fetcher: typeof fetch): Promise<string | null> {
+  const ask = () => servedCommit(url, fetcher).catch(() => null);
+  if (health?.url !== url) {
+    const entry = health = { url, at: now, commit: null as string | null };
+    return entry.commit = await ask();
+  }
+  if (now - health.at >= 60_000) {
+    const entry = health; entry.at = now;
+    void ask().then(commit => { entry.commit = commit; });
+  }
+  return health.commit;
+}
+
+/** What users have (GY-3452): the live commit, and the merged items it does not contain yet, by key. */
+export interface LiveRelease { commit: string; waiting: string[] }
+
+/**
+ * The live commit — what `app.healthUrl` answers, else what the serve or deploy record (or the
+ * production watch) serves — and every merged item whose merge commit main holds but the live
+ * commit does not. Null when nothing names a live commit or the checkout cannot place it, so the
+ * dashboard claims nothing shipped.
+ */
+export async function liveRelease(root: string | null | undefined, served: string | null, main: string | null, work: readonly Pick<Work, 'key' | 'stage' | 'delivery'>[], git: GitRead | null | undefined, options: { now?: number; fetcher?: typeof fetch } = {}): Promise<LiveRelease | null> {
+  const url = declaredHealthUrl(root);
+  const answered = url ? await healthCommit(url, options.now ?? Date.now(), options.fetcher ?? fetch) : null;
+  if (!git || !main || !(answered ?? served)) return null;
+  try {
+    const commit = (await git(['rev-parse', '--verify', `${answered ?? served}^{commit}`])).trim();
+    const notLive = new Set((await git(['rev-list', `${commit}..${main}`])).split('\n').map(line => line.trim()).filter(Boolean));
+    return { commit, waiting: work.filter(item => item.stage === 'done' && item.delivery?.mergeSha && notLive.has(item.delivery.mergeSha)).map(item => item.key) };
+  } catch { return null; }
 }
