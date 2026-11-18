@@ -658,7 +658,7 @@ async function dispatchStep(cycle: Cycle) {
     state.diskHeadroom && `implementation launches waiting: disk below its floor: ${state.diskHeadroom.shortage}`,
     implementationWaiting(state),
     refusedRoles.has('worker') && 'worker launches held: the checkout is not trusted for the worker accounts (see master status)',
-    gateRun !== undefined && `implementation launches paused while the batch gate runs${gateRun ? ` on ${gateRun.tip.slice(0, 12)} since ${gateRun.startedAt}${gateRun.step ? ` (${gateRun.step})` : ''}` : ''}`,
+    gateRun !== undefined && `implementation launches paused while the batch gate runs${gateRun ? ` on ${gateRun.tip.slice(0, 12)} since ${gateRun.startedAt}` : ''}`,
   ].filter((hold): hold is string => !!hold);
   if (!holds.length) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
