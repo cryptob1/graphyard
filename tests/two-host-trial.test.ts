@@ -1,3 +1,4 @@
+import { remotePostgresShard } from './helpers/remote-postgres-shard.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -120,7 +121,10 @@ test(`${proof} — killing the second host's SSH mid-shard re-queues that shard 
     assert.deepEqual({ passed: killed.result.tests.passed, failed: killed.result.tests.failed }, { passed: files.length, failed: [] }, killed.result.logTail);
     assert.match(killed.result.logTail ?? '', new RegExp(`\\[remote\\] host ${target.replace(/\./g, '\\.')} dropped a shard: .*its shard runs on another host`, 's'));
     assert.ok(killed.lines.filter(line => !line.remote).length === files.length, 'every file finally ran on this machine');
-    assert.equal(remoteShardSummary(readRemoteShardRuns(repository.root))!.hosts.at(-1)!.state, 'away');
+    const host = remoteShardSummary(readRemoteShardRuns(repository.root))!.hosts.at(-1)!;
+    assert.equal(host.state, 'away');
+    assert.ok(host.reason?.trim(), 'master status keeps the dropped host’s SSH failure text');
+    assert.ok(killed.result.logTail?.includes(host.reason!), 'status and the trial log carry the same failure');
   } finally { await rm(slow, { force: true }); await second.start(); }
 });
 
@@ -147,4 +151,9 @@ test(`${proof} — over the second host's key a plain shell command, a read outs
   const shards = await dockerCreates(docker);
   assert.ok(shards.length > 0 && shards.every(create => create.includes('--network=none') && !create.join(' ').includes('unconfined')), 'the shards the second host did run had no network and kept their confinement');
   assert.equal(execFileSync('id', ['-u'], { encoding: 'utf8' }).trim() === '0', false, 'the host user is not root');
+});
+
+// Also exercise the reported Postgres reproducer with real rootless Docker, without fallback.
+test(`${proof} — a Postgres-backed file passes remotely through the shim under rootless Docker`, { timeout: 660_000 }, async () => {
+  await remotePostgresShard();
 });
