@@ -210,7 +210,7 @@ export const daemonStateSchema = z.object({
    * figures.
    */
   cpuPressure: z.object({ at: z.string(), avg60: z.number().min(0).max(100).nullable(), steal: z.number().min(0).max(100).nullable(),
-    stat: z.object({ total: z.number().min(0), steal: z.number().min(0) }).strict().nullable().default(null),
+    stat: z.object({ total: z.number().min(0), steal: z.number().min(0), idle: z.number().min(0).optional() }).strict().nullable().default(null),
     /** GY-3373, GY-3426: the CPU package sensor in whole degrees, averaged over the last 60 s of `samples`; null where none is readable. */
     celsius: z.number().nullable().default(null),
     /** GY-3426: the [epoch ms, degrees] readings of the last 60 s the average is taken over. */
@@ -220,6 +220,8 @@ export const daemonStateSchema = z.object({
     trialCap: z.object({ now: z.number().int().min(0), full: z.number().int().min(0) }).strict().nullable().default(null),
     /** GY-3446: the launch heat limit a temporary `launchHotCelsius` sets while it stands; absent, the default. */
     hotCelsius: z.number().int().optional() }).strict().nullable().default(null),
+  /** GY-3418: the host's busy CPU-seconds per UTC day, from the /proc/stat counters above: the first day measured (the baseline) and the last eight. */
+  cpuSeconds: z.object({ days: z.record(z.string().max(10), z.number().min(0)) }).strict().default({ days: {} }),
   /** GY-3438: every live agent session's scope as the last cycle read it from its cgroup — CPU in cores since the cycle before, memory, its fair share of both, and since when it has used far more than its share of a saturated machine. */
   sessions: z.array(z.object({ unit: z.string().max(200), name: z.string().max(200).optional(), at: z.string(), usec: z.number().min(0), cpu: z.number().min(0).nullable(), cpuShare: z.number().min(0),
     memory: z.number().min(0), memoryShare: z.number().min(0), overSince: z.string().nullable() }).strict()).default([]),

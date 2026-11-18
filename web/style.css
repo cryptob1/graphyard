@@ -242,14 +242,15 @@ img.mark{width:26px;height:26px}
 .time-legend{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 20px;font-size:var(--type-small)}.time-legend i{width:10px;height:10px;border-radius:2px;margin-right:var(--space-2);vertical-align:-1px}.time-legend .slowest{color:var(--needs-you)}
 /* Every animation respects the viewer's reduced-motion setting. */
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}.step-seg.current,.now-dot,.now-dot::before{animation:none;transition:none}}
-@media(max-width:1100px){.row-head,.work-row{grid-template-columns:72px minmax(0,1fr) 300px 130px 70px auto}.insight-charts{grid-template-columns:1fr}}
+/* GY-3479: below 1100 px a row wraps — title, then steps, then who acts next and its time — so no cell runs past the row. */
+@media(max-width:1100px){.row-head{display:none}.work-row{grid-template-columns:72px minmax(0,1fr) auto;grid-template-areas:"key main time" ". steps steps" ". who decide";row-gap:var(--space-2)}.row-key{grid-area:key}.row-main{grid-area:main}.row-time{grid-area:time;text-align:right}.row-steps{grid-area:steps}.row-steps:empty{display:none}.row-who{grid-area:who}.row-who::before{content:'Next: '}.decide{grid-area:decide}.insight-charts{grid-template-columns:1fr}}
 @media(max-width:1000px){.sidebar{width:200px;min-width:200px}.main{padding:var(--space-5)}}
 /* Phone: the sidebar folds into a menu, tiles become chips, rows become cards. */
 @media(max-width:650px){
   .shell{display:block}.sidebar{width:100%;min-width:0;border-right:0;border-bottom:1px solid var(--border)}
   .sidebar-inner{position:static;height:auto;display:block;padding:var(--space-3) var(--space-4)}
   .menu-button{display:flex;align-items:center;justify-content:center}
-  .sidebar .primary-nav,.sidebar .sidebar-bottom{display:none}.sidebar.open .primary-nav{display:flex;flex-direction:column;margin-top:var(--space-2)}.sidebar.open .sidebar-bottom{display:flex;margin-top:var(--space-3)}
+  .sidebar .primary-nav{display:none}.sidebar.open .primary-nav{display:flex;flex-direction:column;margin-top:var(--space-2)}.sidebar.open .sidebar-bottom{display:flex;margin-top:var(--space-3)}
   .sidebar .sidebar-bottom p{display:block}
   .main{padding:20px var(--space-4);gap:var(--space-4)}
   .main .page-heading,.page-heading{flex-direction:column;align-items:stretch}.main .page-heading h1{font-size:24px}
@@ -388,6 +389,8 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 .terminal-session{color:var(--text)}
 .terminal-host{flex:1;min-height:0;min-width:0;overflow:hidden;background:#000}
 .terminal-host .xterm{height:100%}
+/* GY-3479: xterm parks its input textarea at left:-9999em; focusing it there panned a phone's view sideways, cutting the sidebar. It stays invisible inside the terminal instead. */
+.terminal-host .xterm .xterm-helper-textarea{left:0}
 .terminal-keys{display:none;flex-shrink:0;gap:3px}
 @media(max-width:650px){.terminal-keys{display:flex}.terminal-keys button{flex:1;min-width:0;padding:12px 2px;font-size:11px}.terminal-info{font-size:11px}}
 
@@ -502,8 +505,10 @@ kbd{font-family:var(--font-mono);font-size:11px;color:var(--text);background:var
 .replay-tools{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.replay-tools h2{margin:0 auto 0 0}.replay-tools time{font-size:12px;color:var(--muted)}
 .work-replay input[type=range]{width:100%;accent-color:var(--accent)}.replay-scroll{overflow:auto;max-height:420px;margin-top:12px}.replay-yard{position:relative;min-width:1020px}.replay-columns{position:absolute;inset:0;display:grid;grid-template-columns:repeat(6,1fr)}.replay-columns>div{border-left:1px solid var(--border);padding:8px;font-size:12px}.replay-dot{position:absolute;width:16.3%;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px;padding:4px 6px;transition:left .5s ease,top .5s ease}.replay-dot>span:first-child{color:var(--accent)}
 .replay-panel{margin:24px 0;border:1px solid var(--border);border-radius:12px}.replay-panel>summary{padding:16px 20px;cursor:pointer;font-weight:550}.replay-panel .work-replay{margin:0;border:0}.replay-tools button[aria-pressed=false]{background:transparent;color:var(--text-2);border-color:var(--border)}
-/* GY-3310: the served build in the bottom-left corner; the sidebar keeps its strip clear, and the page's own bottom padding (never the shell's, which would make the document scroll) clears it in main. */
+/* GY-3310: the served build, part of the sidebar foot (GY-3479), pinned to the bottom-left corner; the sidebar keeps its strip clear, and the page's own bottom padding (never the shell's, which would make the document scroll) clears it in main.
+   On a phone the folded foot shows only the label; the open menu shows it in the foot's own flow. */
 .version-label{position:fixed;left:0;bottom:0;z-index:5;padding:2px 8px;font-size:10px;line-height:14px;color:var(--text-3);background:var(--bg);font-family:var(--font-mono,monospace);pointer-events:none}@media(min-width:651px){.sidebar-inner{padding-bottom:calc(var(--space-5) + 18px)}}
+@media(max-width:650px){.sidebar:not(.open) .sidebar-bottom{display:contents}.sidebar:not(.open) .sidebar-bottom>:not(.version-label){display:none}.sidebar.open .version-label{position:static;padding:0}}
 /* Figure tables (GY-3315, GY-3322): the shared table for numbers, right-aligned under their headers in tabular figures;
    it stays a table on a phone, where the detail columns fold away. Inside a card the table drops its own border. */
 .table-scroll{overflow-x:auto;max-width:100%}.panel .sessions-table{border:0}
