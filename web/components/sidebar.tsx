@@ -44,6 +44,15 @@ export default function Sidebar({ entries, dashboard }: { entries: (Entry | null
       <span className="connection"><span className={`dot ${connected ? 'live' : ''}`}/>{connected ? `Live · updated ${lastUpdated ?? 'now'}` : `Disconnected · last updated ${lastUpdated ?? 'never'}`}</span>
       {actor && <span className="signed-in" title="Signed in as">{actor.id} · {actor.role}</span>}
       <span className="sidebar-links"><button type="button" className="text-button" aria-label="Delivery" title="Delivery defaults" onClick={() => go('delivery')}><NavIcon name="delivery"/></button><button type="button" className="text-button" onClick={() => go('guide')}>Help</button><button type="button" className="text-button theme-button" aria-label={`Switch theme to ${theme === 'night' ? 'Daylight' : 'Night Yard'}`} title="Night Yard is the default look; Daylight is the light one" onClick={() => setTheme(theme === 'night' ? 'daylight' : 'night')}>{theme === 'night' ? '☀ Daylight' : '☾ Night Yard'}</button><button type="button" className="text-button" onClick={signOut}>{dashboard.token ? 'Sign out' : 'Sign in'}</button></span>
+      {status && <VersionLabel status={status}/>}
     </div>
   </div></aside>;
+}
+/** GY-3310: the version and serving commit each status poll reports, in the sidebar foot, pinned to the bottom-left corner (GY-3479); nothing until one is known. */
+function VersionLabel({ status }: { status: any }) {
+  const commit: string | undefined = status.build?.commit;
+  const version: string | undefined = status.release?.version && !status.release.version.startsWith('unreleased') ? status.release.version : undefined;
+  const parts = [version && `v${version}`, commit && commit.slice(0, 7)].filter(Boolean);
+  if (!parts.length) return null;
+  return <span className="version-label" title={commit}>Graphyard {parts.join(' · ')}</span>;
 }
