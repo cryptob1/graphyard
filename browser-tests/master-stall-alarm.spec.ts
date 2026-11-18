@@ -53,8 +53,8 @@ test('e2e:stall-alarm — the Master page shows the stall alarm with its cause w
     const state = emptyDaemonState({ url: 'http://127.0.0.1:9', repository: 'fixture/shop' } as never);
     state.cpuPressure = { at: new Date(start).toISOString(), avg60: 20, steal: 0, stat: null, celsius: 96, samples: [], testBudget: null, trialCap: null };
     const item = { key: 'GY-1', stage: 'ready', ready: true, updatedAt: new Date(start).toISOString(), sessions: [] } as unknown as Work;
-    // Dispatch names its heat hold, as the loop passes it (GY-3473).
-    const holds = [implementationWaiting(state)].filter((hold): hold is string => !!hold);
+    // GY-3473: the cause is dispatch's own hold this cycle, as the loop passes it.
+    const holds = [implementationWaiting(state)!];
     const alarm = stallAlarm({ now: start + 11 * 60_000, open: [item], ready: [item], freeSlots: 1, holds, state, registry: null, serving: null });
     expect(alarm).toContain('Cause: launches waiting: CPU 96C');
     await loopRead(url, alarm);
