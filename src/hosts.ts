@@ -88,6 +88,7 @@ else
   "$dir/rootlesskit" --version >/dev/null && "$dir/slirp4netns" --version >/dev/null || { echo "The fetched rootless tools do not run on $arch." >&2; exit 1; }
   setuptool="$dir/dockerd-rootless-setuptool.sh"
 fi
+install -d "$home/.graphyard"
 chown -R "$user:$user" "$home/.graphyard"
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
 sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" PATH="$(dirname "$setuptool"):$PATH" "$setuptool" install

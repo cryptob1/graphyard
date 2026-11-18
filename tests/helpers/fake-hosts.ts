@@ -142,6 +142,8 @@ mkdir -p "$path"
   chown: `#!/bin/sh
 D='${dir}'
 echo "chown $*" >> "$D/log"
+for last; do :; done
+[ -e "$last" ] || { echo "chown: cannot access '$last': No such file or directory" >&2; exit 1; }
 `,
   grep: `#!/bin/sh
 D='${dir}'
