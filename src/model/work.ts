@@ -112,6 +112,13 @@ export interface Observation {
 export interface UnsyncedRevision { policyRevision: number; at: string; by: string; changed: string[] }
 /** GY-3298: a master message to whichever worker holds the item; the sync that shows it acknowledges it under that worker's epoch. */
 export interface WorkerMessage { id: string; at: string; by: string; text: string; acknowledged?: { at: string; by: string; epoch: number } }
+/**
+ * GY-3393: the owner's taste of one delivered item, recorded from the Work page's Taste feed. A
+ * taste gates nothing — the delivery is complete without one, and no other item waits on it.
+ * `good` records the look. `send-back` files the note as a follow-up item's reason beside a
+ * proposed master lesson carrying the note; the delivered item itself stays delivered.
+ */
+export interface Taste { verdict: 'good' | 'send-back'; at: string; by: string; note?: string; followUp?: { id: string; key: string } }
 /** GY-3266: what one requirements revision changed, one line per criterion — added, changed or removed. */
 export function criteriaChanges(previous: readonly Criterion[], revised: readonly Criterion[]): string[] {
   const before = new Map(previous.map(ac => [ac.id, ac.text])), after = new Map(revised.map(ac => [ac.id, ac.text]));
@@ -172,6 +179,10 @@ export interface Work extends Create {
   reworkRequested: boolean;
   /** The last rework applied: its reason, the binding the loop sent it back on, and when (GY-1569's brief). */
   lastRework?: { reason: string; binding: string | null; at: string } | null;
+  /** GY-3393: the owner's taste of this delivered item, recorded after delivery; see Taste. */
+  taste?: Taste | null;
+  /** GY-3393: the plain `summary` sentence as a settled delivery's snapshot carries it beside its `summary: true` marker (model/work-summary.ts). */
+  plainSummary?: string;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   /** Recorded before GY-1235 and only cleared since: GitHub merges on every passing gate, with no separate authorization. */
   mergeAuthorization?: { sha: string; baseSha: string; policyRevision: number; at: string } | null;
