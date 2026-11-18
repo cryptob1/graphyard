@@ -10,7 +10,7 @@ import { basename, dirname, join } from 'node:path';
 import { homedir, hostname, tmpdir } from 'node:os';
 import type { ChildRun } from '../child-runner.js';
 import { shellQuote } from '../shell-quote.js';
-import { probeHost, readHosts, sshTarget } from '../hosts.js';
+import { outdatedShimReason, probeHost, readHosts, sshTarget } from '../hosts.js';
 import { trialContainerFault, trialHotCelsius } from './trial-load.js';
 
 /** One host's reading: cores, cores busy (1-minute load), the share of CPU stolen, and its hottest CPU sensor against the heat limit. */
@@ -258,3 +258,7 @@ export function remoteShardSummary(runs: readonly RemoteShardRun[]) {
   };
 }
 
+
+/** GY-3476: one attention line for each host the latest trial left away because its shim is older than this release. */
+export const outdatedShimAttention = (runs: readonly RemoteShardRun[]) => (runs.at(-1)?.hosts ?? []).filter(host => host.away && host.reason === outdatedShimReason(host.name)).map(host =>
+  ({ subject: `host ${host.name}`, text: `${host.name} takes no trial shards: its graphyard-host-shim is older than this release`, next: `Run graphyard host prepare and, with sudo on ${host.name}, the script it prints` }));

@@ -1,0 +1,13 @@
+{
+  "id": "rework-yields-to-fresh",
+  "title": "An item on its fifth rework round waits behind fresh work of the same priority",
+  "description": "The real loop cycle with two worker slots, a ready item on its fifth rework round and two fresh equal-priority items: the first cycle launches the two fresh items, and the rework launches when a slot frees.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Two fresh items launch before the fifth-round rework",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/rework-yields-to-fresh.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

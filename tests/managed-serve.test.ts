@@ -230,7 +230,7 @@ test('unit:tests/managed-serve.test.ts — a repository declaring no node applic
   assert.equal(readServeRecord(serveRecordPath(root)), null, 'nothing was recorded');
 
   assert.deepEqual((await statusOf(root, 'owner/game')).serving,
-    { unconfigured: true, commit: null, main: main.slice(0, 12), atMain: null, failedDeploy: null, serve: null });
+    { onboarding: { onboarded: false, fault: 'Declare e2e.serve in graphyard.json to start the real application.', features: [] }, unconfigured: true, commit: null, main: main.slice(0, 12), atMain: null, failedDeploy: null, serve: null });
   // doctor prints no serve line for a repository that declares nothing.
   const doctorInput = { root, env: {}, status: null, reachable: true, environments: '/nonexistent', sandbox: () => null };
   assert.equal((await setupFromZeroChecks(doctorInput)).find(check => check.id === 'serve'), undefined);
@@ -280,23 +280,23 @@ test('unit:tests/managed-serve.test.ts — the dashboard release line links the 
   // A URL is present: the Served line carries the link.
   const served = markup({ serving, deploy: null });
   assert.match(served, new RegExp(`href="${url}"`));
-  assert.match(text(served), new RegExp(`Serving ${'a'.repeat(8)} .* Served \\u00b7 127\\.0\\.0\\.1:4400`));
+  assert.match(text(served), new RegExp(`Live: ${'a'.repeat(8)} .* Served \\u00b7 127\\.0\\.0\\.1:4400`));
 
   // The last build failure is named beside the commit that still serves, and the link stands.
-  // The required cases' verdict (GY-2983) names itself between them: not yet run while no check
-  // is recorded, verified once every required case passed, the failing case and step once one broke.
+  // The required cases' verdict (GY-2983) names itself between them once recorded: verified once
+  // every required case passed, the failing case and step once one broke.
   const failing = markup({ serving: { ...serving, commit: 'b'.repeat(40), atMain: false, pending: 2,
     failedDeploy: { tip: 'c'.repeat(40), reason: 'the build was told to fail', restoring: null },
     serve: { url, failure: { commit: 'c'.repeat(40), reason: 'the build was told to fail' } } }, deploy: null });
-  assert.match(text(failing), /Serving b{8} · 2 merged changes not carried yet · not yet run · build of c{8} failed: the build was told to fail · Served · 127\.0\.0\.1:4400/);
+  assert.match(text(failing), /Live: b{8} · 2 changes not live yet · build of c{8} failed: the build was told to fail · Served · 127\.0\.0\.1:4400/);
 
   const verified = markup({ serving: { ...serving, commit: 'b'.repeat(40), atMain: false, pending: 2,
     serve: { url, failure: null, check: { verified: true, case: null, step: null, reason: null } } }, deploy: null });
-  assert.match(text(verified), /Serving b{8} · 2 merged changes not carried yet · verified · Served · 127\.0\.0\.1:4400/);
+  assert.match(text(verified), /Live: b{8} · 2 changes not live yet · verified · Served · 127\.0\.0\.1:4400/);
 
   const brokenCase = markup({ serving: { ...serving, commit: 'b'.repeat(40), atMain: false, pending: 2,
     serve: { url, failure: null, check: { verified: false, case: 'fixture-home', step: 'step 1 GET /ready', reason: 'expected status 200, got 404' } } }, deploy: null });
-  assert.match(text(brokenCase), /Serving b{8} · 2 merged changes not carried yet · failing fixture-home: step 1 GET \/ready · Served · 127\.0\.0\.1:4400/);
+  assert.match(text(brokenCase), /Live: b{8} · 2 changes not live yet · failing fixture-home: step 1 GET \/ready · Served · 127\.0\.0\.1:4400/);
 
   // Nothing served yet (the first build failed): no served commit is claimed, the failure is named, the URL links.
   const unserved = markup({ serving: { ...serving, unconfigured: true, commit: null, atMain: null, pending: null,
@@ -304,7 +304,7 @@ test('unit:tests/managed-serve.test.ts — the dashboard release line links the 
     serve: { url, failure: { commit: 'c'.repeat(40), reason: 'the build was told to fail' } } }, deploy: null });
   assert.match(text(unserved), /No serve yet · main a{8} · build of c{8} failed: the build was told to fail · Served · 127\.0\.0\.1:4400/);
 
-  // Nothing declared: the managed install's line stays exactly what it was (GY-2964).
-  assert.match(text(markup({ serving: { unconfigured: true, commit: null, main: 'd'.repeat(40), atMain: null, failedDeploy: null, pending: null, serve: null },
-    deploy: { repository: 'owner/game', configured: false, tip: null, at: null, main: 'd'.repeat(40), pending: null } })), new RegExp(`No deploy configured · main ${'d'.repeat(8)}`));
+  // Nothing declared and no deploy configured: no release line (GY-3483).
+  assert.equal(text(markup({ serving: { unconfigured: true, commit: null, main: 'd'.repeat(40), atMain: null, failedDeploy: null, pending: null, serve: null },
+    deploy: { repository: 'owner/game', configured: false, tip: null, at: null, main: 'd'.repeat(40), pending: null } })), '');
 });

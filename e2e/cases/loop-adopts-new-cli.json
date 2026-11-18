@@ -1,0 +1,14 @@
+{
+  "id": "loop-adopts-new-cli",
+  "title": "After a deploy changes the CLI release, the loop restarts onto it by itself",
+  "description": "A deploy serves a new CLI release and moves master.json cliPath to it while the loop runs with merge trials in flight: the loop restarts through its supervisor unit in the next cycle instead of only logging the refused config change, leaves its trials for the next loop to adopt, and master status shows the loop on the new release without a manual restart.",
+  "tags": ["regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "The loop adopts a deployed CLI release without a manual restart",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/loop-adopts-new-cli.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

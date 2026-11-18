@@ -7,7 +7,7 @@ import { join, resolve } from 'node:path';
 import { signInDatabase } from '../tests/helpers/sign-in-database';
 import { serveXterm } from './xterm';
 
-test('e2e:master-page-terminal-refused — when the terminal cannot start, the Master page says "refused:" with the cause, not "Detached"', async ({ browser }) => {
+test('e2e:master-page-terminal-refused — when the terminal cannot start, the Master page says the cause, not "Detached"', async ({ browser }) => {
   // Its own database and server start cold inside the spec, and the whole suite runs beside it in
   // parallel, so like its siblings (master-page-ux, master-page-paste) it carries a budget that
   // load cannot eat; the refusal it asserts is unchanged.
@@ -25,12 +25,12 @@ test('e2e:master-page-terminal-refused — when the terminal cannot start, the M
     let connections = 0;
     page.on('websocket', () => connections++);
     await page.goto(`${url}/#sign-in=${code}&master`);
-    await expect(page.getByRole('status')).toContainText('refused: herdr is not installed', { timeout: 25_000 });
+    await expect(page.getByRole('status')).toContainText('herdr is not installed', { timeout: 25_000 });
     await expect(page.getByRole('status')).not.toContainText('Detached');
     // Longer than the maximum reconnect delay: a refusal must remain stable.
     await page.waitForTimeout(2500);
     expect(connections).toBe(1);
-    await expect(page.getByRole('status')).toContainText('refused: herdr is not installed');
+    await expect(page.getByRole('status')).toContainText('herdr is not installed');
 
     // An expired token is refused before upgrade; browsers conceal its HTTP status.
     await page.addInitScript(() => {

@@ -137,11 +137,13 @@ for a in "$@"; do
   esac
 done
 mkdir -p "$path"
-[ -n "$mode" ] && /usr/bin/chmod "$mode" "$path"
+[ -z "$mode" ] || /usr/bin/chmod "$mode" "$path"
 `,
   chown: `#!/bin/sh
 D='${dir}'
 echo "chown $*" >> "$D/log"
+for last; do :; done
+[ -e "$last" ] || { echo "chown: cannot access '$last': No such file or directory" >&2; exit 1; }
 `,
   grep: `#!/bin/sh
 D='${dir}'

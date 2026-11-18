@@ -5,12 +5,10 @@ import { serveXterm } from './xterm';
 
 // GY-3272 AC-2: the dashboard is keyboard-first — Cmd/Ctrl+K opens the palette (an item key and
 // Enter opens that item), j/k walk the Work rows and Enter opens the one under the cursor,
-// g m opens Master (g w Work, g s Setup), ? shows the shortcut sheet — and the top bar's live
-// strip counts the same numbers the Workers page and the ledger read off this board.
-const ledger = (item: any, state: string) => ({ key: item.key, state, head: item.candidate.sha, baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, refusal: null, events: 1 });
-/** The board fixture with one merge trial out (GY-21 pushed) and one merge from tonight (GY-18). */
+// g m opens Master (g w Work, g s Setup), ? shows the shortcut sheet — and the top bar's strip
+// counts what is happening now (GY-3483) with the same numbers the Workers page and the ledger read.
+/** The board fixture with one merge from tonight (GY-18). */
 const stripWork = () => boardWork().map(item => {
-  if (item.key === 'GY-21') return { ...item, mergeLedger: ledger(item, 'pushed') };
   if (item.key === 'GY-18' && item.delivery) {
     const tonight = new Date(NOW - 3_600_000).toISOString();
     return { ...item, delivery: { ...item.delivery, mergedAt: tonight, deployment: item.delivery.deployment ? { ...item.delivery.deployment, observedAt: tonight, at: tonight } : item.delivery.deployment } };
@@ -22,7 +20,7 @@ async function serve(page: Page) {
   const state = { work: stripWork() };
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname;
-    if (path.endsWith('/status')) return route.fulfill({ json: boardStatus('admin') });
+    if (path.endsWith('/status')) return route.fulfill({ json: { ...boardStatus('admin'), checksRunning: 1 } });
     if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work: state.work, now: new Date(NOW).toISOString() } });
     if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(state.work, NOW, null) });
     if (path.endsWith('/events')) return route.fulfill({ json: [] });
@@ -125,18 +123,18 @@ test('e2e:keyboard-palette — g m opens Master, g w Work, g s Setup, and ? show
   await expect(sheet(page)).toHaveCount(0);
 });
 
-test('e2e:keyboard-palette — the top bar strip counts the shift, the trials and tonight’s ships, matching the Workers page', async ({ page }) => {
+test('e2e:keyboard-palette — the top bar strip counts agents working, checks running and merged today, matching the Workers page', async ({ page }) => {
   test.setTimeout(60_000);
   await serve(page);
-  // The fixture holds two fresh running sessions (a third not seen for forty minutes), one pushed
-  // merge trial and one merge from tonight.
-  const strip = page.locator('.city-strip');
+  // The fixture holds two fresh running sessions (a third not seen for forty minutes), one check
+  // running as /api/status counts it, and one merge from tonight.
+  const strip = page.locator('.activity-strip');
   await expect(strip).toHaveAttribute('data-on-shift', '2');
   await expect(strip).toHaveAttribute('data-in-trial', '1');
   await expect(strip).toHaveAttribute('data-shipped-tonight', '1');
   await expect(strip).toContainText('2 agents working');
-  await expect(strip).toContainText('1 in trial');
-  await expect(strip).toContainText('1 shipped today');
+  await expect(strip).toContainText('1 check running');
+  await expect(strip).toContainText('1 merged today');
   // The same numbers the Workers page reads off the same board.
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Workers', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Workers', exact: true, level: 1 })).toBeVisible();

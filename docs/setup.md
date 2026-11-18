@@ -19,6 +19,18 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 - Each trial sends each test shard to the host with the most free CPU under its heat limit. There the shard gets a clone of the commit and runs with no network, under CPU, memory and process limits. A host that drops a shard hands it back: capacity, never a fault. `master status` → `remoteShards` shows each host.
 - Tests that need namespaces (bwrap), Docker or the network — confinement, compose, trial-container and e2e tests, anything starting a server or a database — stay on this machine: a host's shard has no network and no Docker socket, so they would only fail there. Every other test file may run on a host.
 
+## Onboarding a project
+
+- A project is onboarded only when main's `graphyard.json` declares two things: an `e2e.serve` that starts the real application, and a feature map (`featureMap`). Setup and `graphyard master status` read them from main, not from your working copy.
+- The feature map lists each feature of the app: its name, the URL path on the served app or a command to run, and its traps (known pitfalls, empty when none). Example: `"featureMap": [{"name":"Home","url":"/","traps":[]}]`.
+- Every batch check runs the feature map against the served app, and every deploy check runs it against the deployed site.
+- A missing serve, a missing feature map, or the generated placeholder serve that runs none of the app shows as a Master fault naming the project in `graphyard master status`, and Setup shows the same Master fault. The checks never report a pass for it. The master files the work to add the real serve and map; there is nothing for you to do.
+
+## Your app's address
+
+- Onboarding step: add `"app": { "url": "https://HOST.TAILNET.ts.net:PORT" }` to `graphyard.json` on main, with the tailnet or public address where the app runs. The dashboard's top bar then shows Open app, and Work's Where it runs card shows the link, the machine, the serving commit, its deploy time and the dashboard's own link.
+- The master refuses `127.0.0.1`, `localhost` and `::1`, which open only on that machine, and says why; `graphyard master status` names the setting while none is set.
+
 ## Accounts and access
 
 - Workers and reviewers run headless, logged per item (`graphyard guide runtimes`).
@@ -26,9 +38,31 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 - Setup invites or revokes viewers and maintainers.
 - Sharing one machine across installs: the [shared server guide](shared-server.md).
 
+## Shipped means live
+
+Work counts a merge as shipped once the live app runs a commit that contains it; until then it is going live. The top bar and the Work page show the same two numbers. When your app deploys somewhere else, such as Railway, tell Graphyard where to ask which commit is live, in `graphyard.json`:
+
+```json
+{ "app": { "healthUrl": "https://your-app.example.com/version" } }
+```
+
+The URL must answer the commit it runs: the plain SHA, or JSON with a `commit` or `sha` field. Graphyard asks at most once a minute. Without it, Graphyard reads the commit from its own deploy, and with neither nothing counts as shipped.
+
 ## Delivery feedback
 
 Work's **Taste** feed shows recent deliveries with why and evidence: **Looks good** records your call, **Send back** turns your note into a follow-up item and a proposed master lesson; nothing waits on a taste.
+
+## Apps deployed elsewhere
+
+Graphyard watches an app another host deploys, such as a Go service on Railway, when `graphyard.json` names where it reports its commit:
+
+```json
+{ "delivery": { "mode": "local", "applications": [
+  { "id": "api", "directory": "services/api", "versionUrl": "https://api.example.com/healthz" }
+] } }
+```
+
+The `versionUrl` answers the commit it serves (JSON `commit` or `sha`, or plain text). `master status` reads this from the main branch, not the local checkout, and lists the app as current, deploying, lagging or failed. If main's declaration is invalid, it names the bad fields. Graphyard never deploys or previews such an app.
 
 ## Publishing
 

@@ -21,6 +21,7 @@ import { ShippedToast } from './fun';
 import { applyTheme } from './theme';
 import { boot } from './boot';
 import KeyboardNav from './keyboard';
+import type { TrustKind } from './trust';
 
 applyTheme();
 boot();
@@ -56,6 +57,7 @@ function App() {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [view, setView] = useState(() => initialView(views.map(page => page.id)));
   const [filter, setFilter] = useState<OpenGroup | null>(null);
+  const [shippedFilter, setShippedFilter] = useState<TrustKind | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [events, setEvents] = useState<any[]>([]);
   const [creating, setCreating] = useState(false);
@@ -147,7 +149,7 @@ function App() {
   const item = useOpenedWork(work, selected, token, api, sessionEpoch, setError);
   async function action(id: string, command: string, data: unknown = {}) { const epoch = sessionEpoch.current; setBusy(true); try { await api(`work/${id}/${command}`, data); if (epoch !== sessionEpoch.current) return; await refresh(epoch); } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); } }
   const { features, operatorAgents, operatorAgentsError } = useFeatures(token, !!status, api, status?.actor?.role === 'admin', work.some(w => w.scenarioRequirements?.length > 0));
-  const dashboard: Dashboard = { token, work, board, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, operatorAgentsError, features, events, editingRequirements, setEditingRequirements, sessionEpoch, api, refresh, action, setError, signOut };
+  const dashboard: Dashboard = { token, work, board, status, error, connected, lastUpdated, view, setView, filter, setFilter, shippedFilter, setShippedFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, operatorAgentsError, features, events, editingRequirements, setEditingRequirements, sessionEpoch, api, refresh, action, setError, signOut };
   if (!status) return <LoginPage signingIn={signingIn} setSigningIn={setSigningIn} token={token} error={error} signOut={signOut} setError={setError} sessionEpoch={sessionEpoch} setToken={setToken} draftToken={draftToken} setDraftToken={setDraftToken} host={location.host} onVerified={firstLoad}/>;
   // One page at a time: an open item replaces the page it was opened from, and "← Back" returns to it.
   return <div className="shell"><Sidebar entries={views.map(entry => primaryEntry(dashboard, entry))} dashboard={dashboard}/>
@@ -156,15 +158,6 @@ function App() {
     {creating && <CreateWork {...dashboard}/>}
     {shipped && <ShippedToast key={shipped.id} item={shipped} onClose={() => setShipped(null)}/>}
     <KeyboardNav dashboard={dashboard} palette={palette} setPalette={setPalette}/>
-    <VersionLabel status={status}/>
   </div>;
-}
-/** GY-3310: the version and serving commit each status poll reports, in the bottom-left corner; nothing until one is known. */
-function VersionLabel({ status }: { status: any }) {
-  const commit: string | undefined = status.build?.commit;
-  const version: string | undefined = status.release?.version && !status.release.version.startsWith('unreleased') ? status.release.version : undefined;
-  const parts = [version && `v${version}`, commit && commit.slice(0, 7)].filter(Boolean);
-  if (!parts.length) return null;
-  return <span className="version-label" title={commit}>Graphyard {parts.join(' · ')}</span>;
 }
 createRoot(document.getElementById('root')!).render(<App/>);

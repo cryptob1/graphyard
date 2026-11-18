@@ -15,8 +15,9 @@ import type { Principal } from '../src/model.js';
 import { ReleaseLine } from '../web/components/top-bar.js';
 
 // GY-2964: the dashboard header of a managed install names the managed repository's own serving —
-// what a deploy record naming it serves, or "No deploy configured · main <tip>" — never the
-// control plane's own commit, and "not carried yet" is counted only against a configured deploy.
+// what a deploy record naming it serves — never the control plane's own commit, and "not live yet"
+// is counted only against a configured deploy. With none configured the header shows no release
+// line (GY-3483); /api/status still names main's tip for Settings → Delivery.
 
 const game = 'owner/openworld', plane = 'f'.repeat(40);
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -69,15 +70,11 @@ const api = async (path: string) => {
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 const line = (status: any) => text(renderToStaticMarkup(createElement(ReleaseLine, { status }))!);
 
-test('unit:managed-header-names-repository-serving — a managed install\'s header names its own deploy or "No deploy configured · main", never the control plane\'s commit', async () => {
-  // Without a deploy record naming the repository: unconfigured, with main's tip named.
+test('unit:managed-header-names-repository-serving — a managed install\'s header names its own deploy or shows no release line, never the control plane\'s commit', async () => {
+  // Without a deploy record naming the repository: unconfigured, with main's tip on status and no header line.
   const unconfigured = await api('status');
   assert.deepEqual({ ...unconfigured.deploy, repository: unconfigured.deploy.repository }, { repository: game, configured: false, tip: null, at: null, main, pending: null });
-  const idle = line(unconfigured);
-  assert.match(idle, /No deploy configured/);
-  assert.match(idle, new RegExp(`main ${main.slice(0, 8)}`), 'the repository\'s main tip is named');
-  assert.ok(!idle.includes('not carried yet'), 'no not-carried count without a configured deploy');
-  assert.ok(!idle.includes(plane.slice(0, 8)), 'the control plane\'s own commit is never named');
+  assert.equal(line(unconfigured), '', 'no release line without a configured deploy');
 
   // With a configured deploy: its commit, and the merged changes main holds since it.
   await writeDeploy({ tip: tipB, at: new Date().toISOString(), repository: game });
@@ -85,8 +82,7 @@ test('unit:managed-header-names-repository-serving — a managed install\'s head
   assert.deepEqual({ configured: configured.deploy.configured, tip: configured.deploy.tip, main: configured.deploy.main, pending: configured.deploy.pending },
     { configured: true, tip: tipB, main, pending: 1 });
   const serving = line(configured);
-  assert.match(serving, new RegExp(`Serving ${tipB.slice(0, 8)}`));
-  assert.match(serving, /1 merged change not carried yet/);
+  assert.match(serving, new RegExp(`Live: ${tipB.slice(0, 8)} · 1 change not live yet`));
   assert.ok(!serving.includes(plane.slice(0, 8)), 'the control plane\'s own commit is never named');
 
   // A record naming the control plane's own repository is not this repository's deploy (GY-2955).

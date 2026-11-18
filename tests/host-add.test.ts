@@ -39,13 +39,13 @@ const output = async (argv: string[]) => {
 test(`${proof} — host add records a Docker-over-SSH host and writes nothing on it; one without Docker or unreachable is refused with a plain reason; host remove removes it`, async () => {
   assert.match(await output(['host', 'add', 'gy-compute@box']), /Added gy-compute@box: \d+ cores, rootless Docker answers through the shim/);
   assert.deepEqual(await recorded(), ['gy-compute@box']);
-  assert.deepEqual((await readdir(hosts.home('box'))).sort(), ['.ssh', 'bin'], 'the probe only reads: the home holds what prepare left, nothing more');
+  assert.deepEqual((await readdir(hosts.home('box'))).sort(), ['.graphyard', '.ssh', 'bin'], 'the probe only reads: the home holds what prepare left, nothing more');
 
   await assert.rejects(main(['host', 'add', 'gy-compute@bare']), /gy-compute@bare was not added: gy-compute@bare answers but its Docker does not: run graphyard host prepare/);
   await assert.rejects(main(['host', 'add', 'gy-compute@gone']), /gy-compute@gone was not added: gy-compute@gone is unreachable over SSH: ssh: connect to host gone port 22: Connection refused/);
   await assert.rejects(main(['host', 'add', 'not a host']), /Name the host as USER@HOST/);
   assert.deepEqual(await recorded(), ['gy-compute@box'], 'a refused host is never recorded');
-  assert.deepEqual((await readdir(hosts.home('bare'))).sort(), ['.ssh', 'bin']);
+  assert.deepEqual((await readdir(hosts.home('bare'))).sort(), ['.graphyard', '.ssh', 'bin']);
 
   assert.match(await output(['host', 'list']), /^gy-compute@box {2}added /);
   assert.equal(await output(['host', 'remove', 'gy-compute@box']), 'Removed gy-compute@box.');
@@ -61,7 +61,7 @@ test(`${proof} e2e:workers-host-list — each cycle reads this machine and every
   assert.ok(box.cores! > 0); assert.equal(box.runs, 2); assert.equal(box.steal, null, 'steal needs two readings');
   const second = await readHostReadings(first, { local: 'vishrog' });
   assert.equal(typeof second[1]!.steal, 'number', 'the second cycle measures steal from the first');
-  assert.deepEqual((await readdir(hosts.home('box'))).sort(), ['.ssh', 'bin'], 'two cycles of probes write nothing on the host');
+  assert.deepEqual((await readdir(hosts.home('box'))).sort(), ['.graphyard', '.ssh', 'bin'], 'two cycles of probes write nothing on the host');
 
   const store: Store = await withDatabase('host_add');
   await store.init();

@@ -334,7 +334,7 @@ export interface ApplicationRelease {
 const applicationDirectory = (application: Application) => application.kind === 'compose' ? posix.dirname(application.file) : application.directory;
 
 /** The commit a version endpoint answers: JSON `commit` or `sha`, else the plain-text body. */
-async function servedCommit(url: string, fetcher: typeof fetch): Promise<string> {
+export async function servedCommit(url: string, fetcher: typeof fetch): Promise<string> {
   const response = await fetcher(url, { signal: AbortSignal.timeout(10_000) });
   if (!response.ok) throw new Error(`${url} answered ${response.status}`);
   const text = (await response.text()).trim();

@@ -10,7 +10,7 @@ import { openPreview, previewCheckoutPrefix, previewConcurrency, previewReasonLi
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { previewVerdictSchema } from '../src/model-boundary/merge-ledger.js';
 import { masterConfigSchema } from '../src/master.js';
-import type { Application } from '../src/project-applications.js';
+import type { PreviewableApplication as Application } from '../src/project-applications.js';
 import { tempOwnerMarker, tmpReclaimMinAgeMs, writeTempOwner } from '../src/tmp-reclaim.js';
 import type { Work } from '../src/model.js';
 import { buildStaticSite, type StaticBuildShell } from '../src/release-project.js';

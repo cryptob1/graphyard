@@ -87,6 +87,7 @@ test('unit:tests/untrusted-checkout-once.test.ts — up stops at the harness ste
   const calls: string[][] = [];
   const green = {
     fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-b'] }], accounts: [{ name: 'claude-a' }, { name: 'claude-b' }] },
+    serving: { onboarding: { onboarded: true, fault: null, features: [] } },
     setup: { loop: true },
   };
   const dependencies: UpDependencies = {

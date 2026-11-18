@@ -2,7 +2,6 @@
 import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, limitSignalReset, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
 import { exhaustionTail, outOfCreditsScreen } from '../exhaustion-screen.js';
 import { providerUsageErrors, runtimeAdapter } from './runtimes.js';
-import { runtimeReport } from '../model/token-costs.js';
 /**
  * A runtime's own safety prompt, read off a blocked session's screen (GY-197).
  *
@@ -187,7 +186,7 @@ const severityLabel = /^(?:\[[^\]]*\]\s*)?(?:api\s+)?error(?:\s+code)?\s*[:#]?\s
 
 /** A zone-less calendar wall clock, matched only where the reset parser would read one without a zone: not beside a zone the provider did name (`… 08:27:35 UTC`, `…T08:27:35+08:00`) and not the truncated head of a longer time (`08:27:35` must never become `08:27Z:35`). */
 const zonelessWallClock = /(\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)(?!\d|[.:]\d|\s*(?:Z|UTC|[+-]\d{2}:?\d{2}))/g;
-/** Whether a notice names its zone in parentheses (`… 08:27:35 (America/Los_Angeles)`): the reset parser reads the wall clock in that zone, so the UTC default must not override it. The same shape and validity test as the parser's own. */
+/** Whether a notice names its zone in parentheses (`… 08:27:35 (America/Los_Angeles)`): the reset parser reads the wall clock in that zone, so the Beijing default must not override it. The same shape and validity test as the parser's own. */
 function namesZone(text: string): boolean {
   const zone = /\(\s*([A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+|UTC)\s*\)/.exec(text)?.[1];
   if (!zone) return false;
@@ -222,21 +221,27 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
     const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
     // The runtime's zone-less resets are its provider's UTC wall clock (GY-1817); every other shape parses as before.
     // A notice that names no reset at all — Z.AI's 429 rate-limit envelope — is held for the envelope's own default (GY-2943).
-    return { reason: line.slice(0, 300), resetsAt: limitSignalReset(line, parseResetTime(runtimeAdapter(runtime)?.zonelessUtcResets && !namesZone(context) ? context.replace(zonelessWallClock, '$1Z') : context, now), now) };
+    return { reason: line.slice(0, 300), resetsAt: limitSignalReset(line, parseResetTime(runtimeAdapter(runtime)?.zonelessBeijingResets && !namesZone(context) ? context.replace(zonelessWallClock, '$1+08:00') : context, now), now) };
   }
   return null;
 }
 /**
- * A headless run's limit notice (GY-3389): the reply inside its JSON report (`claude -p`'s usage-credits
- * result), else a line it printed — such as OpenCode's Z.AI `{"type":"provider.quota",…}` error, which a
- * text reply before it must not hide. OpenCode's worker run prints that error inside its JSON error
- * event (`{"type":"error",…,"error":{"type":"provider.quota","message":…}}`), a line too long to read as
- * a notice, so the event's own error message is what is judged (GY-3427).
+ * A headless run's limit notice (GY-3389), read only from what the runtime itself said, never from an
+ * assistant's message (GY-3457: a final reply quoting another account's limit text is work): the
+ * error reply of its JSON report (`claude -p`'s usage-credits result, `is_error: true`), the message
+ * of a JSON error event (OpenCode's `{"type":"error",…,"error":{"type":"provider.quota",…}}`, GY-3427),
+ * and, for a run that failed (`ok` false), the tail it printed — such as OpenCode's bare Z.AI
+ * `{"type":"provider.quota",…}` line or pi's `429 … 1310` error. A run that exited 0 was not stopped by
+ * its provider, so its printed text is never read as a notice.
  */
-export function detectHeadlessExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
-  const reply = runtimeReport(output).reply;
-  const errors = output.split('\n').map(line => { try { return JSON.parse(line)?.error?.message; } catch { return null; } }).filter(message => typeof message === 'string');
-  return (reply ? detectRuntimeExhaustion(reply, runtime, now) : null) ?? (errors.length ? detectRuntimeExhaustion(errors.join('\n'), runtime, now) : null) ?? detectRuntimeExhaustion(output, runtime, now);
+export function detectHeadlessExhaustion(output: string, runtime: string | null | undefined, now: number, ok = false): ExhaustionSignal | null {
+  const said = output.split('\n').flatMap(line => {
+    let event: any;
+    try { event = JSON.parse(line); } catch { return []; }
+    const text = event?.type === 'result' && event.is_error === true ? event.result : event?.type === 'error' ? event.error?.message : null;
+    return typeof text === 'string' ? [text] : [];
+  });
+  return (said.length ? detectRuntimeExhaustion(said.join('\n'), runtime, now) : null) ?? (ok ? null : detectRuntimeExhaustion(output, runtime, now));
 }
 
 /**
@@ -257,4 +262,4 @@ export function detectLoggedOut(output: string): string | null {
 
 
 /** Parse only a reset stated by this provider; a missing reset remains unknown. */
-export const runtimeResetTime = (text: string, runtime: string, now: number) => parseResetTime(runtimeAdapter(runtime)?.zonelessUtcResets && !namesZone(text) ? text.replace(zonelessWallClock, '$1Z') : text, now);
+export const runtimeResetTime = (text: string, runtime: string, now: number) => parseResetTime(runtimeAdapter(runtime)?.zonelessBeijingResets && !namesZone(text) ? text.replace(zonelessWallClock, '$1+08:00') : text, now);

@@ -61,7 +61,7 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
   const [reason, setReason] = useState('');
   useEffect(() => {
     setSession(null); setReason(''); setState('connecting');
-    if (!token) { setReason('Sign in to open the terminal.'); setState('refused'); return; }
+    if (!token) { setReason('Sign in to see the terminal.'); setState('refused'); return; }
     let live = true, stop = () => {};
     loadTerminal().then(Terminal => {
       if (!live) return;
@@ -143,7 +143,7 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
       // Text goes in as one bracketed paste, never a raw ^V; a file or image is uploaded and its saved path pasted.
       const deliver = async (files: File[], pasted: string) => {
         // A paste that cannot be delivered says why: a read-only viewer, or a terminal still (re)connecting.
-        if (!writable) { setReason(socket?.readyState === WebSocket.OPEN ? 'Paste refused: read-only, only the operator and maintainers can type into the master' : 'Not pasted: the terminal is reconnecting; paste again once it says you can type'); return; }
+        if (!writable) { setReason(socket?.readyState === WebSocket.OPEN ? 'Paste refused: view only' : 'Not pasted: the terminal is reconnecting; paste again once it says you can type'); return; }
         for (const file of files) {
           if (file.size > 20 * 1024 * 1024) { setReason('Not pasted: files are limited to 20 MB'); continue; }
           const data = await new Promise<string>(done => { const reader = new FileReader(); reader.onload = () => done(String(reader.result).split(',')[1] ?? ''); reader.readAsDataURL(file); });
@@ -211,9 +211,8 @@ export default function LiveTerminal({ token, label }: { token: string; label: s
   }, [token]);
   return <section ref={section} className={`live-terminal${session?.state === 'working' ? ' working' : ''}`} aria-label={label} data-terminal={state}>
     <div className="terminal-info" role="status">
-      {session && <span className="terminal-session">{session.account ?? 'Account unknown'} · {session.runtime ?? 'Runtime unknown'} · {session.state} · {session.pane ?? 'No pane'}</span>}
-      <span>{state === 'connecting' ? 'Connecting…' : state === 'reconnecting' ? 'Reconnecting…' : state === 'control' ? 'You can type here' : state === 'observe' ? 'read-only: only the operator and maintainers can type into the master' : `refused: ${reason}`}</span>
-      {session?.state === 'absent' && <span>The loop relaunches the master on its own.</span>}
+      {session && <span className="terminal-session" title={`${session.runtime ?? 'Runtime unknown'} · ${session.pane ?? 'No pane'}`}>{session.state === 'absent' ? 'Master is restarting…' : `${session.state.charAt(0).toUpperCase()}${session.state.slice(1)} · ${session.account ?? 'Account unknown'}`}</span>}
+      <span>{state === 'connecting' ? 'Connecting…' : state === 'reconnecting' ? 'Reconnecting…' : state === 'control' ? 'You can type here' : state === 'observe' ? 'View only' : reason}</span>
       {reason && state !== 'refused' && <span>{reason}</span>}
     </div>
     <div ref={host} className="terminal-host"/>

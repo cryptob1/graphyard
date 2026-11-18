@@ -5,7 +5,7 @@ import { runtimeAdapter } from '../src/master/runtimes.js';
 
 // GY-1817: a pi worker whose provider answered `429 code 1310 Weekly/Monthly Limit Exhausted`
 // was read as ordinarily idle. pi now has its own entry in the provider limit catalogs, and its
-// zone-less reset wall clock is read in UTC: the provider names no zone, so the hold must not drift
+// zone-less reset wall clock is read in Beijing time (GY-3495): the provider names no zone, so the hold must not drift
 // by whatever offset the loop host sits in.
 
 // The 2026-10-15 and 2026-10-17 instants are the observed incident's fixed clock, handed in whole —
@@ -21,10 +21,10 @@ Retry failed after 3 attempts
 `;
 /** 2026-10-15T01:10:00Z, the instant the notice was read. */
 const observedAt = Date.parse('2026-10-15T01:10:00Z');
-/** 2026-10-17T08:27:35Z, the reset the notice names, read in UTC: 55h17m35s after the fixed clock. */
-const resetAt = new Date(observedAt + ((55 * 60 + 17) * 60 + 35) * 1000).toISOString();
+/** 2026-10-17 08:27:35 Beijing time, the reset the notice names: 2026-10-17T00:27:35Z, 47h17m35s after the fixed clock. */
+const resetAt = new Date(observedAt + ((47 * 60 + 17) * 60 + 35) * 1000).toISOString();
 
-test('unit:pi-provider-limit-exhaustion — pi\'s 429 code 1310 "Weekly/Monthly Limit Exhausted" is its provider saying the account is spent, and its zone-less reset is read in UTC', () => {
+test('unit:pi-provider-limit-exhaustion — pi\'s 429 code 1310 "Weekly/Monthly Limit Exhausted" is its provider saying the account is spent, and its zone-less reset is read in Beijing time', () => {
   // The loop host is not in the provider's zone: the reset must not drift by the host's offset.
   const zone = process.env.TZ;
   process.env.TZ = 'Asia/Kolkata';
@@ -33,13 +33,13 @@ test('unit:pi-provider-limit-exhaustion — pi\'s 429 code 1310 "Weekly/Monthly 
     const signal = detectRuntimeExhaustion(piPane, 'pi', at);
     assert.ok(signal, 'the 1310 notice is an exhaustion');
     assert.equal(signal.reason, '{"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-17 08:27:35"}', 'the notice, behind the runtime\'s own Error label, is the reason');
-    assert.equal(signal.resetsAt, resetAt, 'the provider named no zone, so the reset wall clock is read in UTC, not the host\'s');
-    // A zone the provider did name is kept, not overwritten by the UTC default.
+    assert.equal(signal.resetsAt, resetAt, 'the provider named no zone, so the reset wall clock is read in Beijing time, Z.AI\'s own, not the host\'s');
+    // A zone the provider did name is kept, not overwritten by the Beijing default.
     const zoned = detectRuntimeExhaustion(piPane.replace('08:27:35"', '08:27:35 UTC"'), 'pi', at);
-    assert.equal(zoned?.resetsAt, resetAt, 'an explicit zone survives the UTC default');
+    assert.equal(zoned?.resetsAt, '2026-10-17T08:27:35.000Z', 'an explicit zone survives the Beijing default');
     // A zone the provider names in parentheses is that zone's wall clock: 08:27:35 PDT is 15:27:35Z, not 08:27:35Z.
     const named = detectRuntimeExhaustion(piPane.replace('08:27:35"', '08:27:35 (America/Los_Angeles)"'), 'pi', at);
-    assert.equal(named?.resetsAt, '2026-10-17T15:27:35.000Z', 'a parenthesized named zone survives the UTC default');
+    assert.equal(named?.resetsAt, '2026-10-17T15:27:35.000Z', 'a parenthesized named zone survives the Beijing default');
     assert.ok(runtimeAdapter('pi')?.limitNotices, 'pi has its own entry in the catalogs');
     // Another runtime's catalog does not read pi's banner.
     assert.equal(detectRuntimeExhaustion(piPane, 'claude', at), null, 'the notice is pi\'s catalog, not Claude\'s');

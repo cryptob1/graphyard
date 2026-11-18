@@ -1,0 +1,19 @@
+{
+  "id": "master-page-plain",
+  "title": "The Master page shows blockers and the terminal; messages between installs fold away below it",
+  "description": "A real browser against the real control plane with a stub herdr master pane, two seeded install messages, one blocker and a product brief: at 1280 and 390 px nothing above the terminal carries a message body, one closed 'Messages with other installs' fold below it opens to both threads, the blocker, terminal and Product strings read plainly, and no principal or pane id shows outside a title or fold.",
+  "tags": [
+    "dashboard",
+    "master"
+  ],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Read the Master and Product pages in Playwright",
+      "run": "npm run test:browser -- browser-tests/master-page-plain.spec.ts",
+      "timeoutSeconds": 240
+    }
+  ]
+}

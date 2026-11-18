@@ -42,6 +42,7 @@ const noop = () => {};
 function dashboard(overrides: Partial<Dashboard> = {}, role = 'admin', features: Features = unknownFeatures): Dashboard {
   const d: Dashboard = {
     token: 'fixture', work, status: fixtureStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
+    shippedFilter: null, setShippedFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop,
     sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, role), refresh: async () => {}, action: async () => {},
@@ -150,7 +151,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
   for (const page of ['Delivered', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
   // Settings is configuration only (GY-3297): everyday pages sit beside the work they describe.
-  for (const page of ['Agents', 'Setup', 'Operator automation']) assert.equal(sectionOf[page], 'settings', page);
+  for (const page of ['Agents', 'Setup', 'Delivery', 'Operator automation']) assert.equal(sectionOf[page], 'settings', page);
   assert.deepEqual([sectionOf['Product'], sectionOf['Costs'], sectionOf['Test cases']], ['master', 'workers', 'tests']);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
@@ -159,7 +160,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
   assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Releases']);
-  assert.deepEqual(tabs(dashboard(), 'agents'), ['Agents', 'Setup', 'Advanced', 'Operator automation'], 'Operator automation sits inside the Advanced fold');
+  assert.deepEqual(tabs(dashboard(), 'agents'), ['Agents', 'Setup', 'Delivery', 'Advanced', 'Operator automation'], 'Operator automation sits inside the Advanced fold');
   assert.match(markup(createElement(TopBar, { ...dashboard(), view: 'agents' })), /<details class="tabs-advanced"><summary class="tab">Advanced<\/summary><button[^>]*>(<abbr[^>]*>)?Operator automation</);
   assert.deepEqual(tabs(dashboard(), 'tests'), ['Tests', 'Test cases']);
   assert.deepEqual(tabs(dashboard(), 'workers'), ['Workers', 'Costs']);
@@ -172,7 +173,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
 
   // Admin-only pages are hidden from reader and worker sessions, even when configured.
   const configured = { validation: true, releases: true, automation: true };
-  assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'agents'), [], 'a reader sees Agents alone, so no tab row');
+  assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'agents'), ['Agents', 'Delivery'], 'a reader sees Agents and Delivery, not Setup');
   assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'tests'), ['Tests', 'Test cases']);
   assert.ok(!labels(dashboard({}, 'worker', configured)).includes('Settings'), 'a worker has nothing to configure');
   for (const role of ['reader', 'worker']) assert.ok(!visibleViews(dashboard({}, role, configured)).some(view => view.adminOnly), role);
@@ -181,7 +182,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   assert.deepEqual(probed.features, { releases: false, validation: false, automation: false });
   const none = dashboard({}, 'admin', probed.features);
   assert.deepEqual(tabs(none, 'shipped'), [], 'Delivered alone draws no tab row');
-  assert.deepEqual(tabs(none, 'agents'), ['Agents', 'Setup'], 'no Advanced fold while automation is unconfigured');
+  assert.deepEqual(tabs(none, 'agents'), ['Agents', 'Setup', 'Delivery'], 'no Advanced fold while automation is unconfigured');
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
   assert.deepEqual(failing.features, { releases: null, validation: false, automation: null }, 'an outage never hides a page');
   // An outage and an empty registry mean opposite things, so the page never reports one as the other.
@@ -191,7 +192,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   assert.match(text(unread), /Operator automation could not be read, so what is configured is unknown: unavailable/);
   assert.doesNotMatch(text(unread), /safe bootstrap default/);
   assert.match(unread, /Configured identities <span class="count">—<\/span>/, 'an unknown count is never drawn as zero');
-  assert.match(text(markup(createElement(AutomationPage, { operatorAgents: [], operatorAgentsError: null }))), /safe bootstrap default/);
+  assert.match(text(markup(createElement(AutomationPage, { operatorAgents: [], operatorAgentsError: null }))), /None set up\..*No automation identities\./);
   assert.equal((await probeFeatures(async () => ({ requests: [] }), false, true)).features.validation, false, 'repository cases do not enable the retired validation runner');
   // Delivery slices are about who works on what: on the Workers page once a slice has a lead, never on Work.
   const led = fixtureStatus('admin'); led.delegation.slices[0].lead = { id: 'lead', displayName: 'Pine', sessionKind: 'ai' } as any;
@@ -329,7 +330,7 @@ test('unit:dashboard-simplification — the home page renders its numbers withou
   const page = home();
   const { byGroup } = classify(work, NOW);
   for (const group of groups) assert.match(page, new RegExp(`data-tile="${group}"[^>]*>.*?<strong>${byGroup[group].length}</strong>`), group);
-  assert.match(text(page), /\d+ shipped this week/);
+  assert.match(text(page), /\d+ shipped \d+ going live Latest/);
 });
 
 test('unit:work-page-single-count-row — the page shows one row of counts, the groups; no count appears twice and no two labels differ only by grammatical form', () => {

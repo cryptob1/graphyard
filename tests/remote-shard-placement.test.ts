@@ -4,6 +4,7 @@ import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { HostDroppedError, readRemoteShardRuns, readShardHosts, realFreeCores, remoteShardSummary, runShardsOnHosts, type HostReading, type PlacedHost } from '../src/merge-writer/remote-shards.js';
 import { runTrial } from '../src/merge-writer/trial.js';
 import { trialHotCelsius } from '../src/merge-writer/trial-load.js';
+import { hostShimDigest } from '../src/host-shim.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { shardHosts, shardRepository } from './helpers/shard-hosts.js';
 
@@ -75,7 +76,7 @@ test(`${proof} — a host that drops mid-shard has that shard re-queued on anoth
 });
 
 test(`${proof} — the shim's probe reads a host's cores, load, steal and hottest sensor; a host that does not answer is away, and this machine always takes shards`, async () => {
-  const probe = ['user 1001 gy-compute', 'cores 16', 'load 3.5', 'cpu  100 0 100 700 0 0 0 100 0 0', 'temp k10temp 71000', 'temp nvme 80000', 'runs 1'].join('\n');
+  const probe = [`shim ${hostShimDigest}`, 'user 1001 gy-compute', 'cores 16', 'load 3.5', 'cpu  100 0 100 700 0 0 0 100 0 0', 'temp k10temp 71000', 'temp nvme 80000', 'runs 1'].join('\n');
   const run: ChildRun = async (command, args) => {
     if (command === 'ssh' && args[0] === '-G') return `hostname ${args.at(-1)!.split('@').at(-1)}\nuser gy-compute\n`;
     if (command === 'ssh' && args.at(-2) === 'gy-compute@box') return probe;

@@ -57,6 +57,8 @@ async function report(master: MasterConfig, document: AgentRegistry, work: Work[
     throw new Error(`unexpected read ${path}`);
   };
   return masterStatusReport('.', master, api, async (command, args) => {
+    // main declares a real serve and feature map, and no applications to observe.
+    if (command === 'git' && args.includes('show')) return JSON.stringify({ e2e: { serve: { command: 'node app.js', url: 'http://127.0.0.1:43911/', readySeconds: 30 } }, featureMap: [{ name: 'Home', url: '/', traps: [] }] });
     if (!isHerdrCommand(command)) return 'a'.repeat(40);
     return herdrSubcommand(args)[1] === 'list' ? JSON.stringify({ agents: [] }) : '';
   });

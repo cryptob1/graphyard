@@ -23,7 +23,7 @@ import { awaitsMerge } from '../model/merge-queue.js';
 import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import type { PreviewCaseRun } from '../merge-writer/served-previews.js';
 import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '../merge-writer/serve-revert.js';
-import { slotsDirectoryVariable, waitStep, withHeavyJob } from '../master/verification-slots.js';
+import { slotsDirectoryVariable, testMergeLabel, waitStep, withHeavyJob } from '../master/verification-slots.js';
 import { adoptTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
@@ -107,7 +107,7 @@ const output = (error: unknown) => { const failed = error as { stdout?: unknown;
  * project on the host shares, naming the holders as its step, before anything of it starts.
  */
 export const heavyTrial = <T>(key: string, onStep: ((step: string) => void) | undefined, signal: AbortSignal | undefined, trial: () => Promise<T>, until?: AbortSignal, gate?: boolean) =>
-  withHeavyJob(`merge trial ${key}`, trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal, until, reserved: gate });
+  withHeavyJob(testMergeLabel(key), trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal, until, reserved: gate });
 
 /**
  * The reads over the coordinator checkout `root` (its object store holds every submitted head,
@@ -151,7 +151,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      return heavyTrial(item.key, onStep, signal, () => (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, ...(item.environments ? { e2eOrigins: item.environments } : {}), key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
+      return heavyTrial(item.key, onStep, signal, () => (options.trial ?? runMergeTrial)({ root, base: options.base, caches: true, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, ...(item.environments ? { e2eOrigins: item.environments } : {}), key: item.key, reproduce: item.type !== 'chore', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}), ...(signal ? { signal } : {}),
         ...trialShareAllowance(share, timeoutMs) }));
     },
     // GY-1902: an item citing a case bound to a declared static application is previewed from the coordinator checkout, its record written through the merge-record route.
@@ -279,7 +279,10 @@ export const snapshotLedger = (work: readonly Work[]): Record<string, MergeLedge
 /** The rework a failed trial grounds (AC-3): its binding names the head and the ground, as every loop rework does, so the server's lane rework finds it. */
 export const trialFailureRework = (work: Work, head: string, reason: string) => {
   // GY-3150: the refusal may fill its 2,000 characters with the failing tests and log tail; the rework cuts the tail's oldest lines to fit the engine's bound.
-  const lead = `${work.key}: the merge writer's trial of candidate ${head.slice(0, 12)} failed: `, tail = '. Nothing but a new head can pass the trial, so the item returns to a worker.';
+  // GY-3488: the tail names the next action: a conflict syncs, a failed test or e2e trial reproduces the files.
+  const lead = `${work.key}: the merge writer's trial of candidate ${head.slice(0, 12)} failed: `, tail = reason.startsWith(`${trialFailurePrefix}: the merge conflicts in `)
+    ? `. The base moved: run sync ${work.key}, resolve the files above keeping both sides' intent, rerun your bound tests, then complete ${work.key} EPOCH --head NEWSHA.`
+    : `. Reproduce with node --import tsx tests/helpers/run-tests.ts FILES (the files named above), fix the cause rather than the test, then complete ${work.key} EPOCH --head NEWSHA.`;
   const room = reworkReasonMax - lead.length - tail.length, marker = '\nlog tail:\n', at = reason.indexOf(marker) + marker.length;
   const fitted = reason.length <= room ? reason : at >= marker.length && at < room ? `${reason.slice(0, at)}${reason.slice(at - room)}` : reason.slice(0, room);
   return { reason: `${lead}${fitted}${tail}`,
@@ -327,11 +330,13 @@ const replyUnknown = (error: unknown) => { const status = mergeRecordStatus(erro
 /**
  * Trials running at once divide the host's cores, so their shards never oversubscribe it; a trial
  * given 1/`share` of the cores gets `share` times the deadline (GY-3183), so the suite that passes
- * alone within the limit is not timed out for running beside others.
+ * alone within the limit is not timed out for running beside others. GY-3509: an explicit deadline
+ * (the batch gate's) is already a bound and is kept as given; only the default trial deadline scales.
  */
-export function trialShareAllowance(share: number | undefined, timeoutMs = trialTimeoutMinutes * 60_000, cores = availableParallelism()): { timeoutMs: number; cores?: number } {
-  if (!share || share <= 1) return { timeoutMs };
-  return { timeoutMs: timeoutMs * share, cores: Math.max(2, Math.floor(cores / share)) };
+export function trialShareAllowance(share: number | undefined, timeoutMs?: number, cores = availableParallelism()): { timeoutMs: number; cores?: number } {
+  const deadline = timeoutMs ?? trialTimeoutMinutes * 60_000;
+  if (!share || share <= 1) return { timeoutMs: deadline };
+  return { timeoutMs: timeoutMs ?? deadline * share, cores: Math.max(2, Math.floor(cores / share)) };
 }
 
 /**

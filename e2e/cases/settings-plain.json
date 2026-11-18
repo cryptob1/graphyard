@@ -1,0 +1,9 @@
+{
+  "id": "settings-plain",
+  "title": "Settings pages read in plain words",
+  "description": "With an automation identity, an account whose smoke test the provider refused with a 429 JSON body and a live master seeded, at 1280px and 390px Operator automation, Agents and Setup show short facts ('1 automation identity, 1 active.', '<n> of <m> roles ready · <k> accounts', one row per role, 'Limit reached · back <Mon D>', 'Stall alerts: off'), contain none of bootstrap, scoped, policy:, a raw JSON error or 'Cannot launch Master' outside a fold or title, and keep the identifiers one click away.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Read the Settings pages", "run": "npm run test:browser -- browser-tests/settings-plain.spec.ts", "timeoutSeconds": 300 }]
+}

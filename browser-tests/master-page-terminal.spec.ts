@@ -68,7 +68,7 @@ test('e2e:master-page-terminal — the operator types into the master pane live;
     await reader.addInitScript(() => sessionStorage.setItem('graphyard-token', 'test-reader'));
     await reader.goto(`${url}/#master`);
     await expect(rows(reader)).toContainText('screen of w1:master', settled);
-    await expect(reader.getByRole('status')).toContainText('read-only', settled);
+    await expect(reader.getByRole('status')).toContainText('View only', settled);
     await reader.locator('.terminal-host').click();
     await reader.keyboard.type('rm -rf');
     await reader.keyboard.press('Enter');

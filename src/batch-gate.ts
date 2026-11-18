@@ -39,11 +39,19 @@ import type { PreviewCaseRun } from './merge-writer/served-previews.js';
 
 /** How long one gate may run before it counts as failed (gate timeout). */
 export const gateLimitMs = 45 * 60_000;
+/** GY-3507: the hard ceiling on one gate run's bound, however slow its recent runs were. */
+export const gateCeilingMs = 90 * 60_000;
 /**
- * GY-3444: one gate run's bound — the limit above, or 1.5x the last measured full catalog run when
- * that is longer (61 minutes on vishrog on 2026-11-17), so a loaded host's own catalog never outlasts it.
+ * GY-3507: one gate run's bound — twice the median execution time of the recent verified runs,
+ * never under the limit above (also the cold start, with no verified run) nor over the ceiling.
+ * Only verified runs are sampled, their waits left out, so neither a timeout nor a wait inflates it.
  */
-export const gateBoundMs = (record: Pick<GateRecord, 'catalogMs'>) => Math.max(gateLimitMs, Math.ceil(1.5 * (record.catalogMs ?? 0)));
+export function gateBoundMs(record: Pick<GateRecord, 'verifiedRuns'>): number {
+  const runs = (record.verifiedRuns ?? []).map(run => run.ms).sort((a, b) => a - b), middle = runs.length >> 1;
+  if (!runs.length) return gateLimitMs;
+  const median = runs.length % 2 ? runs[middle]! : (runs[middle - 1]! + runs[middle]!) / 2;
+  return Math.min(gateCeilingMs, Math.max(gateLimitMs, Math.ceil(2 * median)));
+}
 const minutes = (ms: number) => Math.round(ms / 60_000);
 /** How often the full suite and the whole catalog run against the verified commit. */
 export const diagnosticsIntervalMs = 24 * 60 * 60_000;
@@ -112,6 +120,8 @@ export interface GateRecord {
    * elapsed time. Optional only for records an older loop wrote.
    */
   gateRuns?: { ms: number; at: string }[];
+  /** GY-3507: the last few verified gate runs' own execution time (waits left out), newest last: what the bound reads. */
+  verifiedRuns?: { ms: number; at: string }[];
   diagnosticsAt: string | null;
   /**
    * GY-3264: the latest diagnostic run's failures, per check: the exact commit it tested and the
@@ -255,7 +265,7 @@ function boundCaseIds(record: Pick<GateRecord, 'merges'>, landings: readonly Ser
 
 /** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. */
 export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
-  const cases = whole ? await ports.catalog(tip) : [...new Set([...boundCaseIds(record, landings), ...await ports.core(tip)])];
+  const cases = [...new Set([...(whole ? await ports.catalog(tip) : boundCaseIds(record, landings)), ...await ports.core(tip)])];
   return ['build', ...[...new Set(cases)].map(id => `e2e:${id}`), 'affected'];
 }
 
@@ -351,9 +361,10 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
       if (now - saved >= 30_000) { saved = now; void ports.checkpoint?.(); }
     };
     // The check's budget is the gate's own remaining time (AC-7): the gate's clock stops it, through
-    // `stop`, however long its waits run; the trial's own wall clock is only a backstop of two more bounds.
+    // `stop`, however long its waits run. GY-3509: the trial's own clock is that same remaining time,
+    // never a multiple of it, so no runner outlives the 90-minute ceiling.
     const stop = new AbortController();
-    return Promise.race([ports.run(commit, runChecks, runFiles, left + 2 * bound, stop.signal), new Promise<never>((_, reject) => { timer = setInterval(() => { tick(); if (ports.now() > deadline()) { reject(new GateTimeout()); stop.abort(new GateTimeout()); } }, 1000); })])
+    return Promise.race([ports.run(commit, runChecks, runFiles, left, stop.signal), new Promise<never>((_, reject) => { timer = setInterval(() => { tick(); if (ports.now() > deadline()) { reject(new GateTimeout()); stop.abort(new GateTimeout()); } }, 1000); })])
       .then(async failed => {
         tick();
         if (ports.now() > deadline()) throw new GateTimeout();
@@ -393,12 +404,14 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
         // A known red is a check that also fails on the last verified commit: an affected test, or a
         // catalog-only e2e case — one no batch item binds, gate.core does not name and smoke is not.
         const catalogOnly = check.startsWith('e2e:') && !(await mustPass()).has(check);
-        if (check.startsWith('test:') || catalogOnly) {
+        const featureMap = check === 'e2e:graphyard-feature-map';
+        if (featureMap || check.startsWith('test:') || catalogOnly) {
           let failsThere = record.results[verified]?.[check];
           if (failsThere === undefined) { await step(`probing ${check} on the verified commit`); failsThere = (await run(verified, [check], files)).includes(check); }
           (record.results[verified] ??= {})[check] = failsThere;
           await ports.checkpoint?.(); // the probe's verdict is saved to the record before anything is filed (GY-3147)
           if (failsThere) {
+            if (featureMap) return hold(`Master fault: ${record.repository}'s real application feature check already fails on the verified commit; repair its serve and feature map before verifying this batch.`);
             knownRed.push(check);
             await fileFailure(ports, record, at(), { key: `known-red:${check}`, title: `Known red on main: ${check}`, description: `${check.startsWith('test:') ? `The test ${check.slice(5)}` : `The E2E case ${check.slice(4)}`} fails on the verified commit ${verified.slice(0, 12)} and on ${tip.slice(0, 12)}. The batch gate exempts it until it is fixed.` });
             continue;
@@ -411,6 +424,7 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
       const reverted = new Set(record.merges.filter(merge => merge.reverted).map(merge => merge.sha));
       record.merges = [...record.merges, ...landings.filter(landing => landing.item && !reverted.has(landing.sha) && !record.merges.some(merge => merge.sha === landing.sha))
         .map(landing => ({ sha: landing.sha, item: landing.item!.key, reverted: false }))].slice(-revertRateWindow);
+      record.verifiedRuns = [...record.verifiedRuns ?? [], { ms: ports.now() - Date.parse(record.inFlight!.startedAt) - (record.inFlight!.waitedMs ?? 0), at: at() }].slice(-gateRunsWindow);
       record.verified = tip; record.verifiedAt = at(); record.attempt = { recuts: 0, timeouts: 0 };
       record.results = Object.fromEntries(Object.entries(record.results).filter(([commit]) => commit === tip));
       // GY-3199: the verified commit is published where every install's deploy watch reads it. A

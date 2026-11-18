@@ -9,7 +9,7 @@ import { daemonSummary } from '../daemon/run.js';
 import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
 import { standingStepFailures, workerGrowthKey, masterLaunchKey, masterLaunchBackoffAfter } from '../daemon/cycle.js';
 import { fetchRefusalKey, gateStallKey } from '../daemon/cycle-batch-gate.js';
-import { implementationWaiting } from '../daemon/cpu-pressure.js';
+import { cpuPerMergedItem, implementationWaiting } from '../daemon/cpu-pressure.js';
 import { overloadAlarm, overloaded, sessionFigures } from '../session-share.js';
 import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
@@ -21,7 +21,7 @@ import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControl
 import { gateRecordPath, gateHoldAttention, gateSummary, readGateRecord } from '../batch-gate.js';
 import { thisWeekReport } from '../project-memory.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
-import { readRemoteShardRuns, remoteShardSummary } from '../merge-writer/remote-shards.js';
+import { outdatedShimAttention, readRemoteShardRuns, remoteShardSummary } from '../merge-writer/remote-shards.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage, waitingReason } from '../model/plain-stage.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
@@ -32,13 +32,13 @@ import { stoppedRoles, type StoppedRole } from '../master/stopped-roles.js';
 import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-speed.js';
 import { unspecifiedModel, type FleetView } from '../model/registry.js';
 import { observeApplications } from '../production-watch.js';
+import { appRelease } from '../app-url.js';
 import { applicationAttention, reworkAttention } from '../master/attention.js';
 import { trialFloorAttention } from '../merge-writer/trial-load.js';
 import { parkedOnHuman } from '../model/human-request.js';
 import { blockerSince } from '../model/work.js';
 import { formatAge } from '../model/duration.js';
-import { loadProjectDelivery } from '../model-boundary/project-applications.js';
-import { isPlaceholderServe, placeholderServeRefusal } from '../model/onboarding-work.js';
+import { loadProjectDelivery, parseProjectDelivery } from '../model-boundary/project-applications.js';
 import { backedOffProfiles, readDispatchCursor, type DispatchCursor } from '../dispatch/cursor.js';
 import { liveReviewRequest } from '../model/dispatch.js';
 
@@ -90,6 +90,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const fleet = unreachable ? null : await (masterApi(`agent-registry?host=${encodeURIComponent(master.hostId)}`) as Promise<FleetView>).catch(() => null);
   // The install master lists only unowned items; count personal scopes so the operator still sees them.
   const personalScopes = master.forPerson ? 0 : snapshot.work.filter(item => item.owner).length;
+  // GY-3418: every merge counts against the host's CPU, whoever's scope it is in.
+  const mergedAt = snapshot.work.flatMap(item => item.stage === 'done' ? [item.delivery?.mergedAt ?? item.observation?.mergedAt].filter((at): at is string => !!at) : []);
   snapshot.work = snapshot.work.filter(item => (item.owner ?? null) === (master.forPerson ?? null));
   const now = Date.parse(snapshot.now) || Date.now();
   // The managed repository's release health reads only what its own deployment records as served,
@@ -103,16 +105,26 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // remote-tracking ref; the deploy unit fetches it).
   const report = await servingReport(root, master.repository, master.baseBranch, args => Promise.resolve(run('git', ['-C', root, ...args])).then(String));
   const serving = {
+    onboarding: report.onboarding,
     unconfigured: report.unconfigured, commit: short(report.commit), main: short(report.main), atMain: report.atMain,
     failedDeploy: report.failedDeploy ? { tip: short(report.failedDeploy.tip), reason: report.failedDeploy.reason, restoring: short(report.failedDeploy.restoring) } : null,
     // A repository that declares no node application reports exactly what it reported before it (GY-2976), with the serve fields null.
     ...(report.serve ? { pending: report.pending, serve: report.serve } : { serve: null }),
   };
   // GY-3204: each declared application with a versionUrl, as its host serves it against main.
-  let declared: ReturnType<typeof loadProjectDelivery>['applications'] = [];
-  try { declared = loadProjectDelivery({}, root).applications; } catch { /* an unparseable graphyard.json declares nothing to observe */ }
-  const observed = await observeApplications(declared, report.main, args => Promise.resolve(run('git', ['-C', root, ...args])).then(String));
-  const applications = observed.map(app => ({ id: app.id, serving: short(app.serving), main: short(app.main), state: app.state, ...(app.reason ? { reason: app.reason } : {}) }));
+  // GY-3459: declared as main's graphyard.json declares them, not the checkout's own (possibly stale) copy;
+  // a declaration that does not parse is named, never read as no applications.
+  const git = (args: readonly string[]) => Promise.resolve(run('git', ['-C', root, ...args])).then(String);
+  let declared: ReturnType<typeof loadProjectDelivery>['applications'] = [], declarationError: string | null = null;
+  try {
+    const text = report.main ? await git(['show', `${report.main}:graphyard.json`]).catch(() => null) : undefined;
+    declared = text === undefined ? loadProjectDelivery({}, root).applications : text === null ? [] : parseProjectDelivery(text, `graphyard.json on ${master.baseBranch}`).applications;
+  } catch (error) { declarationError = error instanceof Error ? error.message : String(error); }
+  const observed = await observeApplications(declared, report.main, git);
+  // GY-3434: first, where the app runs — main's app.url with its machine, serving commit and deploy time, or the setting to add.
+  const app = await appRelease(git, report, master.hostId);
+  const applications = [{ id: 'app', url: app.url, machine: app.machine, serving: short(app.commit), deployedAt: app.deployedAt, ...(app.refused ? { refused: app.refused } : {}), ...(app.missing ? { missing: app.missing } : {}) },
+    ...observed.map(app => ({ id: app.id, serving: short(app.serving), main: short(app.main), state: app.state, ...(app.reason ? { reason: app.reason } : {}) }))];
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   const session = master.forPerson ? state?.personalMasters[master.forPerson] : state?.master;
   const masterAgent = session?.agentName ? runtime.agents.find(agent => agent.name === session.agentName || (!!session.pane && agent.pane_id === session.pane)) : undefined;
@@ -150,10 +162,6 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     .map(async item => ({ key: item.key, mergedAt: (item.delivery?.mergedAt ?? item.observation!.mergedAt)!, attempts: item.pipeline?.attempts?.length ?? 0,
       events: await itemLedger(masterApi, item.id) })));
   const stopped = stoppedRoles(fleet, now, master.run.intervalSeconds * 1000, session?.session ?? null);
-  // GY-3208: while onboarding's placeholder is the declared serve, no case exercises the application.
-  // GY-3387: judged from graphyard.json at main's tip, not the checkout's working tree, which can lag main.
-  let placeholder = false;
-  try { placeholder = !!report.main && isPlaceholderServe(JSON.parse(String(await run('git', ['-C', root, 'show', `${report.main}:graphyard.json`]))).e2e?.serve); } catch { /* main holds no parseable graphyard.json: no serve declared */ }
   // GY-3235: a profile skipped after failing its launch probe twice, with the cause, while its backoff stands.
   const cursor = await readDispatchCursor(root, master).catch(() => null);
   const backedOff = backedOffProfiles(cursor ?? { profileBackoff: {} }, now)
@@ -211,7 +219,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     stallAlarm: state?.actions[stallAlarmKey]?.detail ?? null,
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...launchFailures, ...reworked, ...couldNotRunReviews, ...(cursor ? reviewLaunchAttention(open, cursor, now) : []), ...backedOff, ...unspecifiedModelAttention(fleet), ...loggedOutAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...heldGateAttention, ...gateStalled, ...overloadAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...launchFailures, ...reworked, ...couldNotRunReviews, ...(cursor ? reviewLaunchAttention(open, cursor, now) : []), ...backedOff, ...unspecifiedModelAttention(fleet), ...loggedOutAttention(fleet), ...applicationAttention(observed), ...(declarationError ? [{ subject: 'delivery.applications', text: `Applications not observed: ${declarationError}`, next: `Fix graphyard.json delivery on ${master.baseBranch}` }] : []), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...heldGateAttention, ...outdatedShimAttention(readRemoteShardRuns(root)), ...gateStalled, ...overloadAttention, ...(report.onboarding.fault ? [{ subject: 'e2e.serve', text: `${report.onboarding.fault} Master fault: ${master.repository} is not onboarded.`, next: 'The Master must declare the real application serve and feature map on main.' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago
@@ -220,6 +228,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
     applications,
+    ...(declarationError ? { applicationsError: declarationError } : {}),
     // GY-3101: the stalled-yard alert. On, with the stop it last recorded; off names itself, because no run.alertUrl is configured.
     alerts: master.run.alertUrl
       ? { on: true, url: master.run.alertUrl, minutes: alertMinutesOf(master.run), stoppedAt: state?.alerts.stoppedAt ?? null, lastAlertAt: state?.alerts.lastAlertAt ?? null }
@@ -248,6 +257,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     delivery: stalled.length ? { state: 'stalled', reason: stalled.map(cause => cause.detail).join('\n'), nextAction: stalledDeliveryAction }
       : { state: state?.mergeWriter.inFlight ? 'validating' : 'no shared base failure', reason: null, nextAction: null },
     deliverySpeed: deliverySpeed(merged, open, now),
+    // GY-3418: the host's busy CPU-seconds per merged item over the last 7 days, with the target: half the first measured day's figure.
+    cpuPerMergedItem: cpuPerMergedItem(state?.cpuSeconds?.days ?? {}, mergedAt, now),
     workerVerifications: snapshot.workerVerifications ?? [],
     items: open.map((item, index) => itemLine(item, now, launched[index])),
     ...(personalScopes > 0 ? { personalScopes: `${personalScopes} items in personal scopes` } : {}),

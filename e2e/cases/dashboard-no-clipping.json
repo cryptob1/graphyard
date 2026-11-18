@@ -1,0 +1,11 @@
+{
+  "id": "dashboard-no-clipping",
+  "title": "No dashboard page is clipped: the sidebar reads in full, the version sits in its foot, Work rows keep their cells",
+  "description": "A real browser signs in as the operator's admin human session to a real control plane serving the built dashboard, at 390, 800 and 1280 px. On Work, Master (its terminal live and focused), Workers, Settings → Agents, Settings → Setup (team access shown) and an item page, after a sideways wheel scroll: the page is no wider than the window and has not moved sideways, the first sidebar label starts inside the window and reads 'Master' in full, and the version text sits in the sidebar foot overlapping nothing. On Work at 800 px every row's 'Who acts next' and 'In step' cells lie inside their row.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "read every page for clipping at 390, 800 and 1280 px", "run": "npm run test:browser -- browser-tests/dashboard-no-clipping.spec.ts", "timeoutSeconds": 420 }
+  ]
+}

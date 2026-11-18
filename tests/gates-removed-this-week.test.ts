@@ -47,10 +47,10 @@ const header = (status: unknown, work: Work[], opened: string[] = []) =>
 const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 
 test('e2e:gates-removed-this-week — a delivered lesson-to-code item removes its lesson and the header shows gates removed this week beside reverts this week, linking to the items', async () => {
-  // Before anything: both counts read zero, beside each other.
+  // Before anything: both counts read zero, and the header shows no week line (GY-3483).
   let status = await api('status');
   assert.deepEqual(status.thisWeek, { reverts: 0, revertedItems: [], gatesRemoved: 0, gatesRemovedItems: [] });
-  assert.match(text(header(status, [])), /Reverts this week ?: 0 · Gates removed this week ?: 0/);
+  assert.ok(!header(status, []).includes('week-line'), 'no week line while both counts are zero');
 
   // The master marks a lesson enforceable; the loop's pass files its item through the real control plane.
   const deps = { status: async () => ({ actor: { id: 'graphyard-master', role: 'coordinator' } }) };
@@ -77,7 +77,7 @@ test('e2e:gates-removed-this-week — a delivered lesson-to-code item removes it
   assert.deepEqual(status.thisWeek, { reverts: 1, revertedItems: [culprit.key], gatesRemoved: 1, gatesRemovedItems: [filed] });
   const work = (await api('work-snapshot')).work as Work[];
   const html = header(status, work);
-  assert.match(text(html), new RegExp(`Reverts this week ?: 1 ${culprit.key} · Gates removed this week ?: 1 ${filed}`), 'the two counts sit side by side, each naming its items');
+  assert.match(text(html), new RegExp(`This week: 1 revert ${culprit.key} · 1 gate removed ${filed}`), 'one line: the two counts side by side, each naming its items');
   const line = /<p class="week-line" data-reverts="1" data-gates-removed="1">(.*?)<\/p>/.exec(html);
   assert.ok(line, 'the header carries the week line');
   assert.ok(line![1].includes(`href="#${filed}"`) && line![1].includes(`href="#${culprit.key}"`), 'each item is a link');

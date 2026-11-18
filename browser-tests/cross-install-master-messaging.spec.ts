@@ -38,6 +38,7 @@ test('e2e:cross-install-master-messaging — the receiving install\'s Master pag
       await serveXterm(context);
       const page = await context.newPage();
       await page.goto(`${url}/#sign-in=${code}&master`);
+      await page.getByText('Messages with other installs (1)').click();
       const thread = page.getByRole('article', { name: 'Thread with install-a' });
       await expect(thread).toBeVisible(settled);
       await expect(thread.getByRole('heading')).toHaveText('With install-a');

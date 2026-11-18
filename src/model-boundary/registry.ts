@@ -69,7 +69,9 @@ export const modelSchema = z.object({
     asOf: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'A price is as of a day, YYYY-MM-DD').optional() }).strict().prefault({}),
   capability: z.object({ tier: z.enum(capabilityTiers).default('strong'), contextTokens: z.number().int().min(1000).max(100_000_000).nullable().default(null), notes: text(300).optional() }).strict().prefault({}),
 }).strict();
-export const usageSchema = z.object({ window: text(40), percent: z.number().min(0).max(1000), resetsAt: z.string().datetime().nullable() }).strict();
+export const usageSchema = z.object({ window: text(40), percent: z.number().min(0).max(1000), resetsAt: z.string().datetime().nullable(),
+  /** When a window carried past a failed usage read was last read (GY-3494). */
+  readAt: z.string().datetime().optional() }).strict();
 /** What was last observed about an account: by an executor's probe on its host, or marked by an operator. */
 export const quotaObservationSchema = z.object({
   loggedIn: z.boolean().nullable().default(null),

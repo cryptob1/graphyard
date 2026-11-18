@@ -53,7 +53,7 @@ test('unit:trial-refusal-records-failing-tests the worker rework brief shows the
   const rework = trialFailureRework(work, head, reason);
   assert.ok(rework.reason.length <= 2000, `the engine takes the rework reason (${rework.reason.length})`);
   assert.match(rework.reason, /failing tests: browser-tests\/item-details\.spec\.ts › item details › shows the merge ledger\nlog tail:\n/);
-  assert.match(rework.reason, /1 failed\. Nothing but a new head can pass the trial/);
+  assert.match(rework.reason, /1 failed\. Reproduce with node --import tsx tests\/helpers\/run-tests\.ts/);
   const brief = reworkBriefSection(work, { reason: rework.reason, at: '2026-11-05T21:00:00.000Z' } as never);
   assert.match(brief, /item details › shows the merge ledger/);
   assert.match(brief, /log tail:/);

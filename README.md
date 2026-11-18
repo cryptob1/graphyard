@@ -6,7 +6,7 @@
 
 ## Why Graphyard
 
-- **You decide goals, money, credentials.** Tell any agent your decision; it records your own words. Reverse a relayed answer under Needs you. Blockers are the Master's.
+- **You decide goals, money, credentials.** Tell any agent; reverse relayed answers under Needs you. Master handles blockers.
 - **Every change is proven.** Workers build, agents review, main trials each head.
 - **Production stays safe.** Main deploys itself; failures revert automatically.
 
@@ -27,7 +27,7 @@ Once published to npm:
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
-The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in.
+The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. The dashboard's trust strip counts this week's deliveries: verified by running the real app, sent back, reverted. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. A project is onboarded once it serves the real app and has a [feature map](docs/setup.md#onboarding-a-project). Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in.
 
 ## Where things run
 

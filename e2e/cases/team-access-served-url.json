@@ -1,0 +1,22 @@
+{
+  "id": "team-access-served-url",
+  "title": "Setup and invites carry the https address Tailscale serves the install at",
+  "description": "The real host loop sync and control plane, with only a stub tailscale on PATH whose status reports this machine's node and whose serve status maps :8447 over HTTPS to the server's loopback port, and a machine directory written before GY-3294 (no node recorded). Team access carries installUrl https://vishrog.tail3739e3.ts.net:8447 and no 'Tailscale is not serving' guidance; with a saved share link an invite's message, sign-in link and install URL all use that address; with a mapping for another port only, the warning names this install's port. Setup shows 'This install: https://vishrog.tail3739e3.ts.net:8447' with no warning. No Docker or Tailscale credentials.",
+  "tags": ["team-access", "setup", "dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "The loop sync reads the served https address; team access and invites carry it",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/team-access-served-url.test.ts",
+      "timeoutSeconds": 180
+    },
+    {
+      "kind": "command",
+      "name": "Setup shows the served address and no warning",
+      "run": "npm run test:browser -- browser-tests/team-access-served-url.spec.ts",
+      "timeoutSeconds": 240
+    }
+  ]
+}

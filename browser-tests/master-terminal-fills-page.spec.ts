@@ -58,7 +58,7 @@ async function open(browser: Browser, url: string, width: 1280 | 390, viewer: 't
     await page.addInitScript(() => sessionStorage.setItem('graphyard-token', 'test-reader'));
     await page.goto(`${url}/#master`);
   }
-  await expect(page.getByRole('status')).toContainText(viewer === 'typing' ? 'You can type here' : 'read-only', settled);
+  await expect(page.getByRole('status')).toContainText(viewer === 'typing' ? 'You can type here' : 'View only', settled);
   return { page, close: () => context.close() };
 }
 

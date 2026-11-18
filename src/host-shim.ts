@@ -1,7 +1,7 @@
 // Concern: GY-3412 — graphyard-host-shim, the only command this machine's SSH key may run on a host
 // (authorized_keys restrict,command=…, written by `graphyard host prepare`). It runs as the host's
 // unprivileged gy-compute user with rootless Docker and answers fixed verbs with validated arguments:
-//   probe                          read cores, load, CPU steal, sensors and running trial containers
+//   probe                          the shim's own digest, then cores, load, CPU steal, sensors and running trial containers
 //   receive-pack REPO SHA          a git pack on stdin into the per-repo mirror ~/.graphyard/mirrors/REPO.git
 //   receive-image IMAGE            `docker save` output on stdin, loaded once per warm image; older warm images go
 //   prepare-run REPO SHA IMAGE     a checkout of SHA cloned from the mirror under ~/.graphyard/runs,
@@ -12,6 +12,7 @@
 //   clean RUN                      remove a run directory
 // Anything else is refused. Containers keep Docker's default seccomp and system paths and never get
 // the Docker socket or the network, so a shard reaches no private address, the tailnet or the host.
+import { createHash } from 'node:crypto';
 import { trialLauncher } from './merge-writer/trial-container.js';
 import { defaultDiskFloorGb, minimumTrialContainers, trialHotCelsius, trialPressureBoundSeconds, trialStartOrder } from './merge-writer/trial-load.js';
 
@@ -28,7 +29,8 @@ export const hostProbeScript = [
 /** The warm image a host runs shards in: the trial image's digest and the lockfile's hash (`none` without one). */
 export const warmImagePattern = /^graphyard-warm:[0-9a-f]{12}-(?:[0-9a-f]{12}|none)$/;
 
-export const hostShimScript = `#!/bin/sh
+const shimDigestSlot = '@GRAPHYARD_SHIM_DIGEST@';
+const shimTemplate = `#!/bin/sh
 # graphyard-host-shim: the only command Graphyard's SSH key may run here (graphyard host prepare).
 refuse() { echo "graphyard-host-shim refuses: $SSH_ORIGINAL_COMMAND" >&2; exit 1; }
 [ $# -eq 0 ] || { [ $# -eq 2 ] && [ "$1" = --home ]; } || refuse
@@ -36,6 +38,7 @@ export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
 case "$SSH_ORIGINAL_COMMAND" in
   probe)
+    echo "shim ${shimDigestSlot}"
     echo "user $(id -u) $(id -Gn)"
 ${hostProbeScript.split('\n').map(line => `    ${line}`).join('\n')}
     ;;
@@ -165,3 +168,6 @@ GRAPHYARD_VERBS
   *) refuse ;;
 esac
 `;
+/** GY-3476: this release's shim, named by the digest its probe prints; a host whose probe prints another (or none) runs an older shim. */
+export const hostShimDigest = createHash('sha256').update(shimTemplate).digest('hex');
+export const hostShimScript = shimTemplate.replace(shimDigestSlot, hostShimDigest);

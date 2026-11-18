@@ -1,7 +1,7 @@
 {
   "id": "gates-removed-this-week",
   "title": "The dashboard header shows gates removed this week beside reverts this week",
-  "description": "Starts the real control plane over a checkout and Postgres: the master records a lesson with `master lesson add --enforceable`, the loop's lessons-to-code pass files its item through the API, a batch-gate revert of another item is on the gate record, and the item's delivery removes the lesson. /api/status's thisWeek then reads one revert and one gate removed, and the rendered dashboard header shows 'Reverts this week: 1 GY-N · Gates removed this week: 1 GY-M' with each item a link. No provider credentials, accounts or network.",
+  "description": "Starts the real control plane over a checkout and Postgres: the master records a lesson with `master lesson add --enforceable`, the loop's lessons-to-code pass files its item through the API, a batch-gate revert of another item is on the gate record, and the item's delivery removes the lesson. /api/status's thisWeek then reads one revert and one gate removed, and the rendered dashboard header shows 'This week: 1 revert GY-N · 1 gate removed GY-M' with each item a link; while both read 0 it shows no week line. No provider credentials, accounts or network.",
   "target": "any",
   "required": false,
   "steps": [

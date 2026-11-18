@@ -13,7 +13,7 @@ import { projectCaseSuite, type StaticBuildShell } from '../release-project.js';
 import { composeBounds, composeLeftovers, composeProjectName, dockerEnvironment, snapshotComposeSite, sweepComposePreviews, type ComposeBounds, type Docker } from '../compose-preview.js';
 import { previewIdleMs, stopIdleStacks, type PreviewActivity } from '../idle-stacks.js';
 import { previewDatabase, previewDemand, previewEnded, previewEndReason, previewInstance, previewPath, previewRequested, previewSiteByteLimit, previewSiteFileLimit, previewSitePathSchema, type ItemPreview, type PreviewCaseResult, type PreviewEndReason, type PreviewSiteFile } from '../project-previews.js';
-import type { Application, ProjectDelivery } from '../project-applications.js';
+import type { PreviewableApplication as Application, ProjectDelivery } from '../project-applications.js';
 import type { Work } from '../model/work.js';
 import { heldEntries, heldOpenPaths, readTempOwner, tempOwnerGone, tempOwnerJudgeable, tempOwnerMarker, tmpReclaimMinAgeMs, treeLastWritten, writeTempOwner } from '../tmp-reclaim.js';
 

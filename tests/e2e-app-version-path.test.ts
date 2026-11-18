@@ -9,7 +9,7 @@ import { loadCases, scenarioDefinition } from '../src/e2e/case.js';
 import { recordRuns, runCases, summarize } from '../src/e2e/runner.js';
 import { openPreview } from '../src/merge-writer/preview.js';
 import { applicationSchema } from '../src/model-boundary/project-applications.js';
-import type { Application } from '../src/model/project-applications.js';
+import type { PreviewableApplication as Application } from '../src/model/project-applications.js';
 // @ts-expect-error the scripts are plain ESM without declarations
 import { deliveryFixture } from '../scripts/e2e-delivery-fixture.mjs';
 
@@ -60,8 +60,8 @@ test('unit:tests/e2e-app-version-path.test.ts — a short, invalid or unreachabl
 test('unit:tests/e2e-app-version-path.test.ts — static, compose and node applications may declare a versionPath: a path from /, without a query', () => {
   const kinds = [{ id: 'site', kind: 'static', directory: 'public' }, { id: 'app', kind: 'compose', file: 'compose.yml', service: 'web', port: 8080 }, { id: 'web', kind: 'node', directory: 'web', start: 'node server.mjs' }];
   for (const application of kinds) {
-    assert.equal(applicationSchema.parse({ ...application, versionPath: '/api/meta/version' }).versionPath, '/api/meta/version');
-    assert.equal(applicationSchema.parse(application).versionPath, undefined);
+    assert.equal((applicationSchema.parse({ ...application, versionPath: '/api/meta/version' }) as Application).versionPath, '/api/meta/version');
+    assert.equal((applicationSchema.parse(application) as Application).versionPath, undefined);
     for (const versionPath of ['api/meta/version', 'https://app.example/version', '//other.example/version', '/version?full=1', '/ver sion', ''])
       assert.equal(applicationSchema.safeParse({ ...application, versionPath }).success, false, `${application.kind} ${JSON.stringify(versionPath)}`);
   }
@@ -71,7 +71,7 @@ test('e2e:e2e-app-version-path — a preview of the fixture\'s node application 
   const directory = await realpath(await temporaryDirectory('app-version-path'));
   const { root } = await deliveryFixture(directory);
   const mergeSha = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  const declared: Application = applicationSchema.parse(JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8')).delivery.applications.find((application: Application) => application.id === 'web'));
+  const declared = applicationSchema.parse(JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8')).delivery.applications.find((application: Application) => application.id === 'web')) as Application;
   assert.equal(declared.versionPath, '/api/meta/version');
   const { versionPath: _, ...rest } = declared;
   const undeclared: Application = rest;

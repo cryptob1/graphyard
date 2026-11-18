@@ -1,6 +1,9 @@
 import type { z } from 'zod';
 import type { applicationSchema } from '../model-boundary/project-applications.js';
 export type Application = z.infer<typeof applicationSchema>;
+/** An application Graphyard can serve as a preview or trial; an `external` one is only observed (GY-3459). */
+export type PreviewableApplication = Exclude<Application, { kind: 'external' }>;
+export const previewable = (applications: readonly Application[]) => applications.filter((application): application is PreviewableApplication => application.kind !== 'external');
 
 /** A case id as src/e2e/case.ts accepts it: lowercase letters, digits, ., _ and -, at most 100 characters. */
 export const boundCaseId = /^[a-z0-9][a-z0-9._-]{0,99}$/;

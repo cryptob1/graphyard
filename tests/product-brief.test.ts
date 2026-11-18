@@ -161,7 +161,7 @@ test('e2e:product-brief — the control plane serves the mirrored brief and the 
   // The Product page renders the brief read-only: the sections, who kept it and why, no editing control in sight.
   const html = renderToStaticMarkup(createElement(ProductView, { brief: read.body.brief, error: '', loading: false, retry: () => {} }));
   for (const heading of ['Problem', 'Users', 'What success looks like', 'Current bets', 'Open questions']) assert.ok(html.includes(`>${heading}</h2>`), heading);
-  assert.match(html, /read-only/);
+  assert.match(html, /Updated Nov 13 by the master\./);
   assert.match(html, /the standing brief/);
   assert.ok(!html.includes('<button'), 'the page edits nothing');
   const empty = renderToStaticMarkup(createElement(ProductView, { brief: null, error: '', loading: false, retry: () => {} }));

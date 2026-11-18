@@ -84,7 +84,8 @@ test('unit:provider-usage-adapters — each supported provider plan has a usage 
     data: {
       limits: [
         { type: 'TOKENS_LIMIT', unit: 3, percentage: 35, nextResetTime: now + 3 * hour },
-        { type: 'TIME_LIMIT', unit: 5, percentage: 88, nextResetTime: now + 5 * day },
+        { type: 'TOKENS_LIMIT', unit: 6, percentage: 88, nextResetTime: now + 5 * day },
+        { type: 'TIME_LIMIT', unit: 5, percentage: 4, nextResetTime: now + 20 * day },
       ],
     },
   };
@@ -95,7 +96,7 @@ test('unit:provider-usage-adapters — each supported provider plan has a usage 
   const zai5h = zaiParsed.windows.find(w => w.window === '5h');
   const zai7d = zaiParsed.windows.find(w => w.window === '7d');
   assert.ok(zai5h && zai5h.percent === 35, 'Z.AI 5h tokens limit parsed');
-  assert.ok(zai7d && zai7d.percent === 88, 'Z.AI 7d time limit parsed');
+  assert.ok(zai7d && zai7d.percent === 88, 'Z.AI weekly tokens limit parsed; the monthly TIME_LIMIT is no window');
 
   // Z.AI 429 limit notice response
   const zai429Response = {
@@ -259,7 +260,8 @@ test('unit:accounts-page-groups-by-plan — accounts that draw on one plan are g
     data: {
       limits: [
         { type: 'TOKENS_LIMIT', unit: 3, percentage: 35, nextResetTime: now + 3 * hour },
-        { type: 'TIME_LIMIT', unit: 5, percentage: 88, nextResetTime: now + 5 * day },
+        { type: 'TOKENS_LIMIT', unit: 6, percentage: 88, nextResetTime: now + 5 * day },
+        { type: 'TIME_LIMIT', unit: 5, percentage: 4, nextResetTime: now + 20 * day },
       ],
     },
   };

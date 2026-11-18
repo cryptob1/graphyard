@@ -1,6 +1,6 @@
 {
   "id": "master-page-terminal-refused",
-  "title": "The Master page says 'refused: <reason>' when the terminal cannot start",
+  "title": "The Master page says the reason when the terminal cannot start",
   "description": "A real browser against a control plane with no herdr and no host supervisor: the Master page shows 'refused:' with the cause, not 'Detached'.",
   "tags": [
     "dashboard",

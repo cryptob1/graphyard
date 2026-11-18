@@ -51,7 +51,7 @@ import { conflictingVerdictStates } from './model/review-conflict.js';
 import type { ControlPlaneReviewLaunch } from './model/post-merge-review.js';
 import { LauncherUnavailableError } from './master/config.js';
 import { resolveRepositoryPolicy } from './model-boundary/repository-policy.js';
-import type { E2eServe } from './model/repository-policy.js';
+import { type E2eServe, policySections } from './model/repository-policy.js';
 import { servingReport } from './deploy-watch.js';
 import { commandApplication, serveHead } from './merge-writer/serve-head.js';
 import { runEnvironment } from './runner/pi.js';
@@ -560,7 +560,7 @@ export async function headServeDeclaration(root: string, sha: string, run: Child
   let text: string;
   try { text = String(await run('git', ['-C', root, 'show', `${sha}:graphyard.json`])); }
   catch { return null; }
-  try { return resolveRepositoryPolicy(JSON.parse(text)).e2e.serve; } catch { return null; }
+  try { return resolveRepositoryPolicy(policySections(JSON.parse(text))).e2e.serve; } catch { return null; }
 }
 
 /**
@@ -607,6 +607,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + `Classify findings and post by node ${config.cliPath ?? launcherPath} guide review. `
     + standards.simplicity
     + standards.repetition
+    + (files?.some(file => file.startsWith('web/')) ? standards.ux : '')
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'Read-only: no edits, Git mutations, work claims or evidence submissions; do not run the project\'s build, tests, or servers. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
@@ -656,6 +657,7 @@ function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + reviewReadSection(config.cliPath ?? launcherPath, plane.head)
     + walk
     + `Then judge: ${reviewStandards(binding).product}`
+    + `${reviewStandards(binding).ux}Request changes on any violation of this UX standard, with a screenshot of it. `
     + (plane.answer ? readOnlySession + plane.answer : productPostSection(config.cliPath ?? launcherPath) + readOnlySession
     + `Posting that verdict is granted to this session's role, not a permission to request: post it as soon as you have judged the feature, without asking for confirmation. `
     + `review post sends it to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR. `

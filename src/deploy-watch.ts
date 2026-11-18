@@ -1,3 +1,4 @@
+import { appOnboarding, type AppOnboarding } from './model/onboarding-work.js';
 // The continuous deploy builds, restarts and checks health before publishing the ready CLI.
 // Failed builds leave the healthy pairing alone; failed restarts use schema-aware rollback.
 // The master loop restarts onto the serving tip recorded here (daemon/run.ts restartCause).
@@ -10,6 +11,8 @@ import type { GitRunner } from './merge-writer/local-observation.js';
 import { serveRecordPath, readServeRecord, type ServeCheck } from './serve-app.js';
 import { servedVerified } from './batch-gate.js';
 import { graphyardRepository } from './scenarios.js';
+import { servedCommit } from './production-watch.js';
+import type { Work } from './model/work.js';
 
 /**
  * What the deploy last served, the tip that failed and is skipped until the base moves past it, and,
@@ -412,12 +415,15 @@ export type GitRead = (args: readonly string[]) => Promise<string>;
  * the URL and the failure are the declared serve's alone.
  */
 export interface ServingReport {
+  onboarding: AppOnboarding;
   /** Nothing serves this repository: no deploy record names it and no serve pass has served or failed. */
   unconfigured: boolean;
   /** The served commit (the declared serve's when one is recorded, else the deploy record's); null when nothing serves. */
   commit: string | null;
   /** The base branch's tip as the shared checkout holds it; null when it cannot be read. */
   main: string | null;
+  /** When the served commit was deployed (the serve's start, else the deploy record's time); null when nothing serves. */
+  deployedAt: string | null;
   /** Whether the served commit is main; null when either is unreadable. */
   atMain: boolean | null;
   /** The last failure: the declared serve's build failure, else a configured deploy's failed tip. */
@@ -444,12 +450,66 @@ export async function servingReport(root: string | null | undefined, repository:
       try { const count = (await git(['rev-list', '--count', `${commit}..${main}`])).trim(); pending = /^\d+$/.test(count) ? Number(count) : null; } catch { /* unreadable */ }
     }
   }
+  let onboarding = appOnboarding(null);
+  if (main && git) {
+    try { onboarding = appOnboarding(JSON.parse(await git(['show', `${main}:graphyard.json`]))); } catch { /* missing or invalid main declaration stays not onboarded */ }
+  }
   return {
+    onboarding,
     unconfigured: !commit,
     commit, main,
+    deployedAt: serve?.commit ? serve.started ?? serve.at : configured ? record!.at : null,
     atMain: commit && main ? commit === main : null,
     failedDeploy: failed ? { tip: failed.tip, reason: failed.reason, restoring: !serve && configured ? record!.restore ?? null : null } : null,
     pending,
     serve: serve ? { url: serve.url ?? null, failure: serve.failed ? { commit: serve.failed, reason: serve.reason } : null, check: serve.check ?? null } : null,
   };
+}
+
+/** The health URL graphyard.json declares as `app.healthUrl` (GY-3452): an install that deploys elsewhere answers its live commit there. */
+export function declaredHealthUrl(root: string | null | undefined): string | null {
+  if (!root) return null;
+  try {
+    const url = JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8'))?.app?.healthUrl;
+    return typeof url === 'string' && /^https?:\/\//.test(url) ? url : null;
+  } catch { return null; }
+}
+
+let health: { url: string; at: number; commit: string | null } | null = null;
+/**
+ * The commit the health URL answers, asked at most once a minute however often the dashboard polls;
+ * null when it does not answer one. Only the first ask is awaited: later ones refresh in the
+ * background, so a slow health URL never holds /api/status.
+ */
+async function healthCommit(url: string, now: number, fetcher: typeof fetch): Promise<string | null> {
+  const ask = () => servedCommit(url, fetcher).catch(() => null);
+  if (health?.url !== url) {
+    const entry = health = { url, at: now, commit: null as string | null };
+    return entry.commit = await ask();
+  }
+  if (now - health.at >= 60_000) {
+    const entry = health; entry.at = now;
+    void ask().then(commit => { entry.commit = commit; });
+  }
+  return health.commit;
+}
+
+/** What users have (GY-3452): the live commit, and the merged items it does not contain yet, by key. */
+export interface LiveRelease { commit: string; waiting: string[] }
+
+/**
+ * The live commit — what `app.healthUrl` answers, else what the serve or deploy record (or the
+ * production watch) serves — and every merged item whose merge commit main holds but the live
+ * commit does not. Null when nothing names a live commit or the checkout cannot place it, so the
+ * dashboard claims nothing shipped.
+ */
+export async function liveRelease(root: string | null | undefined, served: string | null, main: string | null, work: readonly Pick<Work, 'key' | 'stage' | 'delivery'>[], git: GitRead | null | undefined, options: { now?: number; fetcher?: typeof fetch } = {}): Promise<LiveRelease | null> {
+  const url = declaredHealthUrl(root);
+  const answered = url ? await healthCommit(url, options.now ?? Date.now(), options.fetcher ?? fetch) : null;
+  if (!git || !main || !(answered ?? served)) return null;
+  try {
+    const commit = (await git(['rev-parse', '--verify', `${answered ?? served}^{commit}`])).trim();
+    const notLive = new Set((await git(['rev-list', `${commit}..${main}`])).split('\n').map(line => line.trim()).filter(Boolean));
+    return { commit, waiting: work.filter(item => item.stage === 'done' && item.delivery?.mergeSha && notLive.has(item.delivery.mergeSha)).map(item => item.key) };
+  } catch { return null; }
 }
