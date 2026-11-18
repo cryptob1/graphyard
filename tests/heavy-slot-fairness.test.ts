@@ -34,7 +34,7 @@ test('integration:heavy-slot-fairness — at limit 3 project A fills every slot 
   mkdirSync(directory);
   writeFileSync(join(directory, 'limit'), '3\n');
   // With only one project waiting nothing changes: A fills the limit.
-  const a = [];
+  const a: HeldSlot[] = [];
   for (let n = 1; n <= 3; n++) a.push(await acquireVerificationSlot({ directory, label: `merge trial A-${n}`, project: 'acme/a' }));
   assert.equal(heldSlots(directory).filter(entry => entry.slot < gateSlot).length, 3);
   // A queues a fourth job first, then B queues its only one.
@@ -87,7 +87,7 @@ test('e2e:heavy-slot-fairness — two installs\' loops on one host submit merge 
   const events = () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map(line => line.split(' ') as [string, string]);
   // Another job holds both slots while the two loops submit: the app's three trials queue first, then the site's two.
   const holding = [await acquireVerificationSlot({ directory, label: 'deploy build', project: 'acme/ops' }), await acquireVerificationSlot({ directory, label: 'whole suite', project: 'acme/ops' })];
-  const [app, site] = installs, jobs = [];
+  const [app, site] = installs, jobs: ReturnType<typeof trial>[] = [];
   for (const [install, id] of [[app, 'GY-1'], [app, 'GY-2'], [app, 'GY-3'], [site, 'GY-11'], [site, 'GY-12']] as const) {
     const job = trial(install, id);
     jobs.push(job);
