@@ -1,8 +1,5 @@
-import { test, expect as baseExpect, type Page } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { boardApi, boardStatus } from './ui-board';
-
-// On a loaded trial host the default 5 s poll is what a busy page loses, not its meaning (as GY-3345).
-const expect = baseExpect.configure({ timeout: 15_000 });
 
 // GY-3306: the browser tab names the project the dashboard serves, so an operator's tabs tell
 // installs apart. Two distinct configured identities each keep gh · OWNER/REPO as the document

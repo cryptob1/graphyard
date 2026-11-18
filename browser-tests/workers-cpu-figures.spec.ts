@@ -72,7 +72,7 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 390, height: 844 
       await expect(figures).toContainText('steal 12%');
       await expect(figures).toContainText('temperature 96°C');
       await expect(figures).toContainText('2 test workers per session');
-      await expect(figures).toContainText('2 of 4 test merges at once');
+      await expect(figures).toContainText('trials 2 of 4');
     } finally { await page.close(); await close(); }
   });
 }

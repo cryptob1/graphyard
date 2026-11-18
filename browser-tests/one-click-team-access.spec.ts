@@ -14,7 +14,7 @@ test.use({ actionTimeout: 15_000 });
 // GY-3294: two installs on one simulated Tailscale machine, each served on its own port, share the
 // machine's Tailscale link through the real Setup page and each invite with both links.
 test('e2e:one-click-team-access — two installs share the machine link and copy invitations carrying both locks', async ({ browser, baseURL }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(120_000);
   const hostDir = await temporaryDirectory('gy-team-access'), machineDir = join(hostDir, 'machine');
   await mkdir(machineDir);
   await writeFile(join(machineDir, 'tailnet.json'), JSON.stringify({ dnsName: 'yard.tail-test.ts.net.', ip: '100.64.0.7', deviceId: 'nFAKE123CNTRL' }));
@@ -80,11 +80,11 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     const pageA = await open(a), pageB = await open(b);
     const sectionA = await signIn(pageA, a), sectionB = await signIn(pageB, b);
 
-    // GY-3345: this spec's own budget covers every poll: on a loaded trial host (two control
+    // GY-3345: this spec's own 15 s budget covers every poll: on a loaded trial host (two control
     // planes and two clusters per install beside the rest of the suite) the default 5 s expect
     // timeout is what a busy page loses, not its meaning. After the host loops settle, the routed
     // team-access read gets the full budget without a retry navigating away from it (GY-3412).
-    const settled = { timeout: 25_000 };
+    const settled = { timeout: 15_000 };
     await expect(sectionA).toContainText("One machine, many installs, one port each. Two locks: the Tailscale share lets a person's devices reach this machine", settled);
     await expect(sectionA.getByRole('link', { name: a.tailnet })).toBeVisible(settled);
     await expect(sectionA).toContainText(`(port ${a.port})`, settled);

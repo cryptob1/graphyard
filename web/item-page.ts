@@ -97,11 +97,11 @@ export function whatIsLeft(work: Work, now: number, release: ReleaseView = noRel
 export function activityLabel(kind: string): string {
   const exact: Record<string, string> = {
     // Commands (src/engine.ts `commands`), recorded under their own names.
-    priority: 'Priority changed', create: 'Created', ready: 'Released for work', requirements: 'Requirements changed', reviewpolicy: 'Review rules changed', unblock: 'Unblocked', hold: 'Held out of dispatch', message: 'Master messaged the worker',
-    rework: 'Sent back for changes', resolve: 'A decision was recorded', recover: 'Recovered after a worker stopped', claim: 'Picked up by a worker',
-    rereview: 'Asked for a fresh review', mechanicalplan: 'A planned fix round was recorded for the review', heartbeat: 'The worker is still working', quarantine: 'A stopped worker was fenced off', launch: 'A session was started',
-    settle: 'A worker’s attempt ended', autosettle: 'A worker’s attempt ended', release: 'A worker stopped working on it', workspace: 'The worker said where the code lives',
-    submit: 'Handed in', blocked: 'The worker reported it blocked', defer: 'The worker found its reading cannot exist yet and set it to wait', window: 'Set to wait until its reading can exist', dispatchblock: 'Graphyard stopped starting it after the same launch failure repeated',
+    priority: 'Priority changed', create: 'Created', ready: 'Released for work', requirements: 'Requirements changed', reviewpolicy: 'Review rules changed', unblock: 'Unblocked', hold: 'Held out of dispatch', message: 'Master messaged the builder',
+    rework: 'Sent back for changes', resolve: 'A decision was recorded', recover: 'Recovered after a builder stopped', claim: 'Picked up by a builder',
+    rereview: 'Asked for a fresh review', mechanicalplan: 'A planned fix round was recorded for the review', heartbeat: 'The builder is still working', quarantine: 'A stopped builder was fenced off', launch: 'A session was started',
+    settle: 'A builder’s attempt ended', autosettle: 'A builder’s attempt ended', release: 'A builder stopped working on it', workspace: 'The builder said where the code lives',
+    submit: 'Handed in', blocked: 'The builder reported it blocked', defer: 'The builder found its reading cannot exist yet and set it to wait', window: 'Set to wait until its reading can exist', dispatchblock: 'Graphyard stopped starting it after the same launch failure repeated',
     resubmit: 'Graphyard handed in the finished head the blocker named',
     taste: 'Tasted from the Work page',
     evidence: 'Proof recorded', deployment: 'Deployment recorded', reading: 'The loop recorded its reading', revoke: 'A proof was withdrawn', session: 'A session was recorded', request: 'An agent asked for a decision',
@@ -110,14 +110,14 @@ export function activityLabel(kind: string): string {
     // The control plane's own facts.
     'human.requested': 'Asked you for a decision', 'human.answered': 'You answered', 'review.requested': 'Review requested', 'review.failover': 'Handed to another reviewer',
     'queue.ejected': 'Taken out of the line to merge', 'queue.predicted': 'Lined up to merge', 'merge.execution.committed': 'Merged', 'delivery.verified': 'Live in production',
-    'direct-merge.delivered': 'Merged', 'lease.expired': 'A worker’s time ran out', 'work.closed': 'Closed', 'intake.created': 'Created',
+    'direct-merge.delivered': 'Merged', 'lease.expired': 'A builder’s time ran out', 'work.closed': 'Closed', 'intake.created': 'Created',
     'base.refreshed': 'Brought up to date with the main branch', 'base.conflict': 'Conflicts with the main branch', 'capacity.exhausted': 'Out of agent capacity',
     'capacity.interrupted': 'Out of agent capacity', 'capacity.restored': 'Agent capacity restored', 'capacity.spent': 'Agent capacity spent',
     'evidence.exercise.refused': 'A proof did not count',
   };
   if (exact[kind]) return exact[kind];
   const prefix: [RegExp, string][] = [
-    [/^lease\./, 'A worker stopped working on it'], [/^github\./, 'Graphyard checked GitHub'], [/^review\./, 'Review updated'],
+    [/^lease\./, 'A builder stopped working on it'], [/^github\./, 'Graphyard checked GitHub'], [/^review\./, 'Review updated'],
     [/^evidence\./, 'Proof recorded'], [/^queue\./, 'Line to merge updated'], [/^merge\./, 'Merge step recorded'], [/^(branch|base)\./, 'Branch updated'],
     [/^(decision|escalation|closed-question|judgement|lead)\./, 'A decision was recorded'], [/^(requirements|policy)\./, 'Requirements changed'],
     [/^(action|validation)\./, 'Graphyard ran a step'], [/^capacity\./, 'Agent capacity changed'],

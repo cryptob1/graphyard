@@ -1,6 +1,6 @@
 {
   "id": "heavy-work-drain",
-  "title": "The master drains heavy work for another project's quiet window and resumes it",
+  "title": "The Chief drains heavy work for another project's quiet window and resumes it",
   "description": "graphyard master drain REASON lets a running trial finish while new merge trials, declared checks, host worker verification and session suites wait, and the loop keeps cycling and reporting (the batch gate runs on, GY-3450); a restart keeps the drain with its reason and requester, and master resume admits the waiting jobs with every gate they had.",
   "target": "any",
   "required": false,

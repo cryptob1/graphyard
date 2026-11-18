@@ -88,7 +88,7 @@ test('integration:gate-reserved-slot — with both ordinary slots held by item w
   {
     let during: (string | undefined)[] = [];
     const yard = await world('reserved-gate', async () => { during = holders(yard.slots); return passing; });
-    const trial = await acquireVerificationSlot({ directory: yard.slots, label: 'test merge GY-1' });
+    const trial = await acquireVerificationSlot({ directory: yard.slots, label: 'merge trial GY-1' });
     const verification = await acquireVerificationSlot({ directory: yard.slots, label: 'worker verification GY-2' });
     requestHeavyDrain(yard.slots, 'quiet window', 'graphyard-master');
     const started = Date.now();
@@ -96,7 +96,7 @@ test('integration:gate-reserved-slot — with both ordinary slots held by item w
     assert.ok(step?.gate, 'a drain does not stop the gate run');
     await step.gate;
     assert.ok(Date.now() - started < 5_000, 'the gate check did not wait for a slot');
-    assert.deepEqual(during, ['test merge GY-1', 'test merge batch-gate', 'worker verification GY-2'], 'the gate check runs beside both ordinary holders');
+    assert.deepEqual(during, ['merge trial GY-1', 'merge trial batch-gate', 'worker verification GY-2'], 'the gate check runs beside both ordinary holders');
     assert.ok(heldSlots(yard.slots).some(entry => entry.slot === gateSlot) === false, 'the reserved slot is free again');
     assert.equal(yard.verified(), yard.tip, 'the gate verified main');
     assert.equal(yard.checks(), 1);
@@ -116,8 +116,8 @@ test('integration:gate-reserved-slot — with both ordinary slots held by item w
   // Every slot held, the reserved one by another project's gate: after five minutes with no check started the alarm names the holders, and clears once a check starts.
   {
     const yard = await world('reserved-gate-stall');
-    const other = await acquireVerificationSlot({ directory: yard.slots, label: 'test merge batch-gate', project: 'other-project', firstSlot: gateSlot, slots: 1 });
-    const trial = await acquireVerificationSlot({ directory: yard.slots, label: 'test merge GY-1' });
+    const other = await acquireVerificationSlot({ directory: yard.slots, label: 'merge trial batch-gate', project: 'other-project', firstSlot: gateSlot, slots: 1 });
+    const trial = await acquireVerificationSlot({ directory: yard.slots, label: 'merge trial GY-1' });
     const verification = await acquireVerificationSlot({ directory: yard.slots, label: 'worker verification GY-2' });
     const flight = (await batchGateStep(yard.cycle))!.gate!;
     await sleep(300);
@@ -130,7 +130,7 @@ test('integration:gate-reserved-slot — with both ordinary slots held by item w
     await batchGateStep(yard.cycle);
     const alarm = stall();
     assert.equal(alarm?.state, 'failed', 'the stall alarm stands');
-    for (const holder of ['test merge GY-1', 'worker verification GY-2', 'test merge batch-gate (other-project)']) assert.match(alarm!.detail, new RegExp(holder.replace(/[()]/g, '\\$&')), `the alarm names ${holder}`);
+    for (const holder of ['merge trial GY-1', 'worker verification GY-2', 'merge trial batch-gate (other-project)']) assert.match(alarm!.detail, new RegExp(holder.replace(/[()]/g, '\\$&')), `the alarm names ${holder}`);
     other.release();
     await flight;
     assert.equal(yard.verified(), yard.tip);

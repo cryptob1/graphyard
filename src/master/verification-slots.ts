@@ -272,9 +272,7 @@ export function waitLine(options: Pick<AcquireOptions, 'directory' | 'slots' | '
   return `graphyard: ${options.label} waits for a host heavy-job slot: every Graphyard project on this host shares ${options.slots ?? heavyJobLimit(options.directory)} at once`
     + `${holders.length ? `, held by ${holders.join('; ')}` : ''}. It starts when one frees (${join(options.directory, 'limit')} sets the limit).`;
 }
-/** GY-3396: a test merge's heavy job, by its item key (or the batch gate's), in the words the Work page shows. */
-export const testMergeLabel = (key: string) => `test merge ${key}`;
-/** The same wait as a test merge's step, which the control plane bounds at 100 characters. */
+/** The same wait as a merge trial's step, which the control plane bounds at 100 characters. */
 export const waitStep = (directory: string) =>
   `waiting for a host heavy-job slot, held by ${heldSlots(directory).filter(entry => entry.slot < declarationSlot).map(holderText).join(', ')}`.slice(0, 100);
 

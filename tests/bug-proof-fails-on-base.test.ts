@@ -114,7 +114,7 @@ test(`${own} — a feature whose proof file is new on the head merges even thoug
 
 test(`${own} — the master guide's e2e rule says a feature's or bug's proofs must include one failing on the base tip, else the trial refuses it as not reproduced, and chores are exempt`, () => {
   const paragraph = masterGuide.split('\n').find(line => line.startsWith('Every item needs an `e2e:NAME` criterion')) ?? '';
-  assert.match(paragraph, /A feature's or bug's proofs must include one that fails on the base tip, or the test merge refuses it because the proof already passes before the change; chores are exempt\./);
+  assert.match(paragraph, /A feature's or bug's proofs must include one that fails on the base tip, or the merge trial refuses it because the proof already passes before the change; chores are exempt\./);
 });
 
 test(`${own} — a bug item whose unit proof and E2E proof both pass on the base tip is refused as not reproduced naming both: the bound case is served from the base too`, { timeout: 300_000 }, async () => {

@@ -115,7 +115,7 @@ test('unit:ui-reads-session-state — Up next says what an item waits on: the de
   assert.deepEqual(upNext, ['GY-12', 'GY-13', 'GY-17'], 'both are released and unclaimed, beside GY-12, whose worker\'s lease lapsed');
   assert.deepEqual(nextActor(item('GY-13'), 'up-next', NOW, undefined, work), { who: 'Nobody yet', does: 'Waiting for GY-17 to ship first' });
   assert.deepEqual(nextActor(item('GY-17'), 'up-next', NOW, undefined, work), { who: 'Nobody yet', does: 'Waiting for GY-14 to release staging-db: an exclusive resource it needs' });
-  assert.equal(nextActor(item('GY-12'), 'up-next', NOW, undefined, work).does, 'Hands it to the next free worker', 'GY-12 really is waiting for a worker');
+  assert.equal(nextActor(item('GY-12'), 'up-next', NOW, undefined, work).does, 'Hands it to the next free builder agent', 'GY-12 really is waiting for a worker');
   assert.equal(upNextMeaning(byGroup['up-next'], work, NOW), '1 waiting for a worker · 2 held', 'the tile counts what waits for a worker apart from what is held');
   assert.equal(upNextMeaning(byGroup['up-next'].filter(entry => entry.key !== 'GY-12'), work, NOW), 'Held behind other work', 'and never says a worker is what held items wait for');
 
@@ -124,7 +124,7 @@ test('unit:ui-reads-session-state — Up next says what an item waits on: the de
   const row = (key: string) => { const start = section.indexOf(`data-row="${key}"`); assert.ok(start >= 0, key); return visibleWords(section.slice(start, section.indexOf('</div>', section.indexOf('row-who', start)))).join(' '); };
   assert.match(row('GY-13'), /Waiting for GY-17 to ship first/);
   assert.match(row('GY-17'), /Waiting for GY-14 to release staging-db: an exclusive resource it needs/);
-  for (const key of ['GY-13', 'GY-17']) assert.doesNotMatch(row(key), /Waiting for a worker|next free worker/);
+  for (const key of ['GY-13', 'GY-17']) assert.doesNotMatch(row(key), /Waiting for a worker|next free builder/);
   const tile = html.slice(html.indexOf('data-tile="up-next"'), html.indexOf('</button>', html.indexOf('data-tile="up-next"')));
   assert.match(tile, /<small>1 waiting for a worker · 2 held<\/small>/);
   assert.doesNotMatch(tile, /<small>Waiting for a worker<\/small>/);
@@ -134,5 +134,5 @@ test('unit:ui-reads-session-state — Up next says what an item waits on: the de
   assert.equal(upNextMeaning([item('GY-13')], work, NOW), 'Waiting for GY-17 to ship first', 'one held item: the tile names what it waits for');
   // Planned-file overlap alone holds nothing (dispatch is optimistic): GY-17 still shares web/groups.ts with GY-14, and without the resource it waits for a worker.
   Object.assign(item('GY-17'), { exclusiveResources: [] });
-  assert.equal(nextActor(item('GY-17'), 'up-next', NOW, undefined, work).does, 'Hands it to the next free worker');
+  assert.equal(nextActor(item('GY-17'), 'up-next', NOW, undefined, work).does, 'Hands it to the next free builder agent');
 });

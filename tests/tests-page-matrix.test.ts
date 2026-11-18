@@ -100,7 +100,7 @@ test('e2e:tests-page-matrix — the matrix shows each case\'s result per place, 
 
   // The matrix is the default view, its columns in delivery order.
   assert.match(html, /aria-label="Where each case runs"/);
-  assert.deepEqual([...html.matchAll(/<th scope="col"[^>]*>([\w ]+)<br/g)].map(match => match[1]), ['Test merge', 'Main', 'Served', 'Nightly']);
+  assert.deepEqual([...html.matchAll(/<th scope="col"[^>]*>(\w+)<br/g)].map(match => match[1]), ['Trial', 'Main', 'Served', 'Nightly']);
   // Case A: passed in Trial and Main, failed Served, never ran Nightly.
   assert.match(cell(html, 'case-a', 'trial'), /^✓ passed 3 h ago$/);
   assert.match(cell(html, 'case-a', 'main'), /^✓ passed 2 h ago$/);

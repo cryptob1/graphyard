@@ -97,7 +97,7 @@ test('integration:gate-releases-heavy-slot — a gate run that verifies, is held
     let during: (string | undefined)[] = [];
     const yard = await world('gate-slot-verified', { limit: 1, image: async () => {}, verdict: async () => { during = holders(yard.slots); return passing; } });
     await (await batchGateStep(yard.cycle))!.gate;
-    assert.deepEqual(during, ['test merge batch-gate'], 'the gate\'s check holds a host heavy-job slot');
+    assert.deepEqual(during, ['merge trial batch-gate'], 'the gate\'s check holds a host heavy-job slot');
     assert.equal(readGateRecord(gateRecordPath(yard.coordinator))!.verified, yard.tip);
     assert.deepEqual(holders(yard.slots), [], 'a verified gate holds no slot');
   }
@@ -118,7 +118,7 @@ test('integration:gate-releases-heavy-slot — a gate run that verifies, is held
     const yard = await world('gate-slot-timeout', { limit: 1, image: call => call === 1 ? hung : Promise.resolve(), verdict: async () => passing });
     const flight = (await batchGateStep(yard.cycle))!.gate!;
     await until(() => yard.images() === 1, 'the gate\'s first run builds the trial image');
-    assert.deepEqual(holders(yard.slots), ['test merge batch-gate']);
+    assert.deepEqual(holders(yard.slots), ['merge trial batch-gate']);
     yard.advance(gateLimitMs + 1);
     await until(() => yard.images() === 2, 'the timed-out run\'s slot goes to the retry', 15_000);
     await flight;
@@ -168,7 +168,7 @@ test('e2e:gate-releases-heavy-slot — after a gate timeout, a queued merge tria
   // The gate runs first and holds the second slot; its first run's image build hangs past the gate's bound.
   const flight = (await batchGateStep({ ...yard.cycle, state }))!.gate!;
   await until(() => yard.images() === 1, 'the gate builds the trial image');
-  assert.deepEqual(holders(yard.slots).sort(), ['npm test (other project)', 'test merge batch-gate']);
+  assert.deepEqual(holders(yard.slots).sort(), ['merge trial batch-gate', 'npm test (other project)']);
   yard.advance(gateLimitMs + 1);
   let settled = false;
   void flight.then(() => { settled = true; });
@@ -181,7 +181,7 @@ test('e2e:gate-releases-heavy-slot — after a gate timeout, a queued merge tria
   const steps = [status.inFlight, ...(status.inFlights ?? [])].map(entry => entry?.step ?? '');
   assert.ok(!steps.some(step => /batch-gate/.test(step)), `master status names no stale holder: ${JSON.stringify(steps)}`);
   assert.equal(gateSummary(readGateRecord(gateRecordPath(yard.coordinator)))!.inFlight, null, 'the gate holds nothing in flight');
-  assert.ok(!holders(yard.slots).includes('test merge batch-gate'), 'no slot is held for the gate');
+  assert.ok(!holders(yard.slots).includes('merge trial batch-gate'), 'no slot is held for the gate');
   await mergeWriterIdle(state);
   other.release();
   finishImage();

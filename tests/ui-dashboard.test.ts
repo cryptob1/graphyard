@@ -168,7 +168,7 @@ test('unit:ui-needs-you-and-timers — a human-only decision is listed once, und
 });
 
 test('unit:ui-item-first-screen — an item page says on its first screen what state it is in, why, which named role acts next, in plain words with no internal jargon and no pull request wording; the guide is under 300 words', () => {
-  const roles = ['You', 'Worker agent', 'Reviewer agent', 'Prover agent', 'Automated checks', 'Graphyard (automatic)', 'Graphyard (assigns a worker)', 'Master agent', 'Nobody yet', 'Nobody — it is live', 'Nobody — it has merged'];
+  const roles = ['You', 'Builder agent', 'Reviewer agent', 'Prover agent', 'Automated checks', 'Graphyard (automatic)', 'Graphyard (assigns a builder)', 'Master agent', 'Nobody yet', 'Nobody — it is live', 'Nobody — it has merged'];
   const banned = [...jargon, 'session kind', 'epoch', 'lease', 'candidate', 'pull request'];
   for (const item of board()) {
     const screen = firstScreen(itemPage(item.key));
@@ -233,10 +233,10 @@ test('unit:ui-pr-steps — every moving item shows the four states from its gate
   // Checking folds validate, test, review, proof and merge (GY-1979), so every gate case below is
   // Checking, and the label names the gate it waits on. A merge the release does not serve yet is Done.
   const cases: [string, Work, string, string, string][] = [
-    ['worker building', find('GY-14', work), 'doing', 'Building · the worker is writing the code', 'Worker agent'],
+    ['worker building', find('GY-14', work), 'doing', 'Building · the builder is writing the code', 'Builder agent'],
     ['CI running', handedIn, 'checking', 'In review · 1 of 2 checks done', 'Automated checks'],
     // The merge writer's trial decides a check (GY-2010): a refused trial of this head failed the checks it names.
-    ['CI failed', withReasons(refusedTrial(handedIn), { test: [trial(handedIn)] }), 'checking', 'In review · the check test, typecheck failed', 'Worker agent'],
+    ['CI failed', withReasons(refusedTrial(handedIn), { test: [trial(handedIn)] }), 'checking', 'In review · the check test, typecheck failed', 'Builder agent'],
     ['review requested', find('GY-15', work), 'checking', 'In review · waiting for the reviewer', 'Reviewer agent'],
     ['proofs pending', find('GY-16', work), 'checking', 'Testing · 2 of 3 proofs passed', 'Prover agent'],
     // An obligation inherited from another change's deferred proof counts in the total and stays open until proven.
@@ -248,7 +248,7 @@ test('unit:ui-pr-steps — every moving item shows the four states from its gate
     ['merged, not yet deployed', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, 'done', 'Done', 'Nobody — it has merged'],
     ['merged, deployment observed, smoke policy', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true } } as Work, 'done', 'Live', 'Nobody — it is live'],
     // A change request says so in the Checking label; the hand-in stands until the merge.
-    ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'checking', 'In review · sent back for changes, waiting for a worker', 'Graphyard (assigns a worker)'],
+    ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'checking', 'In review · sent back for changes, waiting for a builder', 'Graphyard (assigns a builder)'],
   ];
   // The CI Apps the test gate trusts, as status carries them.
   const trusted = noRelease;

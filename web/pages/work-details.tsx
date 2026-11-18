@@ -153,7 +153,7 @@ function TrialShot({ item, name, side, sha, token }: { item: Work; name: string;
 export function TrialScreenshotsPanel({ item, token }: { item: Work; token: string }) {
   const shots = item.trialScreenshots;
   if (!shots?.cases.length) return null;
-  return <section className="panel" aria-label="Screenshots"><h2>Screenshots <small>the test merge's browser run, before and after</small></h2>
+  return <section className="panel" aria-label="Screenshots"><h2>Screenshots <small>the merge trial's browser run, before and after</small></h2>
     {shots.cases.map(entry => <div className="trial-shots" key={entry.case}>
       <h3 className="trial-case">{entry.case}</h3>
       <div className="trial-pair">
@@ -244,7 +244,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const stateSentence = group === 'needs-you' && item.humanRequest ? `Waiting on your decision about ${humanDecisionLabel[item.humanRequest.kind]}.`
     : group === 'moving' ? `${steps.label}.`
       // Waiting work is described by what it waits for, never by who last held it.
-      : group === 'up-next' || group === 'backlog' ? (actor.who === 'Nobody yet' ? actor.does : group === 'backlog' ? 'Not released for work yet.' : item.reworkRequested ? 'Sent back for changes; waiting for a worker.' : 'Released for work; waiting for a worker.')
+      : group === 'up-next' || group === 'backlog' ? (actor.who === 'Nobody yet' ? actor.does : group === 'backlog' ? 'Not released for work yet.' : item.reworkRequested ? 'Sent back for changes; waiting for a builder.' : 'Released for work; waiting for a builder.')
         : withoutPr(plain.sentence).replace(/^Stuck: /, '').replace(/^./, c => c.toUpperCase());
   // What is left, one plain line per unmet requirement, grouped by the step that owns it (web/item-page.ts).
   const left = whatIsLeft(item, now, release);

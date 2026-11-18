@@ -134,7 +134,7 @@ test('unit:item-page-sections — the plate leads with the why sentence, the evi
 
   // Activity: the latest few events in plain words; the full history on expand.
   const activity = html.slice(html.indexOf('aria-label="Activity"'), technical);
-  assert.deepEqual([...activity.matchAll(/<li>([^<]+) <small>/g)].map(match => match[1]), ['Picked up by a worker', 'Released for work', 'Created']);
+  assert.deepEqual([...activity.matchAll(/<li>([^<]+) <small>/g)].map(match => match[1]), ['Picked up by a builder', 'Released for work', 'Created']);
   assert.match(activity, /<details class="full-history"><summary>History \(3 events; routine GitHub checks and heartbeats left out\)<\/summary><section aria-label="Work history">/);
   const many = Array.from({ length: 9 }, (_, i) => ({ seq: 9 - i, kind: 'github.observed', actor: 'github', created_at: at(-i * minute) }));
   assert.equal(page(item, work, { events: many }).match(/<li>Graphyard checked GitHub <small>/g)?.length, 3, 'only the latest few above the fold');
@@ -196,7 +196,7 @@ test('the Activity section reads the kinds the ledger records — command names 
     reading: true, revoke: true, session: true, request: true, hold: true, message: true, resubmit: true, taste: true };
   for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
   assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),
-    ['Created', 'Released for work', 'Picked up by a worker', 'Handed in', 'Sent back for changes', 'Review requested', 'Merged', 'Live in production', 'Asked you for a decision', 'Graphyard checked GitHub']);
+    ['Created', 'Released for work', 'Picked up by a builder', 'Handed in', 'Sent back for changes', 'Review requested', 'Merged', 'Live in production', 'Asked you for a decision', 'Graphyard checked GitHub']);
   // The merge and the release serving it are two facts: the feed never shows two merges.
   assert.notEqual(activityLabel('delivery.verified'), activityLabel('merge.execution.committed'));
   assert.equal(activityLabel('something.unheard.of'), 'Updated');

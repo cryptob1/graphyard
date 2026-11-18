@@ -43,7 +43,7 @@ test('unit:build-without-session-reads-waiting — an item at build with no leas
     // The dashboard points at a recorded blocker rather than repeating it; the item page shows it once (GY-1739).
     const shown = work.blocker ? 'held by its recorded blocker' : reason;
     assert.equal(stageLabel(work, now), shown ? `Waiting: ${shown}` : 'Waiting', `dashboard stage label: ${name}`);
-    assert.equal(prSteps(work, now).label, shown ? `Waiting · waiting for a worker: ${shown}` : 'Waiting · waiting for a worker', `dashboard row: ${name}`);
+    assert.equal(prSteps(work, now).label, shown ? `Waiting · waiting for a builder: ${shown}` : 'Waiting · waiting for a builder', `dashboard row: ${name}`);
   }
 
   // A live lease, or a running session without one, is being built.

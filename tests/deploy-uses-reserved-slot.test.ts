@@ -42,7 +42,7 @@ test('integration:deploy-uses-reserved-slot — with both ordinary slots held by
   git(cli, 'init', '-q', '-b', 'main'); git(cli, 'add', '.'); git(cli, 'commit', '-q', '-m', 'verified');
   const commit = git(cli, 'rev-parse', 'HEAD');
 
-  const trial = await acquireVerificationSlot({ directory: slots, label: 'test merge GY-3448' });
+  const trial = await acquireVerificationSlot({ directory: slots, label: 'merge trial GY-3448' });
   const verification = await acquireVerificationSlot({ directory: slots, label: 'worker verification GY-3447' });
   requestHeavyDrain(slots, 'quiet window', 'graphyard-master');
 
@@ -75,6 +75,6 @@ test('integration:deploy-uses-reserved-slot — with both ordinary slots held by
     { step: 'npm ci', reserved: `deploy build ${short}` },
     { step: 'npm run', reserved: `deploy build ${short}` },
   ], 'every deploy step ran in the reserved slot');
-  assert.deepEqual(heldSlots(slots).filter(entry => entry.slot < declarationSlot).map(entry => entry.owner?.label).sort(), ['test merge GY-3448', 'worker verification GY-3447'], 'the reserved slot is free again; the item work kept its slots');
+  assert.deepEqual(heldSlots(slots).filter(entry => entry.slot < declarationSlot).map(entry => entry.owner?.label).sort(), ['merge trial GY-3448', 'worker verification GY-3447'], 'the reserved slot is free again; the item work kept its slots');
   trial.release(); verification.release();
 });

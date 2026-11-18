@@ -96,22 +96,22 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
         if (/^Dependency /.test(ready)) return { detail: plainReason(ready, 'ready', now).text.replace(/^./, c => c.toLowerCase()), who: 'Graphyard (automatic)' };
         return { detail: 'held by a recorded blocker', who: 'Master agent' };
       }
-      if (work.reworkRequested || changesRequested(work)) return assignment(work, now).active ? { detail: 'the worker is making the requested changes', who: 'Worker agent' } : { detail: 'sent back for changes, waiting for a worker', who: 'Graphyard (assigns a worker)' };
-      if (assignment(work, now).active) return { detail: 'the worker is writing the code', who: 'Worker agent' };
+      if (work.reworkRequested || changesRequested(work)) return assignment(work, now).active ? { detail: 'the builder is making the requested changes', who: 'Builder agent' } : { detail: 'sent back for changes, waiting for a builder', who: 'Graphyard (assigns a builder)' };
+      if (assignment(work, now).active) return { detail: 'the builder is writing the code', who: 'Builder agent' };
       // At build with nobody on it (GY-3095): the row names why it waits when that is known.
       const reason = work.stage === 'build' ? waitingLabel(work) : null;
-      return { detail: reason ? `waiting for a worker: ${reason}` : 'waiting for a worker', who: 'Graphyard (assigns a worker)' };
+      return { detail: reason ? `waiting for a builder: ${reason}` : 'waiting for a builder', who: 'Graphyard (assigns a builder)' };
     }
     case 'validate': {
       const first = reasons[0] ?? '';
-      if (/^No workspace registered$/.test(first)) return { detail: 'waiting for the worker to say where the code lives', who: 'Worker agent' };
+      if (/^No workspace registered$/.test(first)) return { detail: 'waiting for the builder to say where the code lives', who: 'Builder agent' };
       if (/^Pull request has not been independently observed$/.test(first)) return { detail: 'waiting for the control plane to read the candidate', who: 'Graphyard (automatic)' };
       return { detail: 'checking which files it changes', who: 'Graphyard (automatic)' };
     }
     case 'test': {
       const checks = checkStates(work);
       const failed = checks.filter(check => check.state === 'failed').map(check => check.name);
-      if (failed.length) return { detail: `the check ${failed.join(', ')} failed`, who: 'Worker agent' };
+      if (failed.length) return { detail: `the check ${failed.join(', ')} failed`, who: 'Builder agent' };
       return { detail: `${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };
     }
     case 'review':
@@ -125,7 +125,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
         case 'dispatch': return { detail: 'the proofs run before the review', who: 'Prover agent' };
         case 'resync': return { detail: 'waiting for a fresh reading of the pull request before the review', who: 'Graphyard (automatic)' };
         case 'attention': return { detail: 'no reviewer can be asked about this head', who: 'Master agent' };
-        case 'request-rework': return { detail: 'this head needs a new commit before the review', who: 'Worker agent' };
+        case 'request-rework': return { detail: 'this head needs a new commit before the review', who: 'Builder agent' };
       }
       return { detail: 'waiting for the reviewer', who: 'Reviewer agent' };
     case 'prove': {
@@ -149,9 +149,9 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       const master = reasons.find(reason => mergeMasterClears.test(reason));
       if (master) return { detail: plainReason(master, 'merge', now).text.replace(/^./, c => c.toLowerCase()), who: 'Master agent' };
       const builder = reasons.find(reason => mergeBuilderClears.test(reason));
-      if (builder) return { detail: plainReason(builder, 'merge', now).text.replace(/^./, c => c.toLowerCase()), who: 'Worker agent' };
+      if (builder) return { detail: plainReason(builder, 'merge', now).text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' };
       const stuck = reasons.map(reason => plainReason(reason, 'merge', now)).find(plain => plain.stuck);
-      return stuck ? { detail: stuck.text.replace(/^./, c => c.toLowerCase()), who: 'Worker agent' } : { detail: 'Graphyard is merging it', who: 'Graphyard (automatic)' };
+      return stuck ? { detail: stuck.text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' } : { detail: 'Graphyard is merging it', who: 'Graphyard (automatic)' };
     }
   }
 }
