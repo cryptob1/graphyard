@@ -5,18 +5,15 @@ import WorkCard from '../components/work-card';
 import TasteFeed from '../components/taste';
 import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
-import { formatAge } from '../../src/model/duration';
-import { groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, summarySentence, upNextTile, type BoardItem, type OpenGroup } from '../groups';
-import { releaseView, servedFor } from '../../src/model/release';
+import { groupLabel, mergedAt, shippedCounts, groupMeaning, groups, summarySentence, upNextTile, type BoardItem, type OpenGroup } from '../groups';
+import { releaseView } from '../../src/model/release';
 import { liveFailingLine, plainStage, serveView } from '../../src/model/plain-stage';
 import { stalledCards } from '../../src/model/actionless';
 import type { Dashboard } from './dashboard';
-import { BuildLine, ShippedToday } from '../fun';
+import { BuildLine } from '../fun';
 import { useGlide } from '../glide';
 import { EmptyState } from '../components/page-layout';
 import { WhereItRuns } from '../components/where-it-runs';
-
-const week = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * The Work page with its motion (GY-3272 AC-4b): on every render, a row that changed group is
@@ -36,11 +33,9 @@ export function WorkPage(dashboard: Dashboard) {
  * counts one group and filters the page to exactly that group's rows, and the lists below are
  * those same groups — so a number on the page is always the number of rows it stands for.
  * Needs you comes first, with the one action to take; Backlog is folded away and carries no
- * clock. What shipped is one line at the foot, linking to the Shipped page: shipped means the
- * release was observed serving it, dated from that observation. The latest is the newest merge
- * (GY-168), whether or not a release was recorded for it; the merges not yet seen live are the
- * ones the control plane's production observation reports unserved — none where production serves
- * the newest merge, and none claimed where nothing observes production.
+ * clock. What shipped is one line at the foot, linking to the Shipped page: shipped means the live
+ * commit contains it (GY-3452), worded and counted as the top bar shows it, beside the week's merges
+ * still going live, and the newest merge in its plain stage.
  */
 export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, action, busy, api, token }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
@@ -54,19 +49,10 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   const counts = Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as Record<OpenGroup, number>;
   const queues = new Map(board ? board.groups.moving.flatMap(entry => entry.queue ? [[entry.id, entry.queue] as const] : []) : []);
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
-  // Shipped this week: delivered and served by the release, dated from when it was seen live.
-  const recent = shippedThisWeek(work, now, release);
-  // The latest is the newest merge: most real deliveries carry no release record, so ordering by
-  // release would name an old item, or none. A legacy delivery with no delivery record is dated
-  // from its observed merge (`mergedAt`), so it counts too.
-  const merged = work.filter(w => w.stage === 'done' && !isClosed(w) && !!(w.delivery?.mergedAt ?? w.observation?.mergedAt) && Number.isFinite(mergedAt(w)));
-  const latest = merged.length ? merged.reduce((newest, w) => mergedAt(w) > mergedAt(newest) ? w : newest) : null;
-  // Merged this week but not yet seen live, as the production observation says, whatever its group:
-  // a merge the production watch reports pending or failed, or merged after its last pass. With no
-  // production observation nothing is claimed: a smoke-gated merge is not "not live" by default.
-  // A legacy merge with no delivery record is Shipped on the board (groupOf), so it is never counted.
-  const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && !servedFor(w, release)
-    && (release.unserved.has(w.key) || release.failed.has(w.key) || mergedAt(w) > release.observedAt!)).length;
+  // GY-3452: shipped means live — the week's merges the live commit contains; the rest wait to go live. The top bar reads the same count.
+  const { shipped, waiting } = shippedCounts(work, status?.live, now);
+  // The latest is the newest merge (GY-168), named with its plain stage (GY-2988).
+  const latest = [...shipped, ...waiting].reduce<Work | null>((newest, w) => !newest || mergedAt(w) > mergedAt(newest) ? w : newest, null);
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} queue={queues.get(w.id)} repository={status?.repository} now={now} onOpen={setSelected} release={release} busy={busy} onPriority={mayChangePriority(status?.actor) ? priority => { void action(w.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && (byGroup[group].length > 0 || (group === 'needs-you' && only === group)) && <section key={group} className={`panel work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
@@ -76,7 +62,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   </section>;
   const admin = status?.actor?.role === 'admin';
   return <>
-    <div className="page-heading"><div><h1>Work</h1><p className="page-fact">{board ? summarySentence(counts) : 'Reading the board…'}</p><BuildLine/><ShippedToday work={work}/></div>
+    <div className="page-heading"><div><h1>Work</h1><p className="page-fact">{board ? summarySentence(counts) : 'Reading the board…'}</p><BuildLine/></div>
       <div className="page-actions"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration update(s) failed: {status.jobs[0].error}</div>}
@@ -96,7 +82,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       {board && groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Inbox zero, factory edition.'}</p>}
       <div className="shipped-line" aria-label="Shipped this week">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
-        <span><strong>{recent.length} shipped this week.</strong>{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span> <span data-title>{latest.title}</span></button> · {plainStage(latest, now, release, serve)} · {formatAge(new Date(mergedAt(latest)).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}{liveFailingLine(serve) && <span className="danger-text" data-live-failing> {liveFailingLine(serve)}.</span>}</span>
+        <span><strong data-shipped={shipped.length} title="Merged this week and live">{shipped.length} shipped</strong>, <span data-waiting={waiting.length}>{waiting.length} going live</span>.{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span></button> · {plainStage(latest, now, release, serve)}</>}{liveFailingLine(serve) && <span className="danger-text" data-live-failing> {liveFailingLine(serve)}.</span>}</span>
         <button type="button" className="text-button push" onClick={() => setView('shipped')}>Shipped →</button>
       </div>
       {/* GY-3393: what shipped and awaits the owner's taste, with its evidence; tasting gates nothing. The fold
