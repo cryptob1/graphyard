@@ -142,7 +142,8 @@ export async function zaiAccount(environment: ProbedHome, probe: EnvironmentProb
     }
     const body = await response.json();
     const parsed = parseZaiUsage(body);
-    return { loggedIn: true, usage: parsed.windows, note: parsed.reason, plan: parsed };
+    // A key that answers no limits is unknown on its own: it never reads another account's windows (GY-3495).
+    return { loggedIn: true, usage: parsed.windows, note: parsed.windows.length ? parsed.reason : 'this key reports no allowance', plan: parsed };
   } catch (error) {
     return { loggedIn: true, usage: [], note: `the provider usage endpoint is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}` };
   }
