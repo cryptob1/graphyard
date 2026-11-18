@@ -510,6 +510,7 @@ export function workerPrompt(
     + destructivePromptGuidance
     + externalDirectoryPromptGuidance
     + standards.simplicity
+    + standards.ux
     // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
     + reworkBriefSection(work, rework)
     // GY-3104: two equal failures in a row ask for a diagnosis, not a blind retry.

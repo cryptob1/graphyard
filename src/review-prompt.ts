@@ -13,6 +13,11 @@ export const simplicityParagraph = 'Keep it simple. Build the simplest thing tha
  * what users need. The master prompt carries the short form, held to its brief's word budget;
  * `master guide` opens with the full rule.
  */
+/**
+ * GY-3478: the UX standard, a short paragraph in AGENTS.md and the `ux` piece of reviewStandards(),
+ * so every worker, every review of a web/ change and the product reviewer judge UI by the same text.
+ */
+export const uxStandard = 'UX standard: write for the owner first. One plain sentence per idea. Show state, numbers and the one next action, not prose. Keep internal ids, jargon and agent-to-agent chatter out of the primary view; Details holds the rest. An error says what to do in one line and is never false. Show nothing twice. Every page works at 390 and 1280 px with no horizontal scroll. ';
 export const itemLeadBrief = 'Write why and simplest first in each item. ';
 export const itemLeadRule = 'Before anything else in an item you file, write why (one sentence: how it helps users) and simplest (one sentence: why it is the simplest thing that works); keep the description short, and cut scope until the second sentence can be written. ';
 /** The blocking standard (GY-2000): the only findings a review may hold a head with, stated beside the simplicity paragraph in both review prompts; anything else is at most a Nit. */
@@ -101,6 +106,7 @@ export function reviewStandards(work: Pick<Work, 'key'> & { criteria?: ReviewCri
     criteria: criteriaRuleSection(work.key, head, work.criteria, work.scenarioRequirements),
     repetition: repetitionReviewSection(files),
     product: productQuestions,
+    ux: uxStandard,
   };
 }
 
@@ -126,7 +132,8 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
     + singleCaseReviewSection(criteria)
     + controlPlaneFindingSection
     + blockingStandardSection
-    + standards.repetition;
+    + standards.repetition
+    + (files?.some(file => file.startsWith('web/')) ? standards.ux : '');
 }
 
 /** Nits stay advisory and are kept for later workers. */
