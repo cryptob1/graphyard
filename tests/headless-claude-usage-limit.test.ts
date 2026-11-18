@@ -30,9 +30,9 @@ test('e2e:headless-claude-usage-limit — a headless claude usage-credits result
   await workers.submitted(work.id, 2);
 });
 
-// AC-2: OpenCode on a spent Z.AI plan exits at once printing the provider's quota error; its reset is a UTC wall clock.
+// AC-2: OpenCode on a spent Z.AI plan exits at once printing the provider's quota error; its reset is a Beijing wall clock (GY-3495).
 const zaiQuota = '{"type":"provider.quota","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15","status":429}';
-const zaiReset = '2026-11-20T12:49:15.000Z';
+const zaiReset = '2026-11-20T04:49:15.000Z';
 // GY-3427: the worker run prints that error inside its JSON error event, with the 429 code 1310 body nested in it.
 const zaiQuotaEvent = JSON.stringify({ type: 'error', sessionID: 'ses_etX5zluld0JtaK5', error: { ...JSON.parse(zaiQuota), response: { body: JSON.stringify({ error: { code: '1310', message: 'Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15' } }) } } });
 
@@ -45,7 +45,7 @@ for (const [shape, printed, key] of [['quota line', zaiQuota, 'GY-9671'], ['quot
   const item = await workers.stored(work.id);
   const spent = item.capacity?.exhaustions?.find(entry => entry.epoch === 1);
   assert.equal(spent?.account, 'opencode-spent');
-  assert.equal(spent?.resetsAt, zaiReset, 'held until the reset Z.AI named, in UTC');
+  assert.equal(spent?.resetsAt, zaiReset, 'held until the reset Z.AI named, in Beijing time');
   assert.equal((await workers.registry.snapshot(workers.hostId)).accounts.find(entry => entry.name === 'opencode-spent')?.eligible, false, 'the spent account is held');
   assert.equal(item.blocker, null);
   assert.ok(!item.sessions!.some(session => /exited at once/.test(session.outcome ?? '')), 'no launch failure is recorded');
