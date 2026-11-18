@@ -10,7 +10,7 @@ import { reviewPrompt, reviewStandard, reviewStandards } from '../src/reviewer.j
 const cli = '/bin/graphyard.mjs';
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 const criteria = [{ id: 'AC-1', text: 'Exports land intact', proofs: ['unit:exports', 'e2e:export-run'] }];
-const work = { key: 'GY-7', title: 'Exports', criteria, scenarioRequirements: [] };
+const work = { key: 'GY-7', title: 'Exports', type: 'feature' as const, criteria, scenarioRequirements: [] };
 const brief = workerPrompt({ cliPath: cli }, work, { principal: 'graphyard-worker-1' }, 2);
 
 test('unit:tests/worker-review-checklist.test.ts unit:worker-brief-has-review-checklist — the worker brief renders simplicity, the criteria rule for its own criteria, the repetition question and the product questions from reviewStandards, which the review requests read', () => {
