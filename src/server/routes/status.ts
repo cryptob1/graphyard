@@ -16,7 +16,7 @@ import { executorHost } from './agent-registry.js';
 import { projectDelivery } from '../../model-boundary/project-applications.js';
 import { repositoryPolicy } from '../../model-boundary/repository-policy.js';
 import { productionEnvironmentFromEnv } from '../../production-environment.js';
-import { managedDeploy, repositoryToplevel, servingReport } from '../../deploy-watch.js';
+import { liveRelease, managedDeploy, repositoryToplevel, servingReport } from '../../deploy-watch.js';
 import { graphyardRepository } from '../../scenarios.js';
 import { gitRunnerFor } from '../../merge-writer/local-observation.js';
 import { boardFromStatus } from '../../model/board.js';
@@ -68,9 +68,15 @@ export const statusRoutes = defineRoutes('status', [
       // declared. Read from the checkout this process serves from: GRAPHYARD_REPOSITORY_ROOT, else
       // its own working directory's git toplevel, so a served head reports its own serving.
       const servingRoot = process.env.GRAPHYARD_REPOSITORY_ROOT?.trim() ? resolve(process.env.GRAPHYARD_REPOSITORY_ROOT) : repositoryToplevel(process.cwd());
-      const serving = await servingReport(servingRoot, repository ?? '', engine.baseBranch, runner ? async args => (await runner(args)).stdout.trim() : null);
+      const read = runner ? async (args: readonly string[]) => { const result = await runner(args); if (result.status !== 0) throw new Error(result.stderr); return result.stdout; } : null;
+      const serving = await servingReport(servingRoot, repository ?? '', engine.baseBranch, read && (async args => (await read(args)).trim()));
+      // GY-3452: what users have — the commit app.healthUrl answers, else the one served here or
+      // the production watch observed — and the merged items it does not contain yet, so the top
+      // bar and the Work page count shipped as live, both from this one answer.
+      const watched = production?.status();
+      const live = actor.role === 'operator-agent' ? null : await liveRelease(servingRoot, serving.commit ?? (watched?.observedAt && !watched.error ? watched.serving : null), serving.main, visibleWork, read);
       return { workerVerifications: pendingWorkerVerifications(services, actor, visibleWork), actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving,
+        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving, live,
         // GY-3399: the week's batch-gate reverts beside the week's gates removed, each naming its items, for the header.
         thisWeek: servingRoot && actor.role !== 'operator-agent' ? await thisWeekReport(servingRoot, observedAt.getTime()) : null,
         // GY-3348: the host's CPU as the live loop last named it on its coordination read — the

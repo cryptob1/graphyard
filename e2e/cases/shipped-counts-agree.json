@@ -1,0 +1,11 @@
+{
+  "id": "shipped-counts-agree",
+  "title": "The top bar and the Work page agree on what shipped and what waits to go live",
+  "description": "A real browser on the built dashboard, with four merges this week and a live commit that contains two of them: the top bar and the Work page's card both count 2 shipped and 2 going live.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "top bar and Work card show the same shipped and waiting counts", "run": "npm run test:browser -- browser-tests/shipped-counts-agree.spec.ts", "timeoutSeconds": 300 }
+  ]
+}
