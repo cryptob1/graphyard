@@ -4,8 +4,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { workerPrompt } from '../src/master/dispatch.js';
 import { guideText } from '../src/guide.js';
-import { workerBeforePushSection, workerFastGates, workerFastGatesCommand, workerFastGatesSentence, workerSyncSentence } from '../src/master/worker-fast-gates.js';
+import { workerFastGates, workerFastGatesCommand, workerFastGatesSentence } from '../src/master/worker-fast-gates.js';
 
+// GY-3489: the sync, the gates and review self are items of the brief's one pre-submit list.
 // GY-1797: the fast mechanical gates — the module and docs budget tests, the docs growth and
 // glossary gates, the wall-clock bomb scan, the CI shard map and the docs page checker — each run
 // locally in seconds, and each is a check CI fails a whole rework round on when a worker ships
@@ -27,33 +28,27 @@ const gates = [...workerFastGates.tests];
 const gatesIn = (text: string) => gates.filter(gate => text.includes(gate));
 const render = (fastGates?: boolean, dependencies?: Parameters<typeof workerPrompt>[4], maps?: Parameters<typeof workerPrompt>[7]) =>
   workerPrompt({ cliPath: cli, ...(fastGates === undefined ? {} : { fastGates }) }, { key: 'GY-1', title: 'Fast gates' }, { principal: 'graphyard-test-1' }, 1, dependencies ?? null, null, null, maps ?? null);
-const section = workerBeforePushSection(cli, 'GY-1'), sync = workerSyncSentence(cli, 'GY-1');
+const sync = `1. Run node ${cli} sync GY-1 and resolve conflicts. `;
 
 test('unit:worker-request-names-fast-gates — the request names the fast mechanical gates and their one command line, after the sync instruction and before the complete instruction, and an input that adds nothing leaves the request byte-identical', () => {
   const request = render(true);
   // The request carries the sync instruction and the gates sentence, and the gates run as one
   // command line: the whole list in a single code span, the test files in one harness run.
   assert.ok(request.includes(sync), 'the request carries the sync instruction');
-  assert.match(sync, /^Run node \/bin\/graphyard\.mjs sync GY-1 before submitting: /, 'the sync instruction names the CLI and the item');
   assert.ok(request.includes(workerFastGatesSentence), 'the request carries the fast-gates sentence');
   assert.deepEqual(workerFastGatesSentence.match(/`[^`]*`/g), [`\`${workerFastGatesCommand}\``], 'the sentence names exactly one command line, in one code span');
   assert.ok(request.includes(workerFastGatesCommand), 'the request carries the one command line');
   assert.deepEqual(gatesIn(request), gates, 'the request names every gate in the constant');
-  // Order, in the request itself: the sync instruction, then the gates sentence, then the complete
-  // instruction ("submit the commit with complete --head as your last action"), so the gates run in the session
-  // after the sync and before the push and the submission.
-  const syncAt = request.indexOf(sync), gatesAt = request.indexOf(workerFastGatesSentence), completeAt = request.indexOf('--head as your last action');
+  // Order, in the pre-submit list: the sync instruction, then the gates sentence, both before the
+  // closing line that ends with complete, so the gates run after the sync and before the submission.
+  const syncAt = request.indexOf(sync), gatesAt = request.indexOf(workerFastGatesSentence), closing = request.indexOf('end with complete');
   assert.ok(syncAt >= 0 && syncAt < gatesAt, 'the gates sentence sits after the sync instruction');
-  assert.ok(gatesAt >= 0 && gatesAt < completeAt, 'the gates sentence sits before the complete instruction');
-  assert.equal(syncAt + sync.length, gatesAt, 'the gates sentence follows the sync instruction directly');
-  assert.equal(request.indexOf('sync GY-1'), syncAt + 'Run node /bin/graphyard.mjs '.length, 'the sync instruction is the first mention of sync');
+  assert.ok(gatesAt >= 0 && gatesAt < closing, 'the gates sentence sits before the closing line');
+  assert.equal(request.indexOf('sync GY-1'), syncAt + `1. Run node ${cli} `.length, 'the sync instruction is the first mention of sync');
   // GY-2972: the standing sync rule the request's instruction names prints from guide sync; the
   // repository's own AGENTS.md block stays short and names the guide topics.
   assert.match(guideText('sync'), /Run `sync GY-N` before submitting\./, 'the standing sync instruction the request names as a guide topic');
   assert.match(readFileSync(`${root}AGENTS.md`, 'utf8'), /guide TOPIC/, 'the block names guide TOPIC');
-  // Nothing else in the request changed: the section is the one addition, sitting between the
-  // pre-edit status instruction and the worktree instruction that follows it.
-  assert.ok(request.includes(`Run node ${cli} status GY-1 before editing. ${section}Use the assigned worktree`), 'the section is the one addition after the pre-edit instruction');
   // Purity, as today: the request is a pure function of its inputs, and an input that adds
   // nothing adds nothing to the request.
   assert.equal(render(true), request, 'the same input renders byte-identical');
@@ -70,12 +65,10 @@ test('unit:worker-request-names-fast-gates — the request names the fast mechan
   assert.equal(withSections.split(sync).length - 1, 1, 'the sync instruction appears exactly once');
   assert.deepEqual(gatesIn(withSections), gates, 'every gate is still named once');
   // A checkout that carries none of these files — any other managed repository — names no gate,
-  // and its request is byte-identical to the request as it rendered before GY-1797: this request
-  // minus the section.
+  // and its request is this request minus the gates sentence; it still syncs before complete.
   const other = render(false);
-  assert.equal(other, request.replace(section, ''), "another repository's request is byte-identical to the pre-GY-1797 request");
-  assert.ok(!other.includes('fast gates') && !other.includes(' sync GY-1') && gatesIn(other).length === 0, "another repository's request names no gate and no sync");
-  assert.ok(other.includes('before editing. Use the assigned worktree'), "another repository's request keeps the pre-edit instruction with its one space");
+  assert.equal(other, request.replace(workerFastGatesSentence, ''), "another repository's request differs only by the gates sentence");
+  assert.ok(!other.includes('fast gates') && gatesIn(other).length === 0 && other.includes(sync), "another repository's request names no gate and still syncs");
   assert.equal(render(), other, 'a request whose launcher said nothing of the gates renders as before');
   assert.equal(workerPrompt({ cliPath: cli, repository: 'owner/graphyard' }, { key: 'GY-1', title: 'Fast gates' }, { principal: 'graphyard-test-1' }, 1), other, 'the repository name alone adds nothing: the gates are an input the launcher reads from its checkout');
 });
@@ -85,14 +78,14 @@ test('unit:worker-prompt-names-review-self — every worker request names review
   // and the item's key, so the worker judges its own diff by the reviewer's standard before it
   // submits, and the sentence sits directly before the autonomous-session line that ends the
   // request, so reading order runs: do the work, self-review it, then decide and act on your own.
-  const sentence = (cli: string, key: string) => `Last step before complete: check your diff against the reviewers' standards (node ${cli} review self ${key} prints them) and fix each BLOCKING finding you would expect. `;
+  const sentence = (cli: string, key: string) => `3. Run node ${cli} review self ${key} and fix each BLOCKING finding. `;
   for (const fastGates of [true, false]) {
     const request = render(fastGates);
     assert.ok(request.includes(sentence(cli, 'GY-1')), 'the request names review self with the configured CLI and the item key');
-    const at = request.indexOf(sentence(cli, 'GY-1')), autonomous = request.indexOf('Decide and act on your own: implement the item');
+    const at = request.indexOf(sentence(cli, 'GY-1')), autonomous = request.indexOf('You decide and act on your own');
     assert.ok(at >= 0 && at < autonomous, 'the self-review instruction sits before the autonomous-session line');
     assert.equal(request.split(sentence(cli, 'GY-1')).length, 2, 'the instruction appears exactly once');
-    assert.ok(request.indexOf('review self') === at + `Last step before complete: check your diff against the reviewers' standards (node ${cli} `.length, 'the self-review instruction is the first mention of review self');
+    assert.ok(request.indexOf('review self') === at + `3. Run node ${cli} `.length, 'the self-review instruction is the first mention of review self');
   }
   // An item with everything attached — criteria and a description — carries
   // the same instruction, naming its own key.
