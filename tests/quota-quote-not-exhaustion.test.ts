@@ -23,7 +23,8 @@ for (const [kind, name, quoted, key] of [
   // The worker's tool printed the Z.AI 1310 text from a fixture, and the run succeeds.
   ['opencode', 'opencode-a', { printed: `| bash  cat tests/fixtures/zai-quota.txt\n${zaiLimit}\n${zaiBody}`, exit: 0 }, 'GY-9681'],
 ] as const) test(`integration:quota-quote-not-exhaustion — a ${kind} session that quotes limit text and exits 0 leaves its account available`, async () => {
-  await workers.configure([{ name, kind, smokePass: true, ...quoted }]);
+  // The account's live check fails too (the stub repeats the quoted text), so only the detection decides the hold.
+  await workers.configure([{ name, kind, ...quoted }]);
   const work = await workers.readyItem(key);
   const launched = await workers.dispatch(work);
   assert.equal(launched.runtime, kind, 'the run stays on its own account');
