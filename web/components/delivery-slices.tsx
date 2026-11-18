@@ -23,7 +23,8 @@ const previewLabel: Record<string, string> = { local: 'Local preview', off: 'No 
 
 /**
  * The Delivery view (GY-1901): the project's effective delivery defaults as /api/status reports them
- * from the stored policy — previews, candidate size and production verification —
+ * from the stored policy — previews, candidate size and production verification, and that no
+ * deploy is configured when none is (moved here from the header, GY-3483) —
  * then each declared application with the cases bound to it. A refused declaration shows its reason.
  */
 export function DeliveryDefaults({ status }: { status: any }) {
@@ -41,6 +42,7 @@ export function DeliveryDefaults({ status }: { status: any }) {
         <dt>Merge writer</dt><dd>The control plane (GitHub only a mirror)</dd>
         <dt>Mode</dt><dd className="mono">{delivery.mode}</dd>
       </dl>}
+      {status?.deploy && status.deploy.configured !== true && <p className="muted" data-deploy="none">No deploy configured{typeof status.deploy.main === 'string' && status.deploy.main ? <> · main <span className="mono" title={status.deploy.main}>{status.deploy.main.slice(0, 8)}</span></> : null}</p>}
     </section>
     {delivery && <section className="panel" aria-label="Applications"><h2>Applications</h2>
       {delivery.applications.length ? <ul>{delivery.applications.map((application: any) => {

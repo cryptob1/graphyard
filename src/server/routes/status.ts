@@ -24,6 +24,8 @@ import { resolve } from 'node:path';
 import { hostname } from 'node:os';
 import { appRelease } from '../../app-url.js';
 import { thisWeekReport } from '../../project-memory.js';
+import { currentMergeStep } from '../../model/merge-ledger.js';
+import { gateRecordPath, readGateRecord } from '../../batch-gate.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
 import { snapshotPage } from '../../store/paged-snapshot.js';
 
@@ -83,6 +85,10 @@ export const statusRoutes = defineRoutes('status', [
         baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving, live,
         // GY-3399: the week's batch-gate reverts beside the week's gates removed, each naming its items, for the header.
         thisWeek: servingRoot && actor.role !== 'operator-agent' ? await thisWeekReport(servingRoot, observedAt.getTime()) : null,
+        // GY-3483: the checks running now, for the header — merge trials the merge writer has in flight
+        // (an intent with no trial verdict yet) and a batch gate run on main.
+        checksRunning: visibleWork.filter(item => item.mergeLedger?.state === 'intent' && !item.mergeLedger.trial && currentMergeStep(item, observedAt.getTime())?.fresh).length
+          + (servingRoot && readGateRecord(gateRecordPath(servingRoot))?.inFlight ? 1 : 0),
         // GY-3348: the host's CPU as the live loop last named it on its coordination read — the
         // Workers page's pressure and steal figures; null while no live loop names any.
         cpu: loopRegistry(engine).live(observedAt)?.cpu ?? null,
