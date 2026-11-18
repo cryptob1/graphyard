@@ -6,6 +6,7 @@ import { encodeLoopCheckoutTrust, loopPresenceHeader, loopStallAlarmHeader, loop
 import { coordinationViewHeader } from '../src/server/work-view';
 import { emptyDaemonState } from '../src/daemon/state';
 import { stallAlarm } from '../src/daemon/stall-alarm';
+import { cpuWaiting } from '../src/daemon/cpu-pressure';
 import type { Work } from '../src/model';
 import { serveXterm } from './xterm';
 
@@ -52,7 +53,7 @@ test('e2e:stall-alarm — the Master page shows the stall alarm with its cause w
     const state = emptyDaemonState({ url: 'http://127.0.0.1:9', repository: 'fixture/shop' } as never);
     state.cpuPressure = { at: new Date(start).toISOString(), avg60: 20, steal: 0, stat: null, celsius: 96, samples: [], testBudget: null, trialCap: null };
     const item = { key: 'GY-1', stage: 'ready', ready: true, updatedAt: new Date(start).toISOString(), sessions: [] } as unknown as Work;
-    const alarm = stallAlarm({ now: start + 11 * 60_000, open: [item], ready: [item], freeSlots: 1, state, registry: null, serving: null });
+    const alarm = stallAlarm({ now: start + 11 * 60_000, open: [item], ready: [item], freeSlots: 1, holds: [cpuWaiting(state)!], state, registry: null, serving: null });
     expect(alarm).toContain('Cause: launches waiting: CPU 96C');
     await loopRead(url, alarm);
     const signIn = await fetch(`${url}/api/sign-in-links`, { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } });
