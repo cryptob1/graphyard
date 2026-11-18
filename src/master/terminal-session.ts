@@ -53,7 +53,9 @@ export function terminalStream(request: TerminalRequest, handlers: TerminalHandl
             let stderr = '';
             opened.stderr!.on('data', chunk => { stderr = `${stderr}${chunk}`.slice(-300); });
             opened.on('error', error => { if (child === opened && !stopped) handlers.exit(error.message); });
-            opened.on('exit', code => { if (child === opened && !stopped) handlers.exit(stderr.trim() || `herdr exited with code ${code}`); });
+            // 'close', not 'exit': Node may report the exit before the stream's last lines are read, and a
+            // refusal it printed ("already has an attached client") must be handled, not taken for a failure (GY-3453).
+            opened.on('close', code => { if (child === opened && !stopped) handlers.exit(stderr.trim() || `herdr exited with code ${code}`); });
             createInterface({ input: opened.stdout! }).on('line', line => {
               if (child !== opened || stopped) return;
               if (mode === 'control' && line.includes('already has an attached client')) {
