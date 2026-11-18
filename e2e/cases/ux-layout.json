@@ -1,0 +1,11 @@
+{
+  "id": "ux-layout",
+  "title": "No dashboard page scrolls sideways at phone or desktop width",
+  "description": "A real browser on the built dashboard with the seeded board opens every page in the view registry and an item page at 390 and 1280 px, as a reader and as an admin, and finds the document's scrollWidth equal to its clientWidth on each.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "open every page and an item at 390 and 1280 px as reader and admin", "run": "npm run test:browser -- browser-tests/ux-layout.spec.ts", "timeoutSeconds": 600 }
+  ]
+}

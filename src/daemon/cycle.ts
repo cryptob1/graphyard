@@ -12,7 +12,7 @@ import { workersAllowed } from '../master/worker-pool.js';
 import { assertDispatchable, HeadlessWorkerExit, workerRunHandle, type WorkerRun } from '../master/dispatch.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
-import { checkoutTrustLine } from '../harness.js';
+import { checkoutTrustLine, type CheckoutTrustFleet } from '../harness.js';
 import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
 import { capacityRefusal } from '../fleet.js';
@@ -39,6 +39,7 @@ import { pinnedInstall, repinRuntime, type AgentRegistry, type CanaryOffer } fro
 import { type DaemonEffects, record } from './effects.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
 import { batchGateStep } from './cycle-batch-gate.js';
+import { gateRecordPath, readGateRecord } from '../batch-gate.js';
 import { lessonsToCode } from './lessons-to-code.js';
 import { workerLaunchHealth, earlyExitKey } from './worker-launch-health.js';
 import { actionStallDelay, actionStallThreshold } from '../model/action-progress.js';
@@ -578,9 +579,9 @@ export const workerGrowthKey = 'workers:grow';
  * opened per retry — until the check answers empty: the operator's trust record or the role's
  * arguments changed, and the launches go ahead again on their own.
  */
-async function untrustedCheckoutRoles(cycle: Cycle): Promise<ReadonlySet<string>> {
+async function untrustedCheckoutRoles(cycle: Cycle, registry: CheckoutTrustFleet | null): Promise<ReadonlySet<string>> {
   const { state, effects, clock } = cycle;
-  const refusals = await Promise.resolve(effects.checkoutTrust?.()).catch(() => []);
+  const refusals = await Promise.resolve(effects.checkoutTrust?.(registry)).catch(() => []);
   cycle.checkoutTrustRefused = new Set((refusals ?? []).map(entry => entry.role));
   if (!cycle.checkoutTrustRefused.size) {
     if (state.actions[checkoutTrustKey]) { delete state.actions[checkoutTrustKey]; await effects.persist(state); }
@@ -629,7 +630,7 @@ async function dispatchStep(cycle: Cycle) {
   const ahead: { key: string; priority: number; done: Promise<void> }[] = [];
   // GY-3225: an untrusted checkout carrying repository Claude configuration holds the roles it
   // names for the cycle, with one standing attention line (untrustedCheckoutRoles).
-  const refusedRoles = await untrustedCheckoutRoles(cycle);
+  const refusedRoles = await untrustedCheckoutRoles(cycle, registry);
   // GY-3335: a finished head a blocked worker named is the loop's to resubmit: once the master has
   // unblocked the item, the launcher beside this cycle re-runs complete's verification on the host
   // and submits the head as the next attempt, so no worker session and no worker slot is spent
@@ -651,7 +652,15 @@ async function dispatchStep(cycle: Cycle) {
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
   // GY-3444: while a batch gate runs no implementation session starts, so the gate's checks finish
   // inside their bound and deploys go on; reviews and producers still launch.
-  if (!state.diskHeadroom && !implementationWaiting(state) && !refusedRoles.has('worker') && !batchGateRunning(state)) for (const item of claimable) {
+  // GY-3473: each hold named once, so the stall alarm reports the reason dispatch itself has this cycle.
+  const gateRun = batchGateRunning(state) ? (effects.mergeWriter?.gate ? readGateRecord(gateRecordPath(effects.mergeWriter.gate.root))?.inFlight ?? null : null) : undefined;
+  const holds = [
+    state.diskHeadroom && `implementation launches waiting: disk below its floor: ${state.diskHeadroom.shortage}`,
+    implementationWaiting(state),
+    refusedRoles.has('worker') && 'worker launches held: the checkout is not trusted for the worker accounts (see master status)',
+    gateRun !== undefined && `implementation launches paused while the batch gate runs${gateRun ? ` on ${gateRun.tip.slice(0, 12)} since ${gateRun.startedAt}` : ''}`,
+  ].filter((hold): hold is string => !!hold);
+  if (!holds.length) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
     if (launched.some(other => sharedResources(item, other).length)) continue;
     // GY-3104: a third equal failure holds the item for the master's decision.
@@ -702,7 +711,7 @@ async function dispatchStep(cycle: Cycle) {
     const running = snapshot.work.flatMap(item => item.sessions ?? []).filter(session => session.kind === 'implementation' && session.state === 'running').length;
     // An item in a run of equal failures already wakes the master by that run (GY-3104), held or not.
     const repeating = repeatingItems(state.failureRuns), unheld = (item: Work) => !repeating.has(item.key);
-    const alarm = stallAlarm({ now: clock, open: open.filter(unheld), ready: claimable.filter(unheld), freeSlots: allowed - running,
+    const alarm = stallAlarm({ now: clock, open: open.filter(unheld), ready: claimable.filter(unheld), freeSlots: allowed - running, holds,
       state, registry, serving: await Promise.resolve(effects.servingCommit?.()).catch(() => null) ?? null });
     if (recordStallAlarm(state, alarm, clock)) { cycle.log(`[graphyard-master] cycle ${state.cycle}: ${alarm ?? 'the stall alarm cleared'}`); await effects.persist(state); }
   }

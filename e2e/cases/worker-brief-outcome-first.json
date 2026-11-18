@@ -1,0 +1,15 @@
+{
+  "id": "worker-brief-outcome-first",
+  "title": "The worker brief opens with the outcome, carries one pre-submit list and stays under 450 fixed words",
+  "description": "Renders a worker brief for a fixed feature item under the claude, opencode and codex runtimes: it opens with the item, why, simplest and when it is done, names complete --head as the last action, carries one numbered pre-submit list (sync, build and test:affected, review self, sandbox-only failures), asks for the bound proof to fail first, gives rm/mv and OpenCode guidance only to their runtime, states autonomy once, and holds at most 450 words besides the item's own data.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the worker brief is outcome-first with one pre-submit list under 450 fixed words",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/worker-brief-outcome-first.test.ts",
+      "timeoutSeconds": 120
+    }
+  ]
+}

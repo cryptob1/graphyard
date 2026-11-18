@@ -5,6 +5,7 @@ import { dataDirectory } from '../install/worktree-root.js';
 import { randomUUID } from 'node:crypto';
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cpuCelsius, trialHotCelsius } from '../merge-writer/trial-load.js';
 
 /**
  * The host heavy-job budget (GY-612, GY-3290).
@@ -22,8 +23,8 @@ import { fileURLToPath } from 'node:url';
  *
  * A slot is a directory `slot-N` renamed (atomically) into the host's lock directory
  * (`hostHeavyJobsDirectory`, outside every repository), holding its owner's kernel-locked file. A
- * job that finds the budget spent waits, naming the holders and their projects, and starts when one
- * frees. A slot whose owner died is taken back by the next waiter; nothing is ever killed. The
+ * job that finds the budget spent queues (GY-3460), naming the holders and their projects, and starts when one
+ * frees and every older waiter has started. A slot whose owner died is taken back by the next waiter; nothing is ever killed. The
  * limit is the whole number in the directory's `limit` file, read at every attempt: lowering it
  * leaves running jobs alone and admits no new one until fewer than the new limit run.
  *
@@ -43,8 +44,9 @@ export const defaultHeavyJobs = 2;
 export const hostHeavyJobsDirectory = (environment: NodeJS.ProcessEnv = process.env) => resolve(dataDirectory(environment), 'heavy-jobs');
 /** The lock directory this process uses: the one it joined (`joinHostHeavyBudget`), else the host's. */
 export const heavyJobsDirectory = (environment: NodeJS.ProcessEnv = process.env) => environment[slotsDirectoryVariable] ?? hostHeavyJobsDirectory(environment);
-/** The host's limit: the whole number in `<directory>/limit`, else two. */
-export function heavyJobLimit(directory: string) {
+/** The host's limit: the whole number in `<directory>/limit`, else two; a strict cap standing now lowers it (GY-3446). */
+export const heavyJobLimit = (directory: string) => Math.min(ordinaryLimit(directory), readStrictCap(directory)?.limit ?? Infinity);
+function ordinaryLimit(directory: string) {
   try { const limit = Number(readFileSync(join(directory, 'limit'), 'utf8').trim()); return Number.isInteger(limit) && limit >= 1 ? limit : defaultHeavyJobs; }
   catch { return defaultHeavyJobs; }
 }
@@ -80,6 +82,8 @@ export interface AcquireOptions {
   drainable?: boolean;
   /** GY-3450: the deploy path (the batch gate's check, a deploy build or restart) — takes the reserved slot when it is free, else an ordinary one. */
   reserved?: boolean;
+  /** GY-3446: the sensors a strict cap's heat wait reads. */
+  hwmon?: string;
 }
 
 /**
@@ -108,6 +112,36 @@ export function resumeHeavyDrain(directory: string): HeavyDrain | null {
   rmSync(heavyDrainFile(directory), { force: true });
   return drain;
 }
+/**
+ * GY-3446: a temporary host-wide strict cap, set with `master config hostHeavyJobs=N until=TIME` when
+ * another project on the host asks every Graphyard install to back off. Until it expires the limit is
+ * at most N for every install, the gate/deploy reservation counts inside it, a session's selected test
+ * runs and host worker verification and checks take a slot too (GY-3447 exempts them otherwise), and
+ * no new job starts while the CPU reads 85C or more. Running jobs are never stopped, and a job's own
+ * nested work (a trial's serve and test containers) runs on its slot. Past `until` it is ignored.
+ * It sits in the drain folder, which the master session may write.
+ */
+export interface StrictCap { limit: number; until: string; requestedBy: string; at: string }
+export const strictCapFile = (directory: string) => join(heavyDrainDirectory(directory), 'strict-cap.json');
+export function readStrictCap(directory: string, now = Date.now()): StrictCap | null {
+  try {
+    const cap = JSON.parse(readFileSync(strictCapFile(directory), 'utf8'));
+    return Number.isInteger(cap?.limit) && cap.limit >= 1 && Date.parse(cap.until) > now ? cap : null;
+  } catch { return null; }
+}
+/** Set (limit) or lift (null) the strict cap; refuses a limit above the host's ordinary one or an expiry already past. */
+export function setStrictCap(directory: string, set: { value: number; until: string } | null, requestedBy: string, now = new Date()): StrictCap | null {
+  if (set === null) { rmSync(strictCapFile(directory), { force: true }); return null; }
+  const ordinary = ordinaryLimit(directory);
+  if (!Number.isInteger(set.value) || set.value < 1 || set.value > ordinary) throw new Error(`hostHeavyJobs only tightens the host's heavy-job limit: give a whole number from 1 to ${ordinary}`);
+  if (!(Date.parse(set.until) > now.getTime())) throw new Error('hostHeavyJobs is temporary: give until=TIME, a future ISO time such as 2026-11-18T16:00:00Z');
+  const cap: StrictCap = { limit: set.value, until: new Date(Date.parse(set.until)).toISOString(), requestedBy, at: now.toISOString() }, pending = `${strictCapFile(directory)}.${randomUUID()}`;
+  mkdirSync(heavyDrainDirectory(directory), { recursive: true });
+  writeFileSync(pending, JSON.stringify(cap));
+  renameSync(pending, strictCapFile(directory));
+  return cap;
+}
+
 export const heavyDrainLine = (drain: HeavyDrain) => `Heavy work is drained since ${drain.at} by ${drain.requestedBy}: ${drain.reason}. Running jobs finish and batch gates and deploys go on; new merge trials, declared checks, worker verification and session suites wait until graphyard master resume.`;
 
 // flock locks the inherited open file description; this process retains its fd after
@@ -188,7 +222,8 @@ async function reclaimStale(path: string) {
 /** The heavy jobs the limit counts now: every live slot below the gate's and the declarations, dead owners' reclaimed first. */
 async function running(directory: string) {
   for (const entry of heldSlots(directory)) await reclaimStale(join(directory, `slot-${entry.slot}`));
-  return heldSlots(directory).filter(entry => entry.slot < gateSlot);
+  // GY-3446: under a strict cap the gate/deploy reservation counts inside the limit.
+  return heldSlots(directory).filter(entry => entry.slot < (readStrictCap(directory) ? declarationSlot : gateSlot));
 }
 
 async function tryTake(directory: string, slots: number, owner: SlotOwner, firstSlot = 0): Promise<HeldSlot | null> {
@@ -241,31 +276,78 @@ export function waitLine(options: Pick<AcquireOptions, 'directory' | 'slots' | '
 export const waitStep = (directory: string) =>
   `waiting for a host heavy-job slot, held by ${heldSlots(directory).filter(entry => entry.slot < declarationSlot).map(holderText).join(', ')}`.slice(0, 100);
 
-/** Take a slot, waiting as long as the budget is spent. */
+/**
+ * GY-3460: the host's queue of jobs waiting for an ordinary slot, shared by every install. Each waiter
+ * holds a kernel-locked ticket in `queue/`, named so that the deploy path sorts first and then the
+ * oldest request. A freed slot goes to the waiters at the head: a job that arrives later never
+ * overtakes an older one from any project, so one install's stream of new trials cannot starve
+ * another's. A ticket whose owner died is unlocked and removed by the next waiter that reads it.
+ */
+const queueDirectory = (directory: string) => join(directory, 'queue');
+async function enqueue(directory: string, options: AcquireOptions) {
+  const name = `${options.reserved ? 0 : 1}-${String(Date.now()).padStart(15, '0')}-${randomUUID()}${options.drainable ? '-drainable' : ''}`;
+  const pending = join(directory, `.ticket-${name}`), path = join(queueDirectory(directory), name);
+  mkdirSync(queueDirectory(directory), { recursive: true });
+  const fd = openSync(pending, 'wx');
+  try {
+    if (!await lock(fd)) throw new Error('new heavy-job ticket is locked');
+    renameSync(pending, path);
+  } catch (error) { closeSync(fd); rmSync(pending, { force: true }); throw error; }
+  return { name, leave: () => { rmSync(path, { force: true }); closeSync(fd); } };
+}
+/** The live waiters queued ahead of `name`; a drained job does not hold up others while the drain stands. */
+async function waitersAhead(directory: string, name: string, drained: boolean) {
+  let ahead = 0;
+  for (const other of readdirSync(queueDirectory(directory)).sort()) {
+    if (other >= name) break;
+    if (drained && other.endsWith('-drainable')) continue;
+    let fd: number;
+    try { fd = openSync(join(queueDirectory(directory), other), 'r'); } catch { continue; }
+    try { if (await lock(fd)) rmSync(join(queueDirectory(directory), other), { force: true }); else ahead++; } finally { closeSync(fd); }
+  }
+  return ahead;
+}
+
+/** Take a slot, waiting as long as the budget is spent and behind every older waiter. */
 export async function acquireVerificationSlot(options: AcquireOptions): Promise<HeldSlot> {
   const pollMs = options.pollMs ?? 1000;
   mkdirSync(options.directory, { recursive: true });
   const owner: SlotOwner = { identity, locked: true, files: options.files, pid: process.pid, label: options.label, ...(options.project ? { project: options.project } : {}), cwd: process.cwd(), at: new Date().toISOString() };
-  let told = false, drained = false;
-  for (;;) {
-    if (options.signal?.aborted) throw options.signal.reason;
-    const drain = options.drainable ? readHeavyDrain(options.directory) : null;
-    if (drain) {
-      if (!drained) { drained = true; options.onWait?.(`graphyard: ${options.label} waits: ${heavyDrainLine(drain)}`); }
-      await new Promise(done => setTimeout(done, pollMs));
-      continue;
+  // A declaration beyond the bound (a running trial's shard files) or a caller fixing its own numbers does not queue.
+  const ticket = options.firstSlot === undefined ? await enqueue(options.directory, options) : null;
+  let told = false, drained = false, heated = false;
+  try {
+    for (;;) {
+      if (options.signal?.aborted) throw options.signal.reason;
+      const drain = options.drainable ? readHeavyDrain(options.directory) : null;
+      if (drain) {
+        if (!drained) { drained = true; options.onWait?.(`graphyard: ${options.label} waits: ${heavyDrainLine(drain)}`); }
+        await new Promise(done => setTimeout(done, pollMs));
+        continue;
+      }
+      // GY-3446: under a strict cap no new job starts at the launch heat limit, and the reservation is not beside the limit.
+      const strict = readStrictCap(options.directory), celsius = strict ? await cpuCelsius(options.hwmon) : null;
+      if (celsius !== null && celsius >= trialHotCelsius) {
+        if (!heated) { heated = true; options.onWait?.(`graphyard: ${options.label} waits: the host's strict heavy-job cap (until ${strict!.until}) starts nothing while the CPU reads ${celsius}C, ${trialHotCelsius}C or more`); }
+        await new Promise(done => setTimeout(done, pollMs));
+        continue;
+      }
+      const reserved = options.reserved && !strict ? await tryTake(options.directory, 1, owner, gateSlot) : null;
+      if (reserved) return reserved;
+      const limit = options.slots ?? heavyJobLimit(options.directory);
+      const free = limit - (await running(options.directory)).length;
+      if (free > 0 && (!ticket || await waitersAhead(options.directory, ticket.name, !!readHeavyDrain(options.directory)) < free)) {
+        const held = await tryTake(options.directory, limit, owner, options.firstSlot);
+        if (held) {
+          // Jobs that passed the count together and took different numbers are too many: each steps back and tries again.
+          if (options.firstSlot !== undefined || (await running(options.directory)).length <= limit) return held;
+          held.release();
+        }
+      }
+      if (!told) { told = true; options.onWait?.(waitLine(options)); }
+      await new Promise(done => setTimeout(done, pollMs * (0.5 + Math.random())));
     }
-    const reserved = options.reserved ? await tryTake(options.directory, 1, owner, gateSlot) : null;
-    if (reserved) return reserved;
-    const held = await tryTake(options.directory, options.slots ?? heavyJobLimit(options.directory), owner, options.firstSlot);
-    if (held) {
-      // Jobs that passed the count together and took different numbers are too many: each steps back and tries again.
-      if (options.firstSlot !== undefined || (await running(options.directory)).length <= (options.slots ?? heavyJobLimit(options.directory))) return held;
-      held.release();
-    }
-    if (!told) { told = true; options.onWait?.(waitLine(options)); }
-    await new Promise(done => setTimeout(done, pollMs * (0.5 + Math.random())));
-  }
+  } finally { ticket?.leave(); }
 }
 
 const reportUnusable = (label: string, directory: string, error: unknown) =>
@@ -296,9 +378,9 @@ export const heldJobEnvironment = (): Record<string, string> =>
  * carry the slot (`heldVariable`), and a heavy job started inside it runs at once on the same
  * slot. A process that never joined the budget runs the job as it always did.
  */
-export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal; until?: AbortSignal; reserved?: boolean } = {}): Promise<T> {
+export async function withHeavyJob<T>(label: string, job: () => Promise<T>, options: { onWait?: (line: string) => void; signal?: AbortSignal; until?: AbortSignal; reserved?: boolean; /** GY-3446: a job that takes a slot only under a strict cap. */ strictOnly?: boolean } = {}): Promise<T> {
   const directory = process.env[slotsDirectoryVariable];
-  if (!directory || process.env[heldVariable] || inheritedVariables.getStore()?.[heldVariable]) return job();
+  if (!directory || process.env[heldVariable] || inheritedVariables.getStore()?.[heldVariable] || options.strictOnly && !readStrictCap(directory)) return job();
   let held: HeldSlot;
   try { held = await acquireVerificationSlot({ directory, label, project: process.env[projectVariable], onWait: options.onWait ?? (line => process.stderr.write(`${line}\n`)), signal: options.signal, drainable: !options.reserved, reserved: options.reserved }); }
   catch (error) { if (options.signal?.aborted) throw error; reportUnusable(label, directory, error); return job(); }
@@ -312,13 +394,14 @@ export async function withHeavyJob<T>(label: string, job: () => Promise<T>, opti
 
 /**
  * Whether a command is a heavy job: a package manager's whole `test` script, no files or arguments
- * selecting part of it (GY-3447: builds, type checks and selected tests run at once). A checkout that
+ * selecting part of it (GY-3447: builds, type checks and selected tests run at once; any test script under a strict cap). A checkout that
  * carries Graphyard's own runner (tests/helpers/run-tests.ts) is left to it: the runner takes the slot.
  */
-export function heavyCommand(command: string, args: string[], cwd = process.cwd()) {
+export function heavyCommand(command: string, args: string[], cwd = process.cwd(), strict = false) {
   if (command !== 'npm' && command !== 'pnpm') return false;
   const words = args.filter(word => !word.startsWith('-')), script = ['run', 'run-script'].includes(words[0]!) ? words.slice(1) : words;
-  if (!['test', 't'].includes(script[0]!) || script.length > 1) return false;
+  // GY-3446: under a strict cap every test script, selected files included, is a heavy job.
+  if (strict ? !/^(t|test)(:|$)/.test(script[0] ?? '') : !['test', 't'].includes(script[0]!) || script.length > 1) return false;
   return !existsSync(join(cwd, 'tests/helpers/run-tests.ts'));
 }
 
@@ -364,5 +447,6 @@ export function withVerificationPath(harness: Record<string, string>, launch: Re
  */
 export function wrappedCommand(command: string, args: string[], environment: NodeJS.ProcessEnv = process.env) {
   const path = pathWithout(environment.PATH, verificationBin);
-  return { real: onPathOf(command, path), path, heavy: heavyCommand(command, args) };
+  const directory = environment[slotsDirectoryVariable];
+  return { real: onPathOf(command, path), path, heavy: heavyCommand(command, args, process.cwd(), !!directory && !!readStrictCap(directory)) };
 }

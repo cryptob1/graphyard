@@ -4,17 +4,17 @@
 // there through graphyard-host-shim (src/host-shim.ts), whose fixed verbs are all this machine's key
 // may run. A host that drops or turns away a shard has it re-queued on another host: capacity, never a fault.
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, rename, writeFile } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { hostname } from 'node:os';
+import { homedir, hostname, tmpdir } from 'node:os';
 import type { ChildRun } from '../child-runner.js';
 import { shellQuote } from '../shell-quote.js';
-import { probeHost, readHosts, sshTarget } from '../hosts.js';
+import { outdatedShimReason, probeHost, readHosts, sshTarget } from '../hosts.js';
 import { trialContainerFault, trialHotCelsius } from './trial-load.js';
 
 /** One host's reading: cores, cores busy (1-minute load), the share of CPU stolen, and its hottest CPU sensor against the heat limit. */
-export interface HostReading { name: string; cores: number; busy: number; steal: number; celsius: number | null; limit: number; away: boolean }
+export interface HostReading { name: string; cores: number; busy: number; steal: number; celsius: number | null; limit: number; away: boolean; reason?: string }
 
 /** The targets of the hosts `graphyard host add` recorded; none when it recorded none. */
 export const shardHosts = async () => (await readHosts().catch(() => [])).map(host => host.target);
@@ -49,18 +49,19 @@ export async function splitLocalOnlyTests(files: readonly string[], read: (file:
 
 /** This machine's reading and every host's, read at once through the shim's probe; a host that does not answer is away for this trial. */
 export async function readShardHosts(targets: readonly string[], run: ChildRun, cores: number): Promise<HostReading[]> {
-  return Promise.all([null, ...targets].map(async target => {
-    const probe = await probeHost(target, run);
+  const ssh = shardSshSession(run);
+  try { return await Promise.all([null, ...targets].map(async target => {
+    const probe = await probeHost(target, async (program, args, options) => run(program, target && program === 'ssh' ? [...await ssh.args(target), args.at(-1)!] : args, options));
     const name = target ?? hostname();
     // This machine always takes shards: an unreadable reading here means only that its Docker or sensors did not answer.
-    if (!probe.ok) return { name, cores: target ? 0 : cores, busy: 0, steal: 0, celsius: null, limit: trialHotCelsius, away: target !== null };
+    if (!probe.ok) return { name, cores: target ? 0 : cores, busy: 0, steal: 0, celsius: null, limit: trialHotCelsius, away: target !== null, ...(target ? { reason: probe.reason } : {}) };
     return { name, cores: probe.cores ?? cores, busy: probe.load ?? 0, steal: probe.stat?.total ? probe.stat.steal / probe.stat.total : 0, celsius: probe.celsius, limit: trialHotCelsius, away: false };
-  }));
+  })); } finally { await ssh.close(); }
 }
 
 /** A shard its host turned away — dropped, unreachable, too hot to start, or not ready — to run on another host: capacity, never a fault. */
 export class HostDroppedError extends Error {
-  constructor(readonly host: string, reason: string) { super(`host ${host} dropped a shard: ${reason}`); this.name = 'HostDroppedError'; }
+  constructor(readonly host: string, readonly reason: string) { super(`host ${host} dropped a shard: ${reason}`); this.name = 'HostDroppedError'; }
 }
 
 /** One host's place in a trial: how many of its shards run at once, its reading, and how to run one there (absent: this machine). */
@@ -110,6 +111,28 @@ export async function runShardsOnHosts<R>(input: { count: number; hosts: readonl
   return { ran: ran.filter(Boolean), queuedWhileIdle, dropped: [...dropped] };
 }
 
+/** A trial owns its SSH config: resolve only the user's aliases, never the system config/includes.
+ * Keep connection and host-key settings; commands, forwarding and system includes do not travel.
+ * The directory is shared by this session's shards and removed when they finish. */
+export function shardSshSession(run: ChildRun) {
+  let directory: Promise<string> | undefined;
+  const configs = new Map<string, Promise<string>>();
+  return {
+    async args(target: string): Promise<string[]> {
+      if (!configs.has(target)) configs.set(target, (async () => {
+        const userConfig = join(homedir(), '.ssh', 'config');
+        const resolved = String(await run('ssh', ['-G', '-F', existsSync(userConfig) ? userConfig : '/dev/null', ...sshTarget(target)], { timeoutMs: 5_000 }));
+        const settings = resolved.split('\n').filter(line => /^(hostname|user|port|identityfile|certificatefile|userknownhostsfile|globalknownhostsfile|hostkeyalias|stricthostkeychecking) /i.test(line));
+        const path = join(await (directory ??= mkdtemp(join(tmpdir(), 'graphyard-shard-ssh-'))), `${randomUUID()}.conf`);
+        await writeFile(path, ['Host *', 'BatchMode yes', 'ConnectTimeout 10', 'IdentitiesOnly yes', ...settings, ''].join('\n'), { mode: 0o600 });
+        return path;
+      })());
+      return ['-F', await configs.get(target)!, ...sshTarget(target)];
+    },
+    async close() { if (directory) await rm(await directory, { recursive: true, force: true }); },
+  };
+}
+
 /** What a remote shard answered: its exit and output, and the per-file records it wrote. */
 export interface RemoteShardEnd { ok: boolean; out: string; status: number | null; records: string }
 
@@ -129,12 +152,13 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
   const repo = mirrorName(input.root);
   const remaining = () => Math.max(1_000, input.deadline - Date.now());
   const local = async (command: string, args: string[]) => String(await input.run(command, args, { timeoutMs: remaining() })).trim();
-  const ssh = (target: string, verb: string) => ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', ...sshTarget(target), verb];
+  const transport = shardSshSession(input.run);
+  const ssh = async (target: string, verb: string) => ['ssh', ...await transport.args(target), verb];
   /** One shim verb on `target`, with `source`'s output as its input; any failure turns the host away. */
   const shim = async (target: string, verb: string, source?: string) => {
     try {
-      if (!source) { const [program, ...args] = ssh(target, verb); return String(await input.run(program!, args, { timeoutMs: remaining() })); }
-      return String(await input.run('sh', ['-c', `set -o pipefail 2>/dev/null; ${source} | ${ssh(target, verb).map(shellQuote).join(' ')}`], { timeoutMs: remaining() }));
+      if (!source) { const [program, ...args] = await ssh(target, verb); return String(await input.run(program!, args, { timeoutMs: remaining() })); }
+      return String(await input.run('sh', ['-c', `set -o pipefail 2>/dev/null; ${source} | ${(await ssh(target, verb)).map(shellQuote).join(' ')}`], { timeoutMs: remaining() }));
     } catch (error) {
       const failed = error as { stderr?: unknown; message?: string };
       throw new HostDroppedError(target, (String(failed.stderr ?? '').trim() || String(failed.message ?? error)).slice(-500));
@@ -176,7 +200,7 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
       if (!ready.has(target)) ready.set(target, prepare(target));
       const run = await ready.get(target)!, shard = index + 1;
       const request = JSON.stringify({ files, argv: argv('{list}', '{records}'), cpus, deadline: input.deadline });
-      const words = ssh(target, `run-shard ${run} ${shard}`);
+      const words = await ssh(target, `run-shard ${run} ${shard}`);
       let end: Omit<RemoteShardEnd, 'records'>;
       try { end = { ok: true, out: String(await input.run('sh', ['-c', `printf '%s' ${shellQuote(request)} | ${words.map(shellQuote).join(' ')}`], { timeoutMs: remaining(), ...(input.signal ? { signal: input.signal } : {}) })), status: 0 }; }
       catch (error) {
@@ -197,12 +221,13 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
         const run = await prepared.catch(() => null);
         if (run) await shim(target, `clean ${run}`).catch(() => {});
       }));
+      await transport.close();
     },
   };
 }
 
 /** One trial's shard record, for master status: wall time, shards run and run remotely, waits while a host idled, and each host's reading. */
-export interface RemoteShardRun { at: string; wallMs: number; shards: number; remote: number; queuedWhileIdle: number; host: string; celsius: number | null; hosts: { name: string; away: boolean; celsius: number | null; freeCores: number }[] }
+export interface RemoteShardRun { at: string; wallMs: number; shards: number; remote: number; queuedWhileIdle: number; host: string; celsius: number | null; hosts: { name: string; away: boolean; reason?: string; celsius: number | null; freeCores: number }[] }
 export const remoteShardRecordPath = (root: string) => join(root, '.graphyard', 'remote-shards.json');
 const keptRuns = 20;
 
@@ -233,3 +258,7 @@ export function remoteShardSummary(runs: readonly RemoteShardRun[]) {
   };
 }
 
+
+/** GY-3476: one attention line for each host the latest trial left away because its shim is older than this release. */
+export const outdatedShimAttention = (runs: readonly RemoteShardRun[]) => (runs.at(-1)?.hosts ?? []).filter(host => host.away && host.reason === outdatedShimReason(host.name)).map(host =>
+  ({ subject: `host ${host.name}`, text: `${host.name} takes no trial shards: its graphyard-host-shim is older than this release`, next: `Run graphyard host prepare and, with sudo on ${host.name}, the script it prints` }));

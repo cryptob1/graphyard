@@ -1,0 +1,15 @@
+{
+  "id": "batch-gate-own-wait-liveness",
+  "title": "A batch gate counts only its own wait and names its run",
+  "description": "Runs the real gate and loop cycle on a host that reads 96C with another install's gate start waiting: the gate's check waits for its host heavy-job slot and status says so, then status names its detached run and that run's step; the loop stops under the run and an hour later the next loop adopts the same run instead of starting another, its verdict verifies main, and the next cycle starts the queued merge trial (GY-3474).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a gate reports its wait and its run, survives a loop restart in one attempt, and dispatch resumes",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:batch-gate-own-wait-liveness tests/batch-gate-own-wait-liveness.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

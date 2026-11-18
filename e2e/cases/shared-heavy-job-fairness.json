@@ -1,0 +1,15 @@
+{
+  "id": "shared-heavy-job-fairness",
+  "title": "A second install's reviewed candidate gets the freed shared slot while the first keeps submitting",
+  "description": "Over a host heavy-job budget of one, a second install's reviewed candidate waits for its merge trial while the first install submits a new trial every 20 ms; the first install's batch gate runs at once in the reserved slot, and when the shared slot frees the candidate's trial takes it ahead of every newer arrival, never more than one ordinary job running (GY-3460).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the older candidate from the second install takes the freed slot ahead of newer trials",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:shared-heavy-job-fairness tests/shared-heavy-job-fairness.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

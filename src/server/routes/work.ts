@@ -1,4 +1,4 @@
-import { takeWorkerVerifications, finishWorkerVerification, progressWorkerVerification, workerVerificationLines } from '../worker-verification-queue.js';
+import { restartWorkerVerifications, takeWorkerVerifications, finishWorkerVerification, progressWorkerVerification, workerVerificationLines } from '../worker-verification-queue.js';
 import { workerVerification } from '../worker-verification.js';
 import { workerVerificationTimeoutMs } from '../../merge-writer/worker-verification.js';
 import { once } from '../../store/mutations.js';
@@ -11,7 +11,6 @@ import { defineRoutes, parseJson, Sent, type RouteContext } from '../routes.js';
 import { answerHumanDecision, answerHumanProof, listHumanRequests, requestHumanProof, recordCapacity, requestHumanDecision } from '../waits.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
-import { installUrl } from '../../team-access.js';
 import { unownedFamilySql } from '../../store/tables/work.js';
 import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict, renewReviewRequest } from '../review-verdict.js';
 import { readTrialScreenshot } from '../trial-screenshots.js';
@@ -21,10 +20,10 @@ import { lockedWork, workIdByRef } from '../../store/locked-read.js';
 import { applyPreviewRecord, previewRecordBodySchema, previewSiteByteLimit, previewSiteFileLimit } from '../../project-previews.js';
 import type { Services } from '../routes.js';
 
-/** GY-3415: the address the owner opens this install at — its tailnet name once the host reported it (routes/team-access.ts), else the address this request reached. */
+/** GY-3415: the address the owner opens this install at — the address Tailscale serves it at once the host reported one (routes/team-access.ts), else the address this request reached. */
 async function installAddress(context: RouteContext) {
   const report = (await context.services.engine.store.pool.query(`SELECT payload FROM events WHERE ${unownedFamilySql('team-access.')} AND kind = 'team-access.host' ORDER BY seq DESC LIMIT 1`)).rows[0]?.payload;
-  return installUrl(report ?? {}, context.services.teamAccess?.port ?? String(context.req.socket.localPort ?? '')) ?? `http://${context.req.headers.host}`;
+  return report?.url ?? `http://${context.req.headers.host}`;
 }
 import { hostRunLog } from '../terminal.js';
 import { runTranscript } from '../../model/sessions.js';
@@ -46,6 +45,9 @@ const refuseLead = async ({ actor, services }: RouteContext, id: string | null, 
 
 /** Work mutations: the human-only waits, the merge writer's record and every engine command. */
 export const workRoutes = defineRoutes('work', [
+  { method: 'POST', path: '/api/worker-verifications/restart', async handle(context) {
+    return restartWorkerVerifications(context.services, context.actor, await parseJson(context));
+  } },
   { method: 'POST', path: '/api/worker-verifications/take', async handle(context) {
     return takeWorkerVerifications(context.services, context.actor, await parseJson(context));
   } },

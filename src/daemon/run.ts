@@ -221,6 +221,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // serves landing in that window batch into one restart onto whatever is newest when it opens.
     const startedAt = now();
     let handoverLogged = false;
+    // The CLI master.json names when a reload refused it because this loop is bound to another (GY-3454).
+    let movedCli: string | null = null;
     // True when another actor wrote an event since the last read; the first read only sets the mark.
     const fresh = async () => {
       try {
@@ -244,7 +246,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       while (!stopping) {
         let phase: 'reload' | 'cycle' = 'reload', wait = interval();
         try {
-          if (options.reload) for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
+          if (options.reload) for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; movedCli = reload.cliPath ?? null; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
           phase = 'cycle';
           cycling = true;
           const result = await runCycle(config, state, effects, now, launcher, log, progress);
@@ -284,16 +286,19 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         // anyway: its trials run detached from this process (GY-3159), so the restart leaves each
         // one running and the next loop adopts it — the trial reaches its own verdict instead of
         // being discarded as the restart's own refusal.
-        const found = options.root && !stopping ? restartCause(config, options.root, state.release?.commit ?? null) : null;
+        // GY-3454: a deploy that moves master.json's cliPath to the serving release is adopted at
+        // once — the loop's own cliPath still names the release it loaded, so only the moved one can.
+        const found = options.root && !stopping ? restartCause(movedCli ? { ...config, cliPath: movedCli } : config, options.root, state.release?.commit ?? null) : null;
         const windowMs = (config.run.handoverMinutes ?? defaultHandoverMinutes) * 60_000;
-        const cause = found && (found === restartRequestedCause || now() - startedAt >= windowMs) ? found : null;
+        const immediate = found === restartRequestedCause || !!movedCli;
+        const cause = found && (immediate || now() - startedAt >= windowMs) ? found : null;
         if (found && !cause && !handoverLogged) {
           handoverLogged = true;
           log(`[graphyard-master] a handover is pending: ${found}; the loop adopts the newest served release once it has run ${windowMs / 60_000} minute(s), at ${new Date(startedAt + windowMs).toISOString()}`);
         }
         const trialsInFlight = mergeWriterInFlight(state);
         if (!cause || !trialsInFlight) restartWaitedFrom = null;
-        if (cause && (!trialsInFlight || now() - (restartWaitedFrom ??= now()) >= releaseAdoptionBoundMs)) {
+        if (cause && (!trialsInFlight || movedCli || now() - (restartWaitedFrom ??= now()) >= releaseAdoptionBoundMs)) {
           const running = state.mergeWriter.inFlights?.map(entry => entry.key) ?? [];
           log(`[graphyard-master] restarting through the supervisor unit${running.length ? `; the merge trial(s) of ${running.join(', ')} run on, detached, and the next loop adopts them` : ''}: ${cause}`);
           try { rmSync(loopRestartRequestPath(config), { force: true }); await (options.restartLoop ?? restartThroughUnit)(); }

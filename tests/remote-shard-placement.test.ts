@@ -4,6 +4,7 @@ import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { HostDroppedError, readRemoteShardRuns, readShardHosts, realFreeCores, remoteShardSummary, runShardsOnHosts, type HostReading, type PlacedHost } from '../src/merge-writer/remote-shards.js';
 import { runTrial } from '../src/merge-writer/trial.js';
 import { trialHotCelsius } from '../src/merge-writer/trial-load.js';
+import { hostShimDigest } from '../src/host-shim.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { shardHosts, shardRepository } from './helpers/shard-hosts.js';
 
@@ -75,8 +76,9 @@ test(`${proof} — a host that drops mid-shard has that shard re-queued on anoth
 });
 
 test(`${proof} — the shim's probe reads a host's cores, load, steal and hottest sensor; a host that does not answer is away, and this machine always takes shards`, async () => {
-  const probe = ['user 1001 gy-compute', 'cores 16', 'load 3.5', 'cpu  100 0 100 700 0 0 0 100 0 0', 'temp k10temp 71000', 'temp nvme 80000', 'runs 1'].join('\n');
+  const probe = [`shim ${hostShimDigest}`, 'user 1001 gy-compute', 'cores 16', 'load 3.5', 'cpu  100 0 100 700 0 0 0 100 0 0', 'temp k10temp 71000', 'temp nvme 80000', 'runs 1'].join('\n');
   const run: ChildRun = async (command, args) => {
+    if (command === 'ssh' && args[0] === '-G') return `hostname ${args.at(-1)!.split('@').at(-1)}\nuser gy-compute\n`;
     if (command === 'ssh' && args.at(-2) === 'gy-compute@box') return probe;
     if (command === 'ssh') throw Object.assign(new Error('ssh: connect to host gone port 22: Connection refused'), { status: 255 });
     throw new Error('no Docker here');
@@ -85,6 +87,7 @@ test(`${proof} — the shim's probe reads a host's cores, load, steal and hottes
   assert.deepEqual({ ...here!, name: 'here' }, { name: 'here', cores: 8, busy: 0, steal: 0, celsius: null, limit: trialHotCelsius, away: false });
   assert.deepEqual(box, { name: 'gy-compute@box', cores: 16, busy: 3.5, steal: 0.1, celsius: 71, limit: trialHotCelsius, away: false });
   assert.equal(gone!.away, true);
+  assert.match(gone!.reason!, /Connection refused/);
 });
 
 test(`${proof} — in a trial, a host's shard that dies without a verdict is re-queued on this machine with no fault, its log tail kept in the trial log`, { timeout: 120_000 }, async () => {
@@ -114,6 +117,7 @@ for (const file of readFileSync(at('--files-from'), 'utf8').split('\\n').filter(
     assert.ok(timings.some(step => /^tests: shard \d+ on gy-compute@box$/.test(step)), `a shard was placed on the host: ${timings.join(', ')}`);
     assert.match(result.logTail ?? '', /\[remote\] host gy-compute@box dropped a shard: .*box shard output before it died.*; its shard runs on another host/s, 'the log tail is kept');
     const [record] = readRemoteShardRuns(root);
+    assert.match(remoteShardSummary(readRemoteShardRuns(root))!.hosts.at(-1)!.reason ?? '', /box shard output before it died/);
     assert.equal(record!.remote, 0, 'every shard finally ran on this machine');
     assert.deepEqual(remoteShardSummary(readRemoteShardRuns(root))!.hosts.map(host => [host.name, host.state]), [['vishrog', 'ready'], ['gy-compute@box', 'away']]);
   } finally { if (previous === undefined) delete process.env.GRAPHYARD_TRIAL_IMAGE; else process.env.GRAPHYARD_TRIAL_IMAGE = previous; }

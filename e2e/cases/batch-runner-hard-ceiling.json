@@ -1,0 +1,15 @@
+{
+  "id": "batch-runner-hard-ceiling",
+  "title": "A new batch run's runner timeout is at most 90 minutes",
+  "description": "Runs the real loop gate step over hours of recorded run history beside busy trial slots, launching its check through the detached trial runner: the run's spec and outer deadline are at most 90 minutes, never a multiple of the gate's bound, every check is kept, and the run settles on its verdict (GY-3509).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a new batch run's spec and outer deadline stay within 90 minutes with every check kept",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:batch-runner-hard-ceiling tests/batch-runner-hard-ceiling.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

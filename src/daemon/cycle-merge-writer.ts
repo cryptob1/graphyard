@@ -31,6 +31,7 @@ import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterion
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { cpuPressureHeld, trialCapNow } from './cpu-pressure.js';
+import { standingLimit } from '../master/profiles.js';
 import { reportTrialHostFault, reportTrialImageFault, reportTrialNetworkFault, reportTrialSandboxFault } from './control-plane.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
@@ -326,11 +327,13 @@ const replyUnknown = (error: unknown) => { const status = mergeRecordStatus(erro
 /**
  * Trials running at once divide the host's cores, so their shards never oversubscribe it; a trial
  * given 1/`share` of the cores gets `share` times the deadline (GY-3183), so the suite that passes
- * alone within the limit is not timed out for running beside others.
+ * alone within the limit is not timed out for running beside others. GY-3509: an explicit deadline
+ * (the batch gate's) is already a bound and is kept as given; only the default trial deadline scales.
  */
-export function trialShareAllowance(share: number | undefined, timeoutMs = trialTimeoutMinutes * 60_000, cores = availableParallelism()): { timeoutMs: number; cores?: number } {
-  if (!share || share <= 1) return { timeoutMs };
-  return { timeoutMs: timeoutMs * share, cores: Math.max(2, Math.floor(cores / share)) };
+export function trialShareAllowance(share: number | undefined, timeoutMs?: number, cores = availableParallelism()): { timeoutMs: number; cores?: number } {
+  const deadline = timeoutMs ?? trialTimeoutMinutes * 60_000;
+  if (!share || share <= 1) return { timeoutMs: deadline };
+  return { timeoutMs: timeoutMs ?? deadline * share, cores: Math.max(2, Math.floor(cores / share)) };
 }
 
 /**
@@ -1004,7 +1007,8 @@ export async function mergeWriterStep(cycle: Cycle) {
   // GY-3182: a slot free beside running flights starts the next due head now, without waiting for them
   // to settle; the heads they carry are out of the queue and their open intents out of the reconcile.
   // GY-3401: at the CPU temperature limit, half the cap; the figures ride the CPU reading to master status and the Workers page.
-  const fullCap = trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory));
+  // GY-3446: a temporary trialCap the master set lowers it until it expires.
+  const fullCap = Math.min(trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory)), standingLimit(cycle.config?.run.trialCap, cycle.now()) ?? Infinity);
   const parallel = trialCapNow(state, fullCap);
   if (state.cpuPressure) state.cpuPressure.trialCap = { now: parallel, full: fullCap };
   const gateSlots = batchGateBusySlots(state);

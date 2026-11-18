@@ -13,7 +13,7 @@ export interface WorkerVerificationJob {
   id: string; host: string; branch: string; work: Work; input: WorkerVerificationInput; baseBranch: string;
 }
 interface Pending {
-  job: WorkerVerificationJob; executor?: string;
+  job: WorkerVerificationJob; executor?: string; requestedAt: number;
   /** The host's launcher lines so far (GY-3332): what the waiting worker's `complete` prints. */
   lines: string[];
   resolve: (result: WorkerVerificationResult | WorkerCheckResult) => void; reject: (error: Error) => void;
@@ -30,9 +30,34 @@ export async function dispatchWorkerVerification<Result extends WorkerVerificati
   try {
     return await new Promise<Result>((resolve, reject) => {
       timer = setTimeout(() => reject(new Refusal('Host worker verification timed out', 504)), workerVerificationTimeoutMs);
-      pending.set(id, { job: { ...job, id }, lines: [], resolve: resolve as Pending['resolve'], reject });
+      pending.set(id, { job: { ...job, id }, requestedAt: Date.now(), lines: [], resolve: resolve as Pending['resolve'], reject });
     });
   } finally { clearTimeout(timer!); pending.delete(id); }
+}
+/** A new loop rejects only its predecessor's assigned requests; queued work stays queued. */
+export function restartWorkerVerifications(services: Services, actor: Principal, body: unknown) {
+  demand(actor.role === 'coordinator', 'Only the host coordinator restarts worker verification', 403);
+  const { host } = z.object({ host: z.string().min(1) }).strict().parse(body);
+  let interrupted = 0;
+  for (const [id, pending] of queue(services)) {
+    if (pending.job.host !== host || pending.executor !== actor.id) continue;
+    queue(services).delete(id);
+    pending.reject(new Refusal(`Verification interrupted by coordinator restart; retry complete for ${pending.job.work.key} with the same head ${pending.job.input.head} and lease epoch ${pending.job.input.epoch}`, 409));
+    interrupted++;
+  }
+  return { interrupted };
+}
+
+/** Explicit diagnostic fields only: never expose the job's work document or credentials. */
+export function pendingWorkerVerifications(services: Services, actor: Principal, visible: { id: string }[], now = Date.now()) {
+  if (!['coordinator', 'operator-agent', 'admin'].includes(actor.role)) return [];
+  const ids = new Set(visible.map(work => work.id));
+  return [...queue(services).values()].filter(pending => ids.has(pending.job.work.id)).map(pending => ({
+    key: pending.job.work.key, head: pending.job.input.head, epoch: pending.job.input.epoch,
+    host: pending.job.host, executor: pending.executor ?? null,
+    requestedAt: new Date(pending.requestedAt).toISOString(), ageSeconds: Math.max(0, (now - pending.requestedAt) / 1000),
+    state: pending.executor ? 'running' : 'queued', progress: [...pending.lines],
+  }));
 }
 export function takeWorkerVerifications(services: Services, actor: Principal, body: unknown) {
   demand(actor.role === 'coordinator', 'Only the host coordinator runs worker verification', 403);

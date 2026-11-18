@@ -120,7 +120,10 @@ test(`${proof} — killing the second host's SSH mid-shard re-queues that shard 
     assert.deepEqual({ passed: killed.result.tests.passed, failed: killed.result.tests.failed }, { passed: files.length, failed: [] }, killed.result.logTail);
     assert.match(killed.result.logTail ?? '', new RegExp(`\\[remote\\] host ${target.replace(/\./g, '\\.')} dropped a shard: .*its shard runs on another host`, 's'));
     assert.ok(killed.lines.filter(line => !line.remote).length === files.length, 'every file finally ran on this machine');
-    assert.equal(remoteShardSummary(readRemoteShardRuns(repository.root))!.hosts.at(-1)!.state, 'away');
+    const host = remoteShardSummary(readRemoteShardRuns(repository.root))!.hosts.at(-1)!;
+    assert.equal(host.state, 'away');
+    assert.ok(host.reason?.trim(), 'master status keeps the dropped host’s SSH failure text');
+    assert.ok(killed.result.logTail?.includes(host.reason!), 'status and the trial log carry the same failure');
   } finally { await rm(slow, { force: true }); await second.start(); }
 });
 

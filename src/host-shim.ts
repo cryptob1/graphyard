@@ -1,7 +1,7 @@
 // Concern: GY-3412 — graphyard-host-shim, the only command this machine's SSH key may run on a host
 // (authorized_keys restrict,command=…, written by `graphyard host prepare`). It runs as the host's
 // unprivileged gy-compute user with rootless Docker and answers fixed verbs with validated arguments:
-//   probe                          read cores, load, CPU steal, sensors and running trial containers
+//   probe                          the shim's own digest, then cores, load, CPU steal, sensors and running trial containers
 //   receive-pack REPO SHA          a git pack on stdin into the per-repo mirror ~/.graphyard/mirrors/REPO.git
 //   receive-image IMAGE            `docker save` output on stdin, loaded once per warm image; older warm images go
 //   prepare-run REPO SHA IMAGE     a checkout of SHA cloned from the mirror under ~/.graphyard/runs,
@@ -12,6 +12,7 @@
 //   clean RUN                      remove a run directory
 // Anything else is refused. Containers keep Docker's default seccomp and system paths and never get
 // the Docker socket or the network, so a shard reaches no private address, the tailnet or the host.
+import { createHash } from 'node:crypto';
 import { trialLauncher } from './merge-writer/trial-container.js';
 import { defaultDiskFloorGb, minimumTrialContainers, trialHotCelsius, trialPressureBoundSeconds, trialStartOrder } from './merge-writer/trial-load.js';
 
@@ -28,7 +29,8 @@ export const hostProbeScript = [
 /** The warm image a host runs shards in: the trial image's digest and the lockfile's hash (`none` without one). */
 export const warmImagePattern = /^graphyard-warm:[0-9a-f]{12}-(?:[0-9a-f]{12}|none)$/;
 
-export const hostShimScript = `#!/bin/sh
+const shimDigestSlot = '@GRAPHYARD_SHIM_DIGEST@';
+const shimTemplate = `#!/bin/sh
 # graphyard-host-shim: the only command Graphyard's SSH key may run here (graphyard host prepare).
 refuse() { echo "graphyard-host-shim refuses: $SSH_ORIGINAL_COMMAND" >&2; exit 1; }
 [ $# -eq 0 ] || { [ $# -eq 2 ] && [ "$1" = --home ]; } || refuse
@@ -36,6 +38,7 @@ export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
 case "$SSH_ORIGINAL_COMMAND" in
   probe)
+    echo "shim ${shimDigestSlot}"
     echo "user $(id -u) $(id -Gn)"
 ${hostProbeScript.split('\n').map(line => `    ${line}`).join('\n')}
     ;;
@@ -101,13 +104,21 @@ elif verb == 'prepare-run':
             shutil.rmtree(os.path.join(runs, name), ignore_errors=True)
     run = tempfile.mkdtemp(prefix='trial-', dir=runs)
     checkout = os.path.join(run, 'repo')
-    # A clone with history, so tests that read the checkout's git log run as they do on this machine; --local hardlinks the mirror's objects.
-    subprocess.check_call(['git', 'clone', '-q', '--local', '--no-checkout', mirror, checkout])
+    # Keep history, but copy objects: per-run permissions must never change the mirror.
+    subprocess.check_call(['git', 'clone', '-q', '--local', '--no-hardlinks', '--no-checkout', mirror, checkout])
     subprocess.check_call(['git', '-C', checkout, '-c', 'advice.detachedHead=false', 'checkout', '-q', '--detach', args[1]])
     if not args[2].endswith('-none') and not os.path.lexists(os.path.join(checkout, 'node_modules')):
         os.symlink('/deps/node_modules', os.path.join(checkout, 'node_modules'))
     with open(os.path.join(run, 'image'), 'w') as file:
         file.write(args[2])
+    # Container GID 0 maps to the host user's group under rootless Docker. Only this
+    # run is writable by that group; UID 1000 can start Postgres without being root.
+    for directory, dirs, files in os.walk(run):
+        os.chmod(directory, os.stat(directory).st_mode | 0o2070)
+        for name in files:
+            path = os.path.join(directory, name)
+            if not os.path.islink(path):
+                os.chmod(path, os.stat(path).st_mode | 0o060)
     print('run ' + os.path.basename(run))
 else:
     run = os.path.join(runs, args[0])
@@ -140,17 +151,23 @@ else:
             file.write('\\n'.join(files) + '\\n')
         memory = next((int(line.split()[1]) for line in open('/proc/meminfo') if line.startswith('MemTotal:')), 4 << 20) // 1024 // cap
         spec = {'image': open(os.path.join(run, 'image')).read().strip(), 'mounts': [[run, run, False]], 'network': 'none',
-                'deadline': min(deadline, int(time.time() * 1000) + 3 * 3600 * 1000), 'docker': os.environ['DOCKER_HOST'], 'user': '0:0',
+                'deadline': min(deadline, int(time.time() * 1000) + 3 * 3600 * 1000), 'docker': os.environ['DOCKER_HOST'], 'user': '1000:0',
                 'limits': {'cpus': max(1, min(cpus, cores)), 'memory': '%dm' % max(512, memory), 'pids': 4096},
                 'load': {'slots': os.path.join(home, '.gy', 'trial-slots'), 'cap': cap, 'order': ${trialStartOrder.merge}, 'hotCelsius': ${trialHotCelsius},
                          'floorBytes': float(os.environ.get('GRAPHYARD_HOST_FLOOR_GB', ${defaultDiskFloorGb})) * 1e9, 'hwmon': '/sys/class/hwmon', 'pressureBoundSeconds': ${trialPressureBoundSeconds}}}
         command = [{'{list}': listed, '{records}': records}.get(word, word) for word in argv]
+        # Keep new files removable by the host's mapped group too.
+        command = ['/bin/sh', '-c', 'umask 0002; exec "$@"', 'sh'] + command
         os.chdir(os.path.join(run, 'repo'))
         sys.stdout.flush()
         sys.exit(subprocess.call([sys.executable, '-I', '-S', '-c', LAUNCHER, json.dumps(spec)] + command,
-                                 env={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': '/tmp', 'CI': '1'}))
+                                 env={'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': '/tmp', 'CI': '1',
+                                      'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'safe.directory', 'GIT_CONFIG_VALUE_0': os.getcwd()}))
 GRAPHYARD_VERBS
 )" "$@" ;;
   *) refuse ;;
 esac
 `;
+/** GY-3476: this release's shim, named by the digest its probe prints; a host whose probe prints another (or none) runs an older shim. */
+export const hostShimDigest = createHash('sha256').update(shimTemplate).digest('hex');
+export const hostShimScript = shimTemplate.replace(shimDigestSlot, hostShimDigest);
