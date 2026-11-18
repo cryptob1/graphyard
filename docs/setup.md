@@ -30,6 +30,18 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 
 Work's **Taste** feed shows recent deliveries with why and evidence: **Looks good** records your call, **Send back** turns your note into a follow-up item and a proposed master lesson; nothing waits on a taste.
 
+## Apps deployed elsewhere
+
+Graphyard watches an app another host deploys, such as a Go service on Railway, when `graphyard.json` names where it reports its commit:
+
+```json
+{ "delivery": { "mode": "local", "applications": [
+  { "id": "api", "directory": "services/api", "versionUrl": "https://api.example.com/healthz" }
+] } }
+```
+
+The `versionUrl` answers the commit it serves (JSON `commit` or `sha`, or plain text). `master status` reads this from the main branch, not the local checkout, and lists the app as current, deploying, lagging or failed. If main's declaration is invalid, it names the bad fields. Graphyard never deploys or previews such an app.
+
 ## Publishing
 
 - Verified deploys publish `@cryptob1/graphyard` with npm OIDC provenance plus both GHCR images via Actions — no host publish token. `graphyard guide publishing` covers owner setup.
