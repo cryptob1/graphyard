@@ -153,6 +153,22 @@ img.mark{width:26px;height:26px}
 .work-row.overdue{box-shadow:inset 3px 0 0 var(--blocked)}
 .shipped-line{display:flex;align-items:center;gap:var(--space-3);padding:var(--space-3) var(--space-4);border-radius:10px;background:var(--surface);font-size:var(--type-small);color:var(--text-2)}
 .shipped-line svg{color:var(--shipped);flex-shrink:0}.shipped-line strong{color:var(--text);font-weight:600}.shipped-line .text-button{font-size:var(--type-small);color:var(--text)}.shipped-line .push{margin-left:auto;color:var(--accent)}
+/* GY-3393: the Taste feed's cards — a shipped item, its why and evidence, and the two actions. */
+.taste-feed{padding:0;gap:0}
+.taste-feed>summary{align-items:center;padding:var(--space-3) var(--space-4)}
+.taste-list{list-style:none;margin:0;padding:var(--space-3) var(--space-4);display:grid;gap:var(--space-3)}
+.taste-card{display:flex;flex-direction:column;gap:8px;padding:var(--space-3) var(--space-4);border:1px solid var(--border);border-radius:10px;background:var(--raised)}
+.taste-head{display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap}
+.taste-head .text-button{font-size:var(--type-body);color:var(--text)}
+.taste-why{margin:0;font-size:var(--type-body);color:var(--text)}
+.taste-evidence{list-style:none;margin:0;padding:0;display:flex;gap:var(--space-3);flex-wrap:wrap;font-size:var(--type-small);color:var(--text-2)}
+.taste-evidence li{font-family:var(--font-mono)}
+.taste-shot{align-self:flex-start;width:auto;max-height:220px}
+.taste-actions{display:flex;gap:var(--space-2);flex-wrap:wrap;align-items:center}
+.taste-actions input{flex:1;min-width:180px;padding:9px 11px;font-size:var(--type-small)}
+.taste-actions button{padding:9px 13px;font-size:var(--type-small)}
+.taste-actions .send-back{background:none;border:1px solid var(--border);color:var(--text)}
+.taste-actions .send-back:not(:disabled){border-color:var(--needs-you);color:var(--needs-you)}
 /* The four item states (GY-1979). */
 .steps-bar{display:flex;flex-direction:column;gap:6px;min-width:0}
 .steps-track{display:flex;gap:3px}.step-seg{flex:1;height:6px;border-radius:3px;background:var(--border)}
@@ -355,6 +371,7 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 /* The Master terminal uses the rest of the viewport, including on a phone. */
 .main:has(>.live-terminal){gap:var(--space-4)}
 /* GY-3345: threads with other installs' Masters, above the terminal; long words wrap, never widen the page. */
+.stall-alarm{margin:0 0 var(--space-2);padding:var(--space-2) var(--space-3);border-left:3px solid var(--blocked);border-radius:var(--radius);background:var(--raised);color:var(--text);overflow-wrap:anywhere}
 .master-messages{display:grid;gap:8px;margin-bottom:8px;max-height:30dvh;overflow-y:auto;min-width:0}
 /* GY-3394: the blockers the Master owes — one row each, the item, its wait and the recorded blocker. */
 .master-owes{list-style:none;margin:0;padding:0}

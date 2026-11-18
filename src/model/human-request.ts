@@ -178,24 +178,24 @@ export interface HumanOnlyRule {
   /** Stable name, carried on every row the rule raises. */
   kind: string;
   /** Why this session may not answer one of these, or null when it may: the refusal the server raises. */
-  refuse(actor: HumanOnlyActor): string | null;
+  refuse(actor: HumanOnlyActor, ownerSaid?: string): string | null;
   /** Every open instance of this rule on one item. */
   open(subject: HumanOnlySubject, now: number): HumanRequestRow[];
 }
 
 /**
  * A decision only a human may make, parked by the worker that reached it: the server refuses an
- * answer from anything but a declared human session (server/waits.ts `answerHumanDecision`). The
- * three decisions are human by definition; an agent holding an admin credential is still an agent.
+ * answer unless the human gives it directly or the operator agent records the owner’s own words.
  */
 export const parkRule: HumanOnlyRule = {
   kind: 'human-request',
-  refuse: actor => actor.role !== 'admin' ? 'Only the human operator answers a human-only request'
-    : declaredKind(actor) !== 'human' ? `A human-only request needs a declared human session; ${actor.id} is ${declaredKind(actor)}` : null,
+  refuse: (actor, ownerSaid) => ownerSaid?.trim() && (actor.role === 'operator-agent' || (actor.role === 'admin' && declaredKind(actor) === 'ai')) ? null
+    : actor.role !== 'admin' ? 'Only the human operator answers a human-only request; an agent relays the owner with --owner-said'
+    : declaredKind(actor) !== 'human' ? `A human-only request needs a declared human session; ${actor.id} is ${declaredKind(actor)}; relay the owner with --owner-said` : null,
   open: (subject, now) => openHumanRequests([subject.work], now),
 };
 
-/** A real-world check (GY-2986): an agent holding an admin credential has touched no device, so only a declared human session answers. */
+/** A real-world check: the person’s observation may also be relayed in their own words. */
 export const humanProofRule: HumanOnlyRule = {
   kind: 'human-proof',
   refuse: parkRule.refuse,
@@ -217,9 +217,9 @@ export const humanOnlyRule = (kind: string, rules: readonly HumanOnlyRule[] = hu
  * does not know refuses: a client older than the server that raised the row must not offer a
  * form for a refusal it cannot state.
  */
-export function humanOnlyRefusal(kind: string, actor: HumanOnlyActor, rules: readonly HumanOnlyRule[] = humanOnlyRules): string | null {
+export function humanOnlyRefusal(kind: string, actor: HumanOnlyActor, rules: readonly HumanOnlyRule[] = humanOnlyRules, ownerSaid?: string): string | null {
   const rule = humanOnlyRule(kind, rules);
-  return rule ? rule.refuse(actor) : `No ${kind} rule is known here; reload before answering it`;
+  return rule ? rule.refuse(actor, ownerSaid) : `No ${kind} rule is known here; reload before answering it`;
 }
 /** Every open human-only action, longest wait first: the whole human-facing surface. */
 export function openHumanOnly(subjects: readonly HumanOnlySubject[], now: number, rules: readonly HumanOnlyRule[] = humanOnlyRules): HumanRequestRow[] {

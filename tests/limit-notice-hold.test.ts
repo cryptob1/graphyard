@@ -1,3 +1,4 @@
+import { observeAccount } from '../src/fleet.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -61,9 +62,16 @@ test('unit:limit-notice-hold-persists — a session ended on its provider limit 
     reason: `the session stopped on its provider's limit notice: ${notice}`, resetsAt, partialWork: { state: 'not-applicable', detail: 'fixture' } });
 
   const held = ((await ok(coordinator, 'agent-registry/document')) as Registry).accounts.find(account => account.name === 'claude-c')!.quota;
-  assert.equal(held.state, 'exhausted');
-  assert.equal(held.resetsAt, resetsAt);
+  assert.equal(held.state, 'unknown', 'a narrative requests a check, not a hold');
+  assert.equal(held.resetsAt, null);
   assert.ok(held.reason?.includes(notice), held.reason ?? 'no reason');
+  const document = await new AgentRegistry(store).document(coordinator);
+  const checked = await observeAccount(document.accounts.find(account => account.name === 'claude-c')!, runtime,
+    { quota: false, smoke: async () => ({ ok: false, error: `Usage limit reached; resets at ${resetsAt}` }) });
+  await new AgentRegistry(store).observe(coordinator, { host: HOST, observations: [{ account: 'claude-c', quota: checked.quota }] }, randomUUID());
+  assert.equal(checked.quota.state, 'exhausted');
+  assert.equal(checked.quota.resetsAt, resetsAt);
+
 
   // The pane closed, so the session no longer counts against the account's plan.
   await ok(coordinator, `agent-registry/sessions/${first.id}/end`, { reason: 'the pane closed on its limit notice' });

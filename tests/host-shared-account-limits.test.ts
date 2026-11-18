@@ -14,7 +14,7 @@ import { Engine } from '../src/engine.js';
 import { loadMasterConfig, setupMaster } from '../src/master/config.js';
 import { recordObservedExhaustion, selectAccount } from '../src/master/environments.js';
 import { endRegistrySessionById } from '../src/master/registry-slot.js';
-import { hostAccountExhaustion, hostAccountSessions, hostAccountsVariable, type HostAccountSession } from '../src/host-accounts.js';
+import { hostAccountCheck, hostAccountSessions, hostAccountsVariable, type HostAccountSession } from '../src/host-accounts.js';
 import type { MasterConfig } from '../src/master/profiles.js';
 import type { Principal } from '../src/model.js';
 import { server } from '../src/server.js';
@@ -161,12 +161,12 @@ test('e2e:host-shared-account-limits — killing the holder releases the account
 
 test('e2e:host-shared-account-limits — an exhaustion one install marks until a time is ineligible in the other until that time', async () => {
   const until = new Date(Date.now() + 2_500).toISOString();
-  await recordObservedExhaustion(installs[0]!.config, 'shared-a', { at: now(), resetsAt: until, reason: 'fixture limit notice: the shared plan is spent', role: 'worker', profile: 'launch', work: null }, Date.now(), {});
-  assert.equal(hostAccountExhaustion(home)!.by, 'owner/one');
+  await recordObservedExhaustion(installs[0]!.config, 'shared-a', { at: now(), resetsAt: until, reason: 'fixture limit notice: the shared plan is spent', role: 'worker', profile: 'launch', work: null }, Date.now(), { smoke: async () => ({ ok: false, error: `Usage limit reached; resets at ${until}` }) });
+  assert.equal(hostAccountCheck(home)!.quota.state, 'exhausted');
   // The other install reads the hold beside the home: its selection is refused, its registry records
   // the exhaustion with its reset, and the holder is named.
   await assert.rejects(select(1), (error: Error) => {
-    assert.match(error.message, /shared-a is held exhausted until \S+ by the Graphyard install owner\/one: fixture limit notice/);
+    assert.match(error.message, /Usage limit reached/);
     assert.match(error.message, /quota is exhausted/);
     return true;
   });
@@ -176,7 +176,7 @@ test('e2e:host-shared-account-limits — an exhaustion one install marks until a
   assert.equal(account.eligible, false);
   // Past the time, the hold is over: the account is selectable in the second install again.
   await delay(2_700);
-  const recovered = await select(1);
+  const recovered = await selectAccount(installs[1]!.config, 'worker', { name: 'launch' }, { smoke: async () => ({ ok: true, error: null }) });
   assert.equal(recovered.account!.name, 'shared-a');
   await recovered.release!('the hold expired');
 });

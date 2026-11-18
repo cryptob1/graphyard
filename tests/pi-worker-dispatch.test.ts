@@ -12,6 +12,7 @@ import { coordinatorConfinementRefusal } from '../src/master/confinement.js';
 import { runtimeSandboxes, verifyWorkerSandbox, WorkerSandboxError } from '../src/worker-sandbox.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import { foldObservations } from '../src/model/registry-sessions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -143,7 +144,9 @@ test('unit:pi-launch-failure-falls-back — a Pi run that stops at once on its l
     const chosen: string[] = [], ended: string[] = [];
     const client: FleetClient = {
       document: async () => structuredClone(registry),
+      observe: async request => { foldObservations(registry, request, { actor: 'executor', at }); },
       select: async request => {
+        foldObservations(registry, { host: request.host, observations: request.observations }, { actor: 'executor', at });
         const choice = chooseSession(registry, request, Date.now());
         if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision };
         const session: FleetSession = { id: `session-${chosen.length + 1}`, role: request.role, account: choice.account.name, runtime: choice.runtime.name, model: choice.model.name, host: request.host, work: request.work, principal: request.principal, group: request.group,
@@ -157,7 +160,7 @@ test('unit:pi-launch-failure-falls-back — a Pi run that stops at once on its l
     let claims = 0;
     const prepare = async () => ({ epoch: ++claims, path: join(root, 'assigned'), base: 'c'.repeat(40) });
     const worker = runs();
-    const dispatched = await dispatchWork(root, item, profile, { allWork: [item], prepare, release: async () => {}, observedAt: at, headless: worker.exec, probe: { registry: client, quota: false, cacheMs: 0, now: () => Date.parse(at) } as never });
+    const dispatched = await dispatchWork(root, item, profile, { allWork: [item], prepare, release: async () => {}, observedAt: at, headless: worker.exec, probe: { registry: client, quota: false, cacheMs: 0, smoke: async () => ({ ok: !worker.kinds.includes('pi'), error: 'Weekly/Monthly Limit Exhausted. Your limit will reset at 2030-10-17 08:27:35' }), now: () => Date.parse(at) } as never });
     return { dispatched, kinds: worker.kinds, chosen, ended, claims };
   };
 

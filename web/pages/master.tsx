@@ -40,7 +40,7 @@ export function masterOwes(work: Work[], now: number) {
  * owes: the standing blockers that are the Master's, not the owner's (GY-3394) — Needs you carries
  * only the owner's three decisions.
  */
-export default function MasterPage({ work, observedAt, token, api, setSelected }: Pick<Dashboard, 'work' | 'observedAt' | 'token' | 'api' | 'setSelected'>) {
+export default function MasterPage({ work, observedAt, token, api, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'token' | 'api' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const [messages, setMessages] = useState<Message[]>([]);
   useEffect(() => {
     let live = true;
@@ -49,10 +49,13 @@ export default function MasterPage({ work, observedAt, token, api, setSelected }
     return () => { live = false; clearInterval(timer); };
   }, [token]);
   const threads = messageThreads(messages);
+  // GY-3432: the loop's stall alarm, first, until work moves again.
+  const stall = typeof status?.setup?.stallAlarm === 'string' ? status.setup.stallAlarm : null;
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const owes = masterOwes(work, now);
   return <>
     <PageHeader title="Master" fact={owes.length ? `${owes.length} ${owes.length === 1 ? 'blocker waits' : 'blockers wait'} on the Master.` : 'Files, routes and unsticks the work.'}/>
+    {stall && <p className="stall-alarm" role="alert">{stall}</p>}
     {owes.length > 0 && <section className="panel" aria-label="Blockers the Master owes"><h2>Blockers <small>· the Master clears these</small></h2>
       <ul className="master-owes">{owes.map(entry => <li key={entry.id}>
         <button className="text-button" onClick={() => setSelected(entry.id)}>{entry.key} <span data-title>{entry.title}</span></button>

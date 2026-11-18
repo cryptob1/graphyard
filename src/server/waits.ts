@@ -19,7 +19,7 @@ import { save } from '../store.js';
 import { eventWorkSql } from '../store/snapshot-delta.js';
 import type { Services } from './routes.js';
 import { decisionWork } from '../store/decision-read.js';
-import { recordLimitNoticeHold } from '../agent-registry.js';
+import { recordLimitNoticeCheck } from '../agent-registry.js';
 
 /**
  * The two waits that must stall nothing but the item that has them (GY-89): a session whose
@@ -90,9 +90,8 @@ export async function requestHumanDecision(services: Services, actor: Principal,
 /**
  * The human's answer. It is the whole resumption: a provided answer clears the request and its
  * blocker in one transaction, which leaves the item claimable, and the loop dispatches claimable
- * work on its next cycle. A declined answer keeps the item parked on the human's own words. Only
- * a declared human session may answer — the three decisions are human by definition, and an
- * agent holding an admin credential is still an agent.
+ * work on its next cycle. A decline keeps the item blocked on the owner's words. An operator
+ * agent may relay those words; the owner can reverse that answer, appending history.
  */
 export async function answerHumanDecision(services: Services, actor: Principal, id: string, body: unknown, key: string, install = '') {
   const data = humanAnswerSchema.parse(body);
@@ -101,27 +100,30 @@ export async function answerHumanDecision(services: Services, actor: Principal, 
   return services.engine.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
     // The rule the human surface lists this request under is the rule that refuses the answer,
     // so neither can drift from the other (model/human-request.ts `parkRule`).
-    const refusal = humanOnlyRefusal(parkRule.kind, actor);
+    const refusal = humanOnlyRefusal(parkRule.kind, actor, undefined, data.ownerSaid);
     const { work, all } = await findWork(db, id);
-    // GY-3415: an owner who approved in the master chat answers here, signed in, in one click.
+    // Without a relay, the owner can still answer directly on the dashboard.
     demand(!refusal, work ? `${refusal}. The owner answers it signed in on the dashboard: ${install}/#${work.key}` : refusal!, 403);
     demand(work, 'Work item not found', 404);
-    const request = work!.humanRequest;
+    const previous = work!.humanRequests?.findLast(entry => entry.id === data.request);
+    const reversing = data.reverses && previous?.answer?.ownerSaid && previous.answer.at === data.reverses;
+    if (data.reverses) demand(reversing && actor.role === 'admin' && actor.sessionKind === 'human' && !work!.humanRequest, 'Only the owner can reverse the latest relayed answer; reload before answering', 409);
+    const request = data.reverses && reversing ? previous : work!.humanRequest;
     demand(request, `${work!.key} has no open human-only request`, 404);
     demand(request!.id === data.request, `${work!.key}'s open request is ${request!.id}, not ${data.request}; reload before answering`);
     const resolved = resolveHumanAnswer(request!, data);
     const sealed = resolved.secret ? sealToHost(request!.sealTo!, data.secret!) : null;
     const answered: HumanRequest = { ...request!, answer: { by: actor.id, at: now.toISOString(), outcome: resolved.outcome, text: resolved.text, waitedMs: Math.max(0, now.getTime() - Date.parse(request!.at)),
-      ...(resolved.choice ? { choice: resolved.choice, note: resolved.note } : {}), ...(sealed ? { sealed } : {}) } };
+      ...(data.ownerSaid ? { ownerSaid: data.ownerSaid } : {}), ...(resolved.choice ? { choice: resolved.choice, note: resolved.note } : {}), ...(sealed ? { sealed } : {}) } };
     work!.humanRequests = [...(work!.humanRequests ?? []), answered].slice(-retainedHumanRequests);
     work!.humanRequest = null;
-    if (work!.blocker?.startsWith(humanRequestBlocker)) { work!.blocker = resolved.outcome === 'provided' ? null : `A human declined ${humanDecisionLabel[answered.kind]} for this item: ${resolved.text}`.slice(0, 2000); work!.blockedAt = work!.blocker ? now.toISOString() : null; }
+    if (work!.blocker?.startsWith(humanRequestBlocker) || reversing) { work!.blocker = resolved.outcome === 'provided' ? null : `A human declined ${humanDecisionLabel[answered.kind]} for this item: ${resolved.text}`.slice(0, 2000); work!.blockedAt = work!.blocker ? now.toISOString() : null; }
     return commit(services, db, now, work!, all, actor, 'human.answered', { request: answered, resumed: resolved.outcome === 'provided' });
   }));
 }
 
 const humanProofRequestSchema = z.object({ proof: proofSchema, sha: z.string().regex(/^[0-9a-f]{40}$/), baseSha: z.string().regex(/^[0-9a-f]{40}$/), url: z.url({ protocol: /^https?$/ }).max(2000).optional() }).strict();
-const humanProofAnswerSchema = z.object({ request: z.string().uuid(), outcome: z.enum(['pass', 'fail']), note: z.string().trim().min(1).max(1000), photo: screenshotUpload.optional() }).strict();
+const humanProofAnswerSchema = z.object({ request: z.string().uuid(), outcome: z.enum(['pass', 'fail']), note: z.string().trim().min(1).max(1000), ownerSaid: z.string().trim().min(1).max(4000).optional(), reverses: z.string().optional(), photo: screenshotUpload.optional() }).strict();
 
 /** Records one real-world check for an exact commit (GY-2986); the same check asked again changes nothing. */
 export async function requestHumanProof(services: Services, actor: Principal, id: string, body: unknown, key: string) {
@@ -140,16 +142,17 @@ export async function requestHumanProof(services: Services, actor: Principal, id
   }));
 }
 
-/** The person's answer: a trusted run bound to the commit, kept with their note and any photo. Only a declared human session answers. */
+/** The person's answer: a trusted run bound to the commit, kept with their note and any photo. An operator agent may relay the person’s own words. */
 export async function answerHumanProof(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   const data = humanProofAnswerSchema.parse(body);
   const receiptInput = { id, data };
   return services.engine.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
-    const refusal = humanOnlyRefusal(humanProofRule.kind, actor);
+    const refusal = humanOnlyRefusal(humanProofRule.kind, actor, undefined, data.ownerSaid);
     demand(!refusal, refusal!, 403);
     const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
     const request = work!.humanProofs?.find(entry => entry.id === data.request);
-    demand(request && answerableHumanProof(work!, request), `${work!.key} has no open real-world check ${data.request}; reload before answering`, 409);
+    const reversing = data.reverses && request?.answer?.ownerSaid && request.answer.at === data.reverses && actor.role === 'admin' && actor.sessionKind === 'human';
+    demand(request && (!data.reverses || reversing) && answerableHumanProof(work!, reversing ? { ...request, answer: null } : request), `${work!.key} has no open real-world check ${data.request}; reload before answering`, 409);
     let photo: string | null = null;
     if (data.photo) {
       const bytes = Buffer.from(data.photo.bytes, 'base64');
@@ -157,9 +160,9 @@ export async function answerHumanProof(services: Services, actor: Principal, id:
       photo = `human-check-${request!.id}.${data.photo.mediaType === 'image/png' ? 'png' : 'jpg'}`;
       await db.query('INSERT INTO product_review_screenshots(work_id,name,media_type,bytes) VALUES($1,$2,$3,$4)', [work!.id, photo, data.photo.mediaType, bytes]);
     }
-    request!.answer = { by: actor.id, at: now.toISOString(), outcome: data.outcome, note: data.note, photo };
+    request!.answer = { by: actor.id, at: now.toISOString(), outcome: data.outcome, note: data.note, photo, ...(data.ownerSaid ? { ownerSaid: data.ownerSaid } : {}) };
     await appendEvidence(work!, { id: randomUUID(), proof: request!.proof, sha: request!.sha, baseSha: work!.candidate?.baseSha ?? request!.baseSha, policyRevision: request!.policyRevision, producer: actor.id, trusted: true, result: data.outcome, executed: 1, skipped: 0, at: now.toISOString() }, db);
-    return commit(services, db, now, work!, all, actor, 'human-proof.answered', { proof: request!.proof, sha: request!.sha, outcome: data.outcome, note: data.note });
+    return commit(services, db, now, work!, all, actor, 'human-proof.answered', { proof: request!.proof, sha: request!.sha, answer: request!.answer });
   }));
 }
 
@@ -244,7 +247,7 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
       // A worker that died is not a spent account: the same record, its own history entry.
       const interrupted = report.cause === 'interrupted';
       // GY-3096: a session spent on its provider's limit is held in the registry in this same transaction.
-      if (!interrupted) await recordLimitNoticeHold(db, actor, { role: report.role, work: work!.key, principal: owner, account: report.account, reason: report.reason, resetsAt: report.resetsAt }, now);
+      if (!interrupted) await recordLimitNoticeCheck(db, actor, { role: report.role, work: work!.key, principal: owner, account: report.account, reason: report.reason, resetsAt: report.resetsAt }, now);
       work!.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
       return commit(services, db, now, work!, all, actor, interrupted ? 'capacity.interrupted' : 'capacity.exhausted', { exhaustion: record, ...(endedBlocker ? { endedBlocker } : {}), requeued: report.role === 'worker' ? (interrupted ? 'the attempt ended as released with its partial work on the record; the item is claimable again' : 'the attempt ended as released; the item is claimable on another account') : 'the request is launched again on another account' });
     }

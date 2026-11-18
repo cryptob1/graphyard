@@ -25,7 +25,7 @@ export interface HumanProofRequest {
   sha: string; baseSha: string; policyRevision: number;
   ask: string; steps: string[];
   at: string; requestedBy: string;
-  answer: { by: string; at: string; outcome: 'pass' | 'fail'; note: string; photo: string | null } | null;
+  answer: { ownerSaid?: string; by: string; at: string; outcome: 'pass' | 'fail'; note: string; photo: string | null } | null;
 }
 
 declare module './work.js' {

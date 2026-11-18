@@ -6,6 +6,7 @@
 // (0600) the server's variables. A systemd user unit restarts the runtime (src/install/local-runtime.ts)
 // as one restarts the master loop; a host without a systemd user manager gets the foreground command
 // to keep alive under its own supervisor, as `master init` reports for the loop's unit.
+import { controlPlaneWeight } from '../session-share.js';
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, openSync, readFileSync } from 'node:fs';
@@ -135,6 +136,8 @@ KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=60
 UMask=0077
+# GY-3438: the server and its Postgres outweigh every agent session, so the dashboard answers under full load.
+CPUWeight=${controlPlaneWeight}
 
 [Install]
 WantedBy=default.target

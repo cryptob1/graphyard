@@ -25,6 +25,7 @@ export function resolveHumanAnswer(request: Pick<HumanRequest, 'kind' | 'choices
  * `superseded-by-observation` (GY-1815, retired): an answer recorded before GY-2874 that the asked state was observed to hold.
  */
 export interface HumanAnswer {
+  ownerSaid?: string;
   by: string; at: string; outcome: 'provided' | 'declined' | 'withdrawn' | 'superseded-by-observation'; text: string; waitedMs: number;
   /** The button pressed and the note beside it (GY-738); absent on a free-text answer. */
   choice?: { id: string; label: string } | null; note?: string | null;

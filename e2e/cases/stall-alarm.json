@@ -1,0 +1,22 @@
+{
+  "id": "stall-alarm",
+  "title": "The loop raises a stall alarm when ready work and free slots see no launch, first in master status and on the Master page",
+  "description": "A fixture install with a ready item and a free worker slot whose launches are held for 10 minutes: the loop's own cycle raises one stall alarm naming its cause (the last dispatch error, heat, every worker account out of quota, a loop older than the served commit, or the ready item with no actor), it stands first in master status and wakes the master, and an item with no change and no lease for an hour raises it too. The served Master page shows the alarm with its cause, and both clear once a launch starts.",
+  "tags": ["master", "dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the loop's cycle raises the alarm with its cause, first in master status, wakes the master and clears on a launch",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/stall-alarm-causes.test.ts",
+      "timeoutSeconds": 300
+    },
+    {
+      "kind": "command",
+      "name": "the served Master page shows the alarm and clears it once a launch starts",
+      "run": "npm run test:browser -- browser-tests/master-stall-alarm.spec.ts",
+      "timeoutSeconds": 420
+    }
+  ]
+}
