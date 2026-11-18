@@ -484,7 +484,7 @@ export const workerLeadSection = (work: Partial<Pick<Work, 'why' | 'simplest'>>)
   ? `Read why and simplest first and stay inside them. Why: ${work.why ?? 'not stated'} Simplest: ${work.simplest ?? 'not stated'} ` : '';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository' | 'run'>> & { fastGates?: boolean },
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'why' | 'simplest' | 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'policyRevision' | 'messages'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'type' | 'why' | 'simplest' | 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'policyRevision' | 'messages'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -510,6 +510,8 @@ export function workerPrompt(
     + destructivePromptGuidance
     + externalDirectoryPromptGuidance
     + standards.simplicity
+    // GY-3478: features and bugs can change what the owner sees; chores keep the brief short.
+    + (work.type === 'feature' || work.type === 'bug' ? standards.ux : '')
     // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
     + reworkBriefSection(work, rework)
     // GY-3104: two equal failures in a row ask for a diagnosis, not a blind retry.
