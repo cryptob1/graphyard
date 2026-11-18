@@ -1,4 +1,5 @@
-import { machineDirectory, recordMachineNode } from './team-access.js';
+import { machineDirectory, readTailnet, recordMachineNode } from './team-access.js';
+export { readTailnet };
 import { readSecretFromStdin } from './cli/context.js';
 import { archiveDaemonCursor, daemonStatePath } from './daemon/state.js';
 import { loadStoredMasterConfig } from './master/config.js';
@@ -369,16 +370,6 @@ export function tailnetShare(server: string, tailnet: Tailnet | null): { command
 }
 /** GY-3294: the one instruction a host without a running Tailscale gets; up carries on locally. */
 export const tailscaleMissingNote = 'Tailscale is not running here, so this install stays on this machine. To share it: install Tailscale (https://tailscale.com/download), sign in, and rerun graphyard up.';
-/** This host's Tailscale node from `tailscale status --json`; no Tailscale, or one not running, is no tailnet (the install carries on locally). */
-export async function readTailnet(): Promise<Tailnet | null> {
-  try {
-    const self = JSON.parse(execFileSync('tailscale', ['status', '--json'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }))?.Self;
-    if (!self || self.Online === false) return null;
-    const ip = Array.isArray(self?.TailscaleIPs) ? self.TailscaleIPs.find((address: unknown) => typeof address === 'string' && /^\d+\.\d+\.\d+\.\d+$/.test(address)) ?? null : null;
-    const deviceId = typeof self?.ID === 'string' && self.ID ? self.ID : null;
-    return typeof self?.DNSName === 'string' || ip ? { dnsName: typeof self?.DNSName === 'string' && self.DNSName ? self.DNSName : null, ip, deviceId } : null;
-  } catch { return null; }
-}
 /** Runs the serve command tailnetShare names. Bounded: a serve waiting on a tailnet permission is reported, never waited on (GY-1477). */
 export async function applyTailnetCommand(command: string[]): Promise<{ ok: boolean; detail?: string }> {
   try { execFileSync(command[0], command.slice(1), { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'pipe'] }); return { ok: true }; }
