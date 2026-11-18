@@ -422,6 +422,8 @@ export interface ServingReport {
   commit: string | null;
   /** The base branch's tip as the shared checkout holds it; null when it cannot be read. */
   main: string | null;
+  /** When the served commit was deployed (the serve's start, else the deploy record's time); null when nothing serves. */
+  deployedAt: string | null;
   /** Whether the served commit is main; null when either is unreadable. */
   atMain: boolean | null;
   /** The last failure: the declared serve's build failure, else a configured deploy's failed tip. */
@@ -456,6 +458,7 @@ export async function servingReport(root: string | null | undefined, repository:
     onboarding,
     unconfigured: !commit,
     commit, main,
+    deployedAt: serve?.commit ? serve.started ?? serve.at : configured ? record!.at : null,
     atMain: commit && main ? commit === main : null,
     failedDeploy: failed ? { tip: failed.tip, reason: failed.reason, restoring: !serve && configured ? record!.restore ?? null : null } : null,
     pending,

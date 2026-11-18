@@ -26,6 +26,11 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 - Every batch check runs the feature map against the served app, and every deploy check runs it against the deployed site.
 - A missing serve, a missing feature map, or the generated placeholder serve that runs none of the app shows as a Master fault naming the project in `graphyard master status`, and Setup shows Project not onboarded. The checks never report a pass for it. The master files the work to add the real serve and map; there is nothing for you to do.
 
+## Your app's address
+
+- Onboarding step: add `"app": { "url": "https://HOST.TAILNET.ts.net:PORT" }` to `graphyard.json` on main, with the tailnet or public address where the app runs. The dashboard's top bar then shows Open app, and Work's Where it runs card shows the link, the machine, the serving commit, its deploy time and the dashboard's own link.
+- The master refuses `127.0.0.1`, `localhost` and `::1`, which open only on that machine, and says why; `graphyard master status` names the setting while none is set.
+
 ## Accounts and access
 
 - Workers and reviewers run headless, logged per item (`graphyard guide runtimes`).

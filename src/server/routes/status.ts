@@ -21,6 +21,8 @@ import { graphyardRepository } from '../../scenarios.js';
 import { gitRunnerFor } from '../../merge-writer/local-observation.js';
 import { boardFromStatus } from '../../model/board.js';
 import { resolve } from 'node:path';
+import { hostname } from 'node:os';
+import { appRelease } from '../../app-url.js';
 import { thisWeekReport } from '../../project-memory.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
 import { snapshotPage } from '../../store/paged-snapshot.js';
@@ -75,7 +77,9 @@ export const statusRoutes = defineRoutes('status', [
       // bar and the Work page count shipped as live, both from this one answer.
       const watched = production?.status();
       const live = actor.role === 'operator-agent' ? null : await liveRelease(servingRoot, serving.commit ?? (watched?.observedAt && !watched.error ? watched.serving : null), serving.main, visibleWork, read);
-      return { workerVerifications: pendingWorkerVerifications(services, actor, visibleWork), actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
+      // GY-3434: where the app runs — main's app.url, the machine the loop names as its own, the served commit and deploy time.
+      const app = await appRelease(read, serving, loopRegistry(engine).live(observedAt)?.hosts?.find(host => host.local)?.host ?? hostname());
+      return { workerVerifications: pendingWorkerVerifications(services, actor, visibleWork), actor, humanOnly, app, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
         baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving, live,
         // GY-3399: the week's batch-gate reverts beside the week's gates removed, each naming its items, for the header.
         thisWeek: servingRoot && actor.role !== 'operator-agent' ? await thisWeekReport(servingRoot, observedAt.getTime()) : null,
