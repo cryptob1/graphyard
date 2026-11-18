@@ -7,8 +7,7 @@ import { releaseNotesPath, releaseNote, appendReleaseNote } from '../release-not
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.js';
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
-import { gateTrialKey, trialStartWaiting } from '../merge-writer/trial-load.js';
-import { cpuWaiting } from './cpu-pressure.js';
+import { gateTrialKey, trialStartOwner, trialStartWaiting } from '../merge-writer/trial-load.js';
 import { heavyTrial, trialShareAllowance, type MergeWriterReads } from './cycle-merge-writer.js';
 import { criterionProofs, e2eProofsOf } from '../merge-writer/executor.js';
 import type { Cycle } from './cycle.js';
@@ -327,29 +326,41 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
     const input = createHash('sha256').update(JSON.stringify([proofs, files])).digest('hex');
     // The diagnostics trial another commit and take an ordinary slot; the gate's own check takes the reserved one (GY-3450).
     if (flight?.tip !== sha) return reads.trial(sha, files, item, base, step, timing, heads, share, signal, timeout);
-    const heavy = <T>(job: () => Promise<T>) => heavyTrial(gateKey, line => { heavyWait = true; step?.(line); }, signal, () => {
+    // GY-3474: what the check is doing now — its wait, then its run's own steps — rides the record for status.
+    const progress = (line: string) => {
+      step?.(line);
+      if (gated.inFlight?.tip !== sha) return;
+      gated.inFlight = { ...gated.inFlight, progress: line.slice(0, 200) };
+      void mergeGateRecord(file, latest => ({ ...gated, ...diagnosticFields(latest, gated) })).catch(() => undefined);
+    };
+    // The wait is this call's own: it ends when the check starts and, however the call ends, with it.
+    const heavy = <T>(job: () => Promise<T>) => heavyTrial(gateKey, line => { heavyWait = true; progress(line); }, signal, () => {
       heavyWait = false;
       const watch = gateStarts.get(cycle.state);
       if (watch) watch.started = true;
+      progress('starting its check');
       return job();
-    }, ended.signal, true);
-    if (!reads.launchTrialRun || !reads.adoptTrialRun || item.environments) return heavy(() => reads.trial(sha, files, item, base, step, timing, heads, share, signal, timeout));
+    }, ended.signal, true).finally(() => { heavyWait = false; });
+    if (!reads.launchTrialRun || !reads.adoptTrialRun || item.environments) return heavy(() => reads.trial(sha, files, item, base, progress, timing, heads, share, signal, timeout));
     const launch = reads.launchTrialRun, adopt = reads.adoptTrialRun;
     const run = flight.run?.commit === sha && flight.run.input === input ? flight.run : null;
     return heavy(async () => {
       const adopted = run ? await adopt({ key: gateKey, head: sha, mergeSha: sha, directory: run.directory }) : null;
-      if (adopted) return adopted.trial(step, timing, signal);
+      if (adopted) return adopted.trial(progress, timing, signal);
       await reads.ensureTrialImage?.();
       const launched = launch({ key: gateKey, head: sha, mergeSha: sha, baseTip: null, changedFiles: [...files], proofs, e2eProofs: e2eProofsOf(item),
         reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeout, reads.cores) });
       gated.inFlight = { ...gated.inFlight!, run: { commit: sha, input, directory: launched.directory } };
       await mergeGateRecord(file, latest => ({ ...gated, ...diagnosticFields(latest, gated) })).catch(() => undefined);
-      return launched.trial(step, timing, signal);
+      return launched.trial(progress, timing, signal);
     });
   };
   const ports = batchGatePorts({ ...reading, git, trial }, cycle.snapshot.work, () => readGateRecord(file)?.verified ?? null);
-  // GY-3444: the gate's bound leaves out the time its checks wait for a trial slot or while the loop holds launches for CPU.
-  ports.waiting = () => heavyWait || cpuWaiting(cycle.state) !== null || trialStartWaiting('gate', gate.slots);
+  // GY-3444: the gate's bound leaves out the time its checks wait for a slot. GY-3474: only its own
+  // check's wait — the host heavy-job slot, or its own container start held by the cap, heat or the
+  // disk floor. The loop's CPU hold on other launches and another install's gate are not its waits,
+  // so a stalled check still meets its bound on a hot or busy host.
+  ports.waiting = () => heavyWait || (!!gated.inFlight && trialStartWaiting('gate', gate.slots, trialStartOwner(gate.root, gated.inFlight.tip)));
   const note = (key: string, state: 'done' | 'failed', detail: string) => {
     const entry = storeAction(cycle.state, key,
       { kind: 'merge', work: null, principal: null, state, detail: detail.slice(0, 1900), attempts: 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() });
