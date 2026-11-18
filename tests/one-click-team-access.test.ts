@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { Engine } from '../src/engine.js';
@@ -12,6 +12,7 @@ import { credentialMaskFor, masterCredentialMask } from '../src/master/confineme
 import { aclGuidance, teamAccessSummary } from '../src/team-access.js';
 import { syncTeamAccess } from '../src/master/team-access.js';
 import { settleHostLoops } from './helpers/team-access-hosts.js';
+import { fakeTailscale, onPath } from './helpers/fake-tailscale.js';
 import { sealForHost } from '../web/seal.js';
 import { withDatabase } from './helpers/postgres.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -19,25 +20,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3294: one machine, many installs, one port each; two locks — the machine's tailnet and each install's own sign-in.
 const operator = 'test-human-operator-token';
 const minute = 60_000, hour = 60 * minute, day = 24 * hour;
-
-/** A fake `tailscale` on PATH: the only thing stubbed. It answers status for one node and keeps a serve config keyed by port, as `tailscale serve --bg --http=PORT` does. */
-async function fakeTailscale(dir: string) {
-  await mkdir(join(dir, 'bin'), { recursive: true });
-  const script = `#!${process.execPath}
-const fs = require('node:fs'), path = require('node:path');
-const file = path.join(__dirname, '..', 'serve.json'), log = path.join(__dirname, '..', 'calls.log');
-const args = process.argv.slice(2);
-fs.appendFileSync(log, JSON.stringify(args) + '\\n');
-const config = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : {};
-if (args[0] === 'status') { process.stdout.write(JSON.stringify({ Self: { ID: 'nFAKE123CNTRL', DNSName: 'yard.tail-test.ts.net.', TailscaleIPs: ['100.64.0.7', 'fd7a::7'], Online: true } })); process.exit(0); }
-if (args[0] === 'serve' && args[1] === 'status') { process.stdout.write(JSON.stringify(config)); process.exit(0); }
-if (args[0] === 'serve' && args[1] === 'reset') { fs.writeFileSync(file, '{}'); process.exit(0); }
-if (args[0] === 'serve') { const port = /--http=(\\d+)/.exec(args.join(' '))[1]; config[port] = args[args.length - 1]; fs.writeFileSync(file, JSON.stringify(config)); process.exit(0); }
-process.exit(1);
-`;
-  await writeFile(join(dir, 'bin', 'tailscale'), script);
-  await chmod(join(dir, 'bin', 'tailscale'), 0o755);
-}
 
 async function up(root: string, port: number, machineDir: string, path: string) {
   await mkdir(root, { recursive: true });
@@ -123,6 +105,9 @@ test('unit:tests/one-click-team-access.test.ts — two installs share the machin
   const logged: string[] = [], original = { log: console.log, error: console.error, warn: console.warn };
   for (const name of ['log', 'error', 'warn'] as const) console[name] = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
   const a = await install('team_access_a', host, () => now), b = await install('team_access_b', host, () => now);
+  // up served both installs on their own ports; each loop reads that from the tailscale command.
+  const restorePath = onPath(await fakeTailscale(host));
+  await writeFile(join(host, 'serve.json'), JSON.stringify({ [a.port]: a.base, [b.port]: b.base }));
   /** One pass of each install's master loop on the shared host (master/team-access.ts). */
   const sync = async (...installs: typeof a[]) => { for (const entry of installs) await syncTeamAccess({ url: entry.base, credentialFile: entry.credentialFile }, { machineDir, tailscaleApi }); };
   try {
@@ -258,7 +243,7 @@ test('unit:tests/one-click-team-access.test.ts — two installs share the machin
     await sync(a);
     await assert.rejects(stat(join(machineDir, 'tailscale-api.token')));
   } finally {
-    Object.assign(console, original);
+    Object.assign(console, original); restorePath();
     await a.close(); await b.close();
     await new Promise<void>(resolve => provider.close(() => resolve()));
   }
@@ -271,6 +256,7 @@ test('unit:test-browser-tests-one-click-team-access-spec-ts-pinned — settling 
   await mkdir(machineDir);
   await writeFile(join(machineDir, 'tailnet.json'), JSON.stringify({ dnsName: 'yard.tail-test.ts.net.', ip: '100.64.0.7', deviceId: 'nFAKE123CNTRL' }));
   const a = await install('team_access_settle_a', host, Date.now), b = await install('team_access_settle_b', host, Date.now);
+  const restorePath = onPath(await fakeTailscale(host));
   const settle = () => settleHostLoops([a, b].map(entry => ({ url: entry.base, credentialFile: entry.credentialFile })), { machineDir });
   const shown = async (entry: typeof a) => (await entry.call('/api/team-access')).body.shareLink?.url ?? null;
   try {
@@ -284,7 +270,7 @@ test('unit:test-browser-tests-one-click-team-access-spec-ts-pinned — settling 
       await settle();
       assert.deepEqual([await shown(a), await shown(b)], [link, link], 'both installs show the link after one settle');
     }
-  } finally { await a.close(); await b.close(); }
+  } finally { restorePath(); await a.close(); await b.close(); }
 });
 
 test('unit:tests/one-click-team-access.test.ts — the machine directory holding the Tailscale token is masked from confined sessions and the Chief', async () => {

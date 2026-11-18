@@ -153,7 +153,7 @@ test('e2e:night-yard-animation — with reduced motion every animation stills an
   // The boot never ran on this load.
   await expect(page.locator('[data-boot]')).toHaveCount(0);
   // Rain (both sheets), streak, glitch, beacons, the flicker-in and the typing line: all still.
-  for (const [selector, pseudo] of [['body', '::after'], ['html', '::after'], ['.work-row.trial', '::after'], ['.work-row.glitch', ''], ['.city-strip .beacon', ''], ['h1', ''], ['.build-line .typed', '']] as const)
+  for (const [selector, pseudo] of [['body', '::after'], ['html', '::after'], ['.work-row.trial', '::after'], ['.work-row.glitch', ''], ['.trust-strip .beacon', ''], ['h1', ''], ['.build-line .typed', '']] as const)
     expect(await animationOf(page, selector, pseudo), `${selector}${pseudo}`).toBe('none');
   // A stage change still happens — the row lands at once, with no glide.
   state.work = state.work.map(item => item.key === 'GY-20' ? { ...item, humanRequest: null, blocker: null } : item);
