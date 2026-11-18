@@ -3,7 +3,7 @@ import { trialCpuMonitor } from './trial-cpu.js';
 // containers, the hottest CPU sensor and the disk floor. Merge trials, the batch gate and workers'
 // verification runs share the launcher (trial-container.ts); trials also divide their CPU lanes.
 import { readdirSync, readFileSync, unlinkSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { availableParallelism, homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -24,6 +24,19 @@ export const trialContainerCap = (cores = availableParallelism(), usable = cores
 export const cpuSensorNames = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal'];
 /** GY-3376, GY-3416: a start waits while a CPU sensor reads the lower of this and 3C under its own critical (else max) temperature — a laptop at 95-98C against a 102C crit-3 was never held; this alone is the limit for a sensor that reports neither. */
 export const trialHotCelsius = 85;
+/** The CPU package sensor under `hwmon` in whole degrees (the hottest core where no package sensor exists); null where none is readable. */
+export async function cpuCelsius(hwmon = '/sys/class/hwmon'): Promise<number | null> {
+  const read = (path: string) => readFile(path, 'utf8').then(text => text.trim(), () => '');
+  const readings = (await Promise.all((await readdir(hwmon).catch(() => [] as string[])).map(async sensor => {
+    if (!cpuSensorNames.includes(await read(join(hwmon, sensor, 'name')))) return [];
+    const inputs = (await readdir(join(hwmon, sensor)).catch(() => [] as string[])).filter(name => name.startsWith('temp') && name.endsWith('_input'));
+    return (await Promise.all(inputs.map(async name => ({ text: await read(join(hwmon, sensor, name)), label: await read(join(hwmon, sensor, name.replace('_input', '_label'))) }))))
+      .filter(({ text }) => /^\d+$/.test(text)).map(({ text, label }) => ({ celsius: Math.floor(Number(text) / 1000), package: /^(Package id|Tctl|Tdie)/.test(label) }));
+  }))).flat();
+  const packages = readings.filter(reading => reading.package), chosen = packages.length ? packages : readings;
+  return chosen.length ? Math.max(...chosen.map(reading => reading.celsius)) : null;
+}
+
 /** The batch gate's key in the trial, a proofless pseudo-item. */
 export const gateTrialKey = 'batch-gate';
 /** GY-3444: the gate's containers' CPU weight (Docker's default is 1024), so under load its checks run ahead of merge trials and worker verification. */

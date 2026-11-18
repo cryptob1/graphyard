@@ -12,7 +12,8 @@ import { implementationWaiting } from '../daemon/cpu-pressure.js';
 import { overloadAlarm, overloaded, sessionFigures } from '../session-share.js';
 import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
-import { heavyDrainLine, heavyJobLimit, heavyJobsDirectory, readHeavyDrain, slotHolders } from '../master/verification-slots.js';
+import { heavyDrainLine, heavyJobLimit, heavyJobsDirectory, readHeavyDrain, readStrictCap, slotHolders } from '../master/verification-slots.js';
+import { standingLimit } from '../master/profiles.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary, trialImageKey } from '../daemon/cycle-merge-writer.js';
 import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControlPlaneRecord } from '../deploy-watch.js';
@@ -173,7 +174,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   });
   // GY-3299: worker-pool growth the loop could not do, with the cause and the capacity it leaves, until growth succeeds.
   // GY-3304: a drain stands until master resume; it names why and who asked.
-  const drain = readHeavyDrain(heavyJobsDirectory());
+  const drain = readHeavyDrain(heavyJobsDirectory()), strictCap = readStrictCap(heavyJobsDirectory(), now);
+  const standing = (limit: { value: number; until: string } | undefined) => standingLimit(limit, now) === undefined ? null : limit!;
   const drained = drain ? [{ subject: 'heavy work', text: heavyDrainLine(drain), next: 'graphyard master resume once the quiet window is over' }] : [];
   const growth = state?.actions[workerGrowthKey]?.state === 'failed' ? [{ subject: 'worker pool', text: state.actions[workerGrowthKey]!.detail, next: 'Fix the cause named; the next loop cycle adds the missing worker profiles and clears this' }] : [];
   // GY-3328: the trial host lacks the trial image and could not provision it, until a trial runs again.
@@ -226,6 +228,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     heavyDrain: drain,
     // GY-3447: who holds the host's heavy-job slots (trials, gates, whole suites, deploy builds) and the limit they share.
     heavyJobs: { limit: heavyJobLimit(heavyJobsDirectory()), holders: slotHolders(heavyJobsDirectory()) },
+    // GY-3446: the temporary limits standing now, each with the time it reverts to the default; null once expired or never set.
+    temporaryLimits: { trialCap: standing(master.run.trialCap), launchHotCelsius: standing(master.run.launchHotCelsius), hostHeavyJobs: strictCap ? { value: strictCap.limit, until: strictCap.until, by: strictCap.requestedBy } : null },
     // GY-3348: the host's CPU as the loop last read it — pressure (avg60) and steal percent, the
     // same figures the Workers page shows, with the hottest CPU sensor (GY-3373) — and the one
     // waiting line while launches are held; GY-3401: each new session's test budget and the trial cap.
