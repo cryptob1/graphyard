@@ -23,7 +23,7 @@ const hostProbe: MaskProbe = (command, args) => execFileSync(command, args, { en
 const omarchyInclude = '/etc/ssh/ssh_config.d/20-omarchy-keepalive.conf';
 
 /** A confined session of a fixture project whose origin serves graphyard-main only to the deploy key, over a door that parses ssh's real configuration first. */
-async function confinedFixture(run: (fixture: { worktree: string; spawn: (script: string) => ReturnType<typeof spawnSync>; doorLog: string }) => Promise<void> | void) {
+async function confinedFixture(run: (fixture: { spawn: (script: string) => ReturnType<typeof spawnSync> }) => Promise<void> | void) {
   // The fixture lives in this checkout: the sandbox replaces /tmp with its own scratch.
   const checkout = dirname(dirname(fileURLToPath(import.meta.url)));
   mkdirSync(join(checkout, '.graphyard'), { recursive: true });
@@ -34,7 +34,7 @@ async function confinedFixture(run: (fixture: { worktree: string; spawn: (script
     const realSsh = execFileSync('sh', ['-c', 'command -v ssh'], { encoding: 'utf8' }).trim();
     const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.name=T', '-c', 'user.email=t@t', ...args], { stdio: 'ignore' });
     // The origin: a bare repository whose non-default base branch carries the project's check.
-    const remote = join(home, 'remote'), origin = join(remote, 'huck.git'), seed = join(remote, 'seed'), key = join(remote, 'deploy-key'), bin = join(remote, 'bin'), doorLog = join(remote, 'door.log');
+    const remote = join(home, 'remote'), origin = join(remote, 'huck.git'), seed = join(remote, 'seed'), key = join(remote, 'deploy-key'), bin = join(remote, 'bin');
     mkdirSync(bin, { recursive: true });
     execFileSync('git', ['init', '-q', '--bare', '-b', 'graphyard-main', origin]);
     mkdirSync(seed);
@@ -46,15 +46,16 @@ async function confinedFixture(run: (fixture: { worktree: string; spawn: (script
     execFileSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'gy-3470-fixture', '-f', key]);
     // The door: real ssh resolves its whole configuration with the options git hands it, refusing
     // as ssh would (its stderr passes through); only then is the deploy key and host-key checking
-    // judged and the bare repository served.
+    // judged and the bare repository served. The fixture is read-only inside the confinement, so
+    // the door records on stderr, which git passes through.
     writeFileSync(join(bin, 'ssh'), [
       '#!/bin/sh',
       `resolved=$('${realSsh}' -G "$@") || exit 255`,
-      `printf '%s\\n' "$resolved" | grep -qx 'identityfile ${key}' || { echo 'git@github.com: Permission denied (publickey).' >&2; echo refused-identity >> '${doorLog}'; exit 255; }`,
-      `printf '%s\\n' "$resolved" | grep -qx 'stricthostkeychecking false' && { echo 'host-key checking disabled' >&2; echo refused-hostkey >> '${doorLog}'; exit 255; }`,
-      `printf '%s\\n' "$resolved" | grep -x 'stricthostkeychecking .*' >> '${doorLog}'`,
+      `printf '%s\\n' "$resolved" | grep -qx 'identityfile ${key}' || { echo 'git@github.com: Permission denied (publickey).' >&2; echo 'door: refused-identity' >&2; exit 255; }`,
+      `printf '%s\\n' "$resolved" | grep -qx 'stricthostkeychecking false' && { echo 'door: refused-hostkey' >&2; exit 255; }`,
+      `printf '%s\\n' "$resolved" | grep -x 'stricthostkeychecking .*' | sed 's/^/door: /' >&2`,
       'for last do :; done',
-      `case "$last" in git-upload-pack*) echo served >> '${doorLog}'; exec git-upload-pack '${origin}';; esac`,
+      `case "$last" in git-upload-pack*) echo 'door: served' >&2; exec git-upload-pack '${origin}';; esac`,
       'exit 255',
     ].join('\n') + '\n');
     chmodSync(join(bin, 'ssh'), 0o755);
@@ -83,7 +84,7 @@ async function confinedFixture(run: (fixture: { worktree: string; spawn: (script
     const env = pushEnvironment(key, { ...process.env, HOME: home, PATH: `${bin}:${process.env.PATH}` });
     const spawn = (script: string) => spawnSync(wrapper[0], [...wrapper.slice(1), '/bin/sh', '-c', script, 'sh', worktree],
       { encoding: 'utf8', timeout: 120_000, killSignal: 'SIGKILL', env });
-    await run({ worktree, spawn, doorLog });
+    await run({ spawn });
   } finally {
     if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
     rmSync(home, { recursive: true, force: true });
@@ -96,27 +97,27 @@ const fetchScript = [
 ].join('\n');
 
 test('integration:confined-git-ssh-config — a confined fetch over SSH succeeds with a foreign-owned system ssh include present, presenting the assigned deploy key with host-key checking kept', async () => {
-  await confinedFixture(({ spawn, doorLog }) => {
+  await confinedFixture(({ spawn }) => {
     const ran = spawn(fetchScript);
     const output = `${ran.stdout}\n${ran.stderr}`;
     if (process.getuid?.() !== 0) assert.ok(String(ran.stdout).includes('INCLUDE-OWNER-65534\n'), `the include is foreign-owned inside the namespace: ${output.slice(-800)}`);
     assert.ok(!output.includes('Bad owner or permissions'), `ssh refuses no configuration file on ownership: ${output.slice(-800)}`);
     assert.ok(String(ran.stdout).includes('FETCH-0\n'), `the confined fetch succeeded: ${output.slice(-800)}`);
-    const door = execFileSync('cat', [doorLog], { encoding: 'utf8' });
-    assert.match(door, /^stricthostkeychecking accept-new$/m, 'ssh ran with host-key checking enforced for known hosts, never disabled');
-    assert.match(door, /^served$/m, 'the origin served the deploy key');
-    assert.doesNotMatch(door, /refused-/, 'the door refused nothing');
+    const door = String(ran.stderr);
+    assert.match(door, /^door: stricthostkeychecking accept-new$/m, 'ssh ran with host-key checking enforced for known hosts, never disabled');
+    assert.match(door, /^door: served$/m, 'the origin served the deploy key');
+    assert.doesNotMatch(door, /door: refused-/, 'the door refused nothing');
   });
 });
 
 test('e2e:confined-git-ssh-config — a confined coordinator fetches its configured non-default base branch graphyard-main and proceeds to verification; an ssh config ownership refusal is reported as such, not as SAML', async () => {
-  await confinedFixture(({ spawn, doorLog }) => {
+  await confinedFixture(({ spawn }) => {
     const ran = spawn([fetchScript,
       'git -C "$1" checkout -q --detach refs/remotes/origin/graphyard-main && sh "$1/check.sh"'].join('\n'));
     const output = `${ran.stdout}\n${ran.stderr}`;
     assert.ok(String(ran.stdout).includes('FETCH-0\n'), `the confined coordinator fetched graphyard-main: ${output.slice(-800)}`);
     assert.ok(String(ran.stdout).includes('VERIFIED-GRAPHYARD-MAIN\n'), `verification ran on the fetched base: ${output.slice(-800)}`);
-    assert.match(execFileSync('cat', [doorLog], { encoding: 'utf8' }), /^stricthostkeychecking accept-new$/m, 'host-key checking stayed enforced');
+    assert.match(String(ran.stderr), /^door: stricthostkeychecking accept-new$/m, 'host-key checking stayed enforced');
   });
   // The loop's fetch-refusal line for ssh's own ownership refusal names that file and the host fault, never SAML or the deploy key's authorization.
   const refused = Object.assign(new Error('Command failed: git fetch --no-tags origin graphyard-main'), {
