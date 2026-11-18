@@ -4,6 +4,7 @@ import { chmod, link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from '../model.js';
+import { answerableHumanProof } from '../model/human-proof.js';
 import { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk, type HumanRequestRow } from '../model/human-request.js';
 import { configHome, installDirectory, readInstallRecord, readToken } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
@@ -158,7 +159,7 @@ export const answerHumanCommand: CliCommand = {
     const ownerSaid = flag < 0 ? undefined : args.splice(flag, 2)[1];
     if (flag >= 0 && (!ownerSaid?.trim() || ownerSaid.startsWith('--'))) throw new Error('--owner-said needs the owner\'s own words');
     const open = (work as Work).humanRequest;
-    const proof = (work as Work).humanProofs?.find(entry => !entry.answer);
+    const proof = (work as Work).humanProofs?.find(entry => answerableHumanProof(work as Work, entry));
     const request = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args[0] ?? '') ? args.shift()! : open?.id ?? proof?.id;
     if (!request) throw new Error(`${work.key} has no open human-only request`);
     const declined = args.includes('--decline');

@@ -85,7 +85,7 @@ export default function GuidePage() {
       <h2 id="docs-overview-title">Who decides what</h2>
       <ul>
         <li><strong>You, the owner</strong>: goals and priorities, money and accounts, and sign-ins for people. Tell agents your decision; reverse their answer under Needs you.</li>
-        <li><strong>The Master</strong>: the coordinator. It keeps the brief, plans work items and unsticks them.</li>
+        <li><strong>The Master</strong>: keeps the brief, plans work and unsticks it.</li>
         <li><strong>The loop</strong>: plain code, no AI. It hands out work, runs merge trials, merges and deploys.</li>
         <li><strong>Workers and reviewers</strong>: AI coding sessions. Nobody reviews their own work.</li>
       </ul>

@@ -8,8 +8,8 @@ import type { Principal, Work } from '../src/model.js';
 import { signInDatabase } from './helpers/sign-in-database.js';
 import { localRequest } from './helpers/local-request.js';
 
-// GY-3415: an owner who approves in the master chat is handed the item's dashboard link, where they answer signed in.
-test('integration:human-answer-link — a master answer on a human-only request is refused naming the item dashboard link from the install URL; the master prompt says to hand it to the owner', async () => {
+// Without the owner’s quoted words, the refusal keeps the dashboard link as a direct-answer fallback.
+test('integration:human-answer-link — a master answer on a human-only request is refused naming the item dashboard link from the install URL; the master prompt explains how to relay the owner', async () => {
   const database = await signInDatabase();
   const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
   const master: Principal = { id: 'master', role: 'operator-agent', sessionKind: 'ai', scope: { repositories: ['owner/project'], workItems: ['*'] } };

@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { humanDecisionLabel, humanOnlyRefusal, humanProofRule, openHumanOnly, recommendedFirst, type HumanOnlyChoice, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
 import { formatDuration } from '../../src/model/duration';
 import { shortShas } from '../../src/model/format';
+import { answerableHumanProof } from '../../src/model/human-proof';
 import { humanAsk } from '../../src/model/human-ask';
 import type { Dashboard } from './dashboard';
 import { EmptyState, PageHeader } from '../components/page-layout';
@@ -46,7 +47,7 @@ export default function HumanRequestsPage({ work, status, observedAt, action, bu
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}</div>}
     {work.flatMap(item => (item.humanProofs ?? []).filter(check => check.answer?.ownerSaid).map(check => <section className="panel" key={check.id}>
       <strong>{item.key} · {check.proof}</strong><p>relayed by {check.answer!.by} from the owner: "{check.answer!.ownerSaid}"</p>
-      {!humanOnlyRefusal('human-proof', actor ?? {}) && <button disabled={busy} onClick={() => action(item.id, 'human-proof', { request: check.id, reverses: check.answer!.at, outcome: check.answer!.outcome === 'pass' ? 'fail' : 'pass', note: 'Owner reversed the relayed answer' })}>Reverse check answer</button>}
+      {!humanOnlyRefusal('human-proof', actor ?? {}) && answerableHumanProof(item, { ...check, answer: null }) && <button disabled={busy} onClick={() => action(item.id, 'human-proof', { request: check.id, reverses: check.answer!.at, outcome: check.answer!.outcome === 'pass' ? 'fail' : 'pass', note: 'Owner reversed the relayed answer' })}>Reverse check answer</button>}
     </section>))}
     {answered.length > 0 && <section className="panel" aria-label="Recently answered"><h2>Recently answered</h2><ul className="shipped-list">{answered.map(({ item, request }) => <li key={`${request.id}:${request.answer!.at}`}>
       <button className="text-button" onClick={() => setSelected(item.id)}>{item.key} <span data-title>{item.title}</span></button>
