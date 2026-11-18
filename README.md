@@ -6,7 +6,7 @@
 
 ## Why Graphyard
 
-- **You decide goals, money, credentials.** Tell any agent your decision; it records your own words. Reverse a relayed answer under Needs you. Blockers are the Master's.
+- **You decide goals, money, credentials.** Any agent records your words, reversible under Needs you. Blockers are the Master's.
 - **Every change is proven.** Workers build, agents review, main test-merges each head.
 - **Production stays safe.** Main deploys itself; failures revert automatically.
 
@@ -37,5 +37,5 @@ The Setup link connects worker and reviewer accounts, file goals under **New wor
 
 ## Learn more
 
-- `graphyard guide setup`, `graphyard guide publishing`, `graphyard guide TOPIC` and `graphyard master guide` print procedures.
+- `graphyard guide setup`, `graphyard guide publishing`, `graphyard guide TOPIC`, `graphyard master guide` print procedures.
 - [Shared server](docs/shared-server.md), [Re-render the walkthrough](docs/walkthrough.md), [Contributing](AGENTS.md), [Apache 2.0](LICENSE)
