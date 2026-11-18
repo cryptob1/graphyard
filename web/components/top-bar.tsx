@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { glossary, type GlossaryTerm } from '../glossary';
 import Term from './term';
 import { viewFor, visibleViews, type View } from '../pages';
@@ -14,18 +15,19 @@ const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(
  * batch gate reverted — read off the same snapshot the page below shows (web/trust.ts), each number
  * linking to the items behind it on the Shipped page. The numbers carry data attributes with
  * exactly what the sentence says, so a reader (and a test) checks the words against the records
- * the item pages read, in the app's own words: verified by running, sent back, reverts.
+ * the item pages read, in the app's own words: verified by running, sent back, reverted — the
+ * last with the glossary's "reverts this week" on hover, which names the seven-day window.
  */
 export function TrustStrip({ work, observedAt, onItems }: { work: Work[]; observedAt: number; onItems: (kind: TrustKind) => void }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const { delivered, verifiedByRunning, sentBack, reverts } = trustCounts(work, now);
-  const number = (kind: TrustKind, items: readonly Work[], label: string, share = false) => <button type="button" className="text-button" data-trust={kind} onClick={() => onItems(kind)}>
+  const number = (kind: TrustKind, items: readonly Work[], label: ReactNode, share = false) => <button type="button" className="text-button" data-trust={kind} onClick={() => onItems(kind)}>
     <span className="mono">{items.length}{share ? `/${delivered.length}` : ''}</span> {label}
   </button>;
   return <p className="trust-strip" aria-label="Trust" data-verified-by-running={verifiedByRunning.length} data-delivered={delivered.length} data-sent-back={sentBack.length} data-reverts={reverts.length}>
     <span className="beacon" aria-hidden="true"/>{number('verified-by-running', verifiedByRunning, 'verified by running', true)}
     <span aria-hidden="true"> · </span>{number('sent-back', sentBack, 'sent back', true)}
-    <span aria-hidden="true"> · </span>{number('reverts', reverts, `revert${reverts.length === 1 ? '' : 's'} this week`)}
+    <span aria-hidden="true"> · </span>{number('reverts', reverts, <Term term="reverts this week" focusable={false}>reverted</Term>)}
   </p>;
 }
 

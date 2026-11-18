@@ -60,7 +60,7 @@ test('e2e:trust-strip — the header shows the week’s trust numbers, no agent 
   await expect(strip).toHaveAttribute('data-reverts', '1');
   await expect(strip).toContainText('1/4 verified by running');
   await expect(strip).toContainText('1/4 sent back');
-  await expect(strip).toContainText('1 revert this week');
+  await expect(strip).toContainText('1 reverted');
   // The header carries no agent counts.
   await expect(strip).not.toContainText('agents working');
   await expect(strip).not.toContainText('in trial');
