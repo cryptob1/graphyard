@@ -25,7 +25,7 @@ export const loopPresenceHeader = 'X-Graphyard-Loop-Interval';
  */
 export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
-export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string; cpu?: LoopCpu; hosts?: LoopHost[]; sessions?: LoopSession[] }
+export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision; alerts?: number | false; checkoutTrust?: string; workerGrowth?: string; stepFailure?: string; fetchRefusal?: string; stallAlarm?: string; cpu?: LoopCpu; hosts?: LoopHost[]; sessions?: LoopSession[] }
 /** The host's CPU as the loop last read it (GY-3348): 'some avg60' from /proc/pressure/cpu, the steal percent from /proc/stat and the hottest sensor (GY-3373), with GY-3416's launches-waiting word. */
 export interface LoopCpu { avg60: number | null; steal: number | null; celsius?: number | null; testBudget?: number | null; trialCap?: { now: number; full: number } | null; waiting?: boolean | null }
 /** One live agent session as the loop last read its cgroup (GY-3438): its use, its fair share, and since when it has used far more than its share of a saturated machine. */
@@ -42,8 +42,8 @@ export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * inte
 /** The loop as the control plane last saw it read, in memory beside the engine. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
-  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null; workerGrowth?: string | null; stepFailure?: string | null; fetchRefusal?: string | null; cpu?: LoopCpu | null; hosts?: LoopHost[] | null; sessions?: LoopSession[] | null }, now: Date) {
-    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}), ...(poll.workerGrowth ? { workerGrowth: poll.workerGrowth } : {}), ...(poll.stepFailure ? { stepFailure: poll.stepFailure } : {}), ...(poll.fetchRefusal ? { fetchRefusal: poll.fetchRefusal } : {}), ...(poll.cpu ? { cpu: poll.cpu } : {}), ...(poll.hosts?.length ? { hosts: poll.hosts } : {}), ...(poll.sessions?.length ? { sessions: poll.sessions } : {}) };
+  observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null; alerts?: number | false | null; checkoutTrust?: string | null; workerGrowth?: string | null; stepFailure?: string | null; fetchRefusal?: string | null; stallAlarm?: string | null; cpu?: LoopCpu | null; hosts?: LoopHost[] | null; sessions?: LoopSession[] | null }, now: Date) {
+    this.latest = { principal: poll.principal, intervalSeconds: poll.intervalSeconds, seenAt: now.toISOString(), ...(poll.supervision ? { supervision: poll.supervision } : {}), ...(poll.alerts === null || poll.alerts === undefined ? {} : { alerts: poll.alerts }), ...(poll.checkoutTrust ? { checkoutTrust: poll.checkoutTrust } : {}), ...(poll.workerGrowth ? { workerGrowth: poll.workerGrowth } : {}), ...(poll.stepFailure ? { stepFailure: poll.stepFailure } : {}), ...(poll.fetchRefusal ? { fetchRefusal: poll.fetchRefusal } : {}), ...(poll.stallAlarm ? { stallAlarm: poll.stallAlarm } : {}), ...(poll.cpu ? { cpu: poll.cpu } : {}), ...(poll.hosts?.length ? { hosts: poll.hosts } : {}), ...(poll.sessions?.length ? { sessions: poll.sessions } : {}) };
   }
   /** Whether this process has ever seen the loop read: once it has, a lapse means the loop stopped. */
   get observed(): boolean { return this.latest !== null; }
@@ -130,6 +130,9 @@ export const loopStepFailure = loopCheckoutTrust;
  */
 export const loopFetchRefusalHeader = 'X-Graphyard-Loop-Fetch-Refusal';
 export const loopFetchRefusal = loopCheckoutTrust;
+/** GY-3432: the stall alarm the loop raised, URI-encoded, or `off`; /api/status serves it as `setup.stallAlarm` for the Master page. */
+export const loopStallAlarmHeader = 'X-Graphyard-Loop-Stall-Alarm';
+export const loopStallAlarm = loopCheckoutTrust;
 
 /**
  * The header on the loop's coordination reads naming the host's CPU (GY-3348): 'some avg60' from

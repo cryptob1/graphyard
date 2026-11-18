@@ -162,6 +162,8 @@ export interface DaemonEffects {
   release?: (work: Work, reason: string) => Promise<unknown>;
   /** One reviewer and producer dispatch tick over the cycle's snapshot (dispatch/tick.ts). `held`, while set (GY-3348: the host's CPU is saturated), is the one wait line every launch the tick would make records instead. */
   dispatchTick?: (snapshot: { work: Work[]; now: string }, held?: string) => Promise<unknown>;
+  /** GY-3432: the commit the deploy unit serves, for the stall alarm's stale-loop cause; absent or null when none is recorded. */
+  servingCommit?: () => string | null;
   /** The loop's own master session (GY-898): absent, none is launched. */
   masterSession?: MasterSessionEffects;
   /** GY-3345: the messages to this install's Master (`GET master/messages`); each unanswered one from another install wakes the session once. Absent, none is read. */

@@ -54,6 +54,7 @@ import { upstreamFiler } from './control-plane.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
 import { failedRequiredProofs } from '../cli/worker-verification.js';
 import { trialRunsDirectory } from '../merge-writer/trial-run.js';
+import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { graphyardVolumes, reclaimGraphyardLeftovers, reclaimJobLeftovers, stopOrphanTrialContainers, trialContainerMaxAgeMs } from './disk-headroom.js';
 import { dataDirectory } from '../install/worktree-root.js';
 import { durableTemporaryRoot, trialCheckoutRoots } from '../merge-writer/trial.js';
@@ -222,6 +223,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
+    // GY-3432: the commit the deploy unit serves, which the stall alarm compares to the loop's own.
+    servingCommit: () => readDeployRecord(deployRecordPath(root))?.tip ?? null,
     // GY-3348: the host's CPU before every launch, and its hottest sensor (GY-3373); each null where unreadable.
     cpuPressure: async () => {
       const read = (path: string) => readFile(path, 'utf8').then(text => text, () => null);
