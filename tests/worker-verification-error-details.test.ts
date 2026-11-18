@@ -63,7 +63,7 @@ test('e2e:worker-verification-error-details — a proof that hangs against the b
   const { repository, allocations, head } = await hangingOnBase();
   const work = { key: 'GY-1', criteria: [{ id: 'AC-1', proofs: ['integration:feature'] }] } as Work;
   // A short verification bound stands in for the 55-minute one: before the fix verify.mjs ran past it and failed opaquely.
-  const verified = await runWorkerVerification(repository, work, { head, epoch: 1, mode: 'complete' }, 'main', allocations, () => {}, 90_000);
+  const verified = await runWorkerVerification(repository, work, { head, epoch: 1, mode: 'complete' }, 'main', allocations, () => {}, Date.now() + 90_000);
   const [feature] = verified.record.ran;
   assert.equal(feature!.result, 'pass', JSON.stringify(feature));
   assert.equal(feature!.exercise?.result, 'fail', JSON.stringify(feature));
@@ -73,7 +73,7 @@ test('e2e:worker-verification-error-details — a proof that hangs against the b
 
   // Successful verification still enforces every required proof: one stopped on HEAD fails.
   const strict = { key: 'GY-1', criteria: [{ id: 'AC-1', proofs: ['integration:feature'] }, { id: 'AC-2', proofs: ['integration:stuck'] }] } as Work;
-  const stuck = await runWorkerVerification(repository, strict, { head, epoch: 1, mode: 'verify' }, 'main', allocations, () => {}, 90_000);
+  const stuck = await runWorkerVerification(repository, strict, { head, epoch: 1, mode: 'verify' }, 'main', allocations, () => {}, Date.now() + 90_000);
   assert.deepEqual(failedRequiredProofs(stuck.record).map(run => [run.proof, run.result]), [['integration:stuck', 'fail']]);
   assert.match(stuck.record.ran.find(run => run.proof === 'integration:stuck')!.abnormal!, /did not finish within/);
 });

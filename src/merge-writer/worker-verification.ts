@@ -48,17 +48,20 @@ export async function verificationStep(command: string, args: string[], options:
  * `progress` receives each launcher line (waiting, starting) as it happens, for the worker's `complete` to show (GY-3332).
  * GY-3447: a worker's own verification takes no host heavy-job slot; the trial load cap bounds it. GY-3446: under a host strict cap it does.
  */
-export const runWorkerVerification = (root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot(),
-  progress: (line: string) => void = () => {}, timeoutMs = workerVerificationTimeoutMs): Promise<WorkerVerificationResult> =>
-  withHeavyJob(`worker verification ${work.key}`, () => verifyOnHost(root, work, input, baseBranch, parent, progress, timeoutMs), { onWait: progress, strictOnly: true });
+export async function runWorkerVerification(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot(),
+  progress: (line: string) => void = () => {}, deadline = Date.now() + workerVerificationTimeoutMs): Promise<WorkerVerificationResult> {
+  // GY-3506: a wait for a host slot counts against the request's one deadline, so the host answers before the control plane gives up.
+  const stop = new AbortController(), timer = setTimeout(() => stop.abort(new Error(`The verification waited for a host heavy-job slot until its deadline and did not start; retry complete when the host is free`)), Math.max(1, deadline - Date.now()));
+  try { return await withHeavyJob(`worker verification ${work.key}`, () => verifyOnHost(root, work, input, baseBranch, parent, progress, deadline), { onWait: progress, strictOnly: true, signal: stop.signal }); }
+  finally { clearTimeout(timer); }
+}
 
 async function verifyOnHost(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent: string,
-  progress: (line: string) => void, timeoutMs: number): Promise<WorkerVerificationResult> {
+  progress: (line: string) => void, deadline: number): Promise<WorkerVerificationResult> {
   await mkdir(parent, { recursive: true });
   const allocation = await mkdtemp(join(parent, workerVerificationPrefix));
   await writeTempOwner(allocation);
   const tree = join(allocation, 'checkout'), home = join(allocation, 'home'), temporary = join(allocation, 'tmp');
-  const deadline = Date.now() + timeoutMs;
   const remaining = () => Math.max(1, deadline - Date.now());
   try {
     await mkdir(home); await mkdir(temporary);
