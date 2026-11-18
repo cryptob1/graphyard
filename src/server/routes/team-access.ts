@@ -5,7 +5,7 @@ import { demand } from '../../model.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 import { humanSignIn } from '../auth.js';
 import { sealedSchema } from './agent-registry.js';
-import { aclExample, aclGuidance, installUrl, invitationMessage, missingShareGuidance, missingTailnetGuidance, shareLink, shareState, teamAccessSummary, type MachineTailnet, type ShareLink } from '../../team-access.js';
+import { aclExample, aclGuidance, invitationMessage, missingShareGuidance, missingTailnetGuidance, shareLink, shareState, teamAccessSummary, type MachineTailnet, type ShareLink } from '../../team-access.js';
 import { unownedFamilySql } from '../../store/tables/work.js';
 
 /**
@@ -19,12 +19,14 @@ const prefix = 'team-access.';
 /** A device invite the host has not answered within this long has failed: the loop is not running. */
 export const deviceInviteWaitMs = 2 * 60_000;
 type Row = { kind: string; payload: any };
-interface HostReport { dnsName: string | null; ip: string | null; shareLink: ShareLink | null; tokenSaved: boolean; publicKey: string | null; applied: { share: string | null; token: string | null } }
+interface HostReport { dnsName: string | null; ip: string | null; url?: string | null; shareLink: ShareLink | null; tokenSaved: boolean; publicKey: string | null; applied: { share: string | null; token: string | null } }
 interface DeviceInvite { id: string; name: string; role: string; at: number; url: string | null; error: string | null; used: boolean }
 
 const configuredIds = (context: RouteContext) => context.services.principals.map(entry => entry.actor.id);
 const now = (context: RouteContext) => (context.services.clock ?? Date.now)();
 const port = (context: RouteContext) => context.services.teamAccess?.port ?? String(context.req.socket.localPort ?? '');
+/** GY-3480: the port the tailnet reaches this install on — the served address's own (`:8447`) once the host reported one, else the server's. */
+const tailnetPort = (url: string | null, context: RouteContext) => url ? new URL(url).port || (url.startsWith('https:') ? '443' : '80') : port(context);
 const operator = (context: RouteContext) => humanSignIn(context.services).checkOperator(context.actor, configuredIds(context));
 const host = (context: RouteContext) => demand(['admin', 'coordinator'].includes(context.actor.role), 'Team access is synchronized by the host\'s master loop identity', 403);
 const record = (context: RouteContext, kind: string, payload: unknown) =>
@@ -58,16 +60,17 @@ async function fold(context: RouteContext) {
 async function view(context: RouteContext) {
   operator(context);
   const state = await fold(context), machine: MachineTailnet = state.report ?? {}, share = shareState(state.shareLink, now(context));
+  const url = state.report?.url ?? null, served = tailnetPort(url, context);
   return {
-    summary: teamAccessSummary, port: port(context), installUrl: installUrl(machine, port(context)), hostSynced: !!state.report, hostKey: state.report?.publicKey ?? null,
+    summary: teamAccessSummary, port: served, installUrl: url, hostSynced: !!state.report, hostKey: state.report?.publicKey ?? null,
     mode: state.tokenSaved ? 'api' : 'reusable', shareLink: share,
-    guidance: !installUrl(machine, port(context)) ? missingTailnetGuidance : !share && !state.tokenSaved ? missingShareGuidance : null,
-    acl: aclExample(machine, port(context)), aclGuidance,
+    guidance: !url ? missingTailnetGuidance(port(context)) : !share && !state.tokenSaved ? missingShareGuidance : null,
+    acl: aclExample(machine, served), aclGuidance,
   };
 }
 
 const hostReportSchema = z.object({
-  dnsName: z.string().max(300).nullable(), ip: z.string().max(100).nullable(), tokenSaved: z.boolean(), publicKey: z.string().max(200).nullable(),
+  dnsName: z.string().max(300).nullable(), ip: z.string().max(100).nullable(), url: z.string().url().max(400).nullable().optional(), tokenSaved: z.boolean(), publicKey: z.string().max(200).nullable(),
   shareLink: z.object({ url: z.string().max(2000), createdOn: z.string().max(10), expiresAt: z.string().max(40) }).strict().nullable(),
   applied: z.object({ share: z.string().max(100).nullable(), token: z.string().max(100).nullable() }).strict(),
 }).strict();
@@ -131,7 +134,7 @@ export const teamAccessRoutes = defineRoutes('team-access', [
     const { name, role, origin, deviceInvite, share: choice } = await parseJson(context) as { name: string; role: string; origin?: string; deviceInvite?: string; share?: string };
     const signIns = humanSignIn(context.services);
     signIns.checkInvite(context.actor, configuredIds(context), name, role);
-    const state = await fold(context), machine: MachineTailnet = state.report ?? {}, url = installUrl(machine, port(context));
+    const state = await fold(context), url = state.report?.url ?? null, served = tailnetPort(url, context);
     let share: { url: string; kind: 'reusable' | 'single-use'; expiresAt?: string | null } | null = null;
     if (deviceInvite) {
       const invite = state.invites.get(deviceInvite);
@@ -150,8 +153,8 @@ export const teamAccessRoutes = defineRoutes('team-access', [
     const invite = await signIns.invite(context.actor, configuredIds(context), name, role);
     const base = url ?? (typeof origin === 'string' && /^https?:\/\//.test(origin) ? origin.replace(/\/$/, '') : null);
     const link = base ? `${base}/#sign-in=${invite.code}` : null;
-    return { ...invite, installUrl: url, port: port(context), link, share,
-      message: url && share && link ? invitationMessage({ name, role, url, port: port(context), signIn: link, signInExpiresAt: invite.expiresAt, share }) : null,
-      missing: url && share ? null : !url ? missingTailnetGuidance : missingShareGuidance };
+    return { ...invite, installUrl: url, port: served, link, share,
+      message: url && share && link ? invitationMessage({ name, role, url, port: served, signIn: link, signInExpiresAt: invite.expiresAt, share }) : null,
+      missing: url && share ? null : !url ? missingTailnetGuidance(port(context)) : missingShareGuidance };
   } },
 ]);
