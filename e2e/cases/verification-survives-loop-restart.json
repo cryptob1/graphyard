@@ -5,5 +5,5 @@
   "tags": ["workers", "verification"],
   "target": "any",
   "required": false,
-  "steps": [{ "kind": "command", "name": "Complete across coordinator restart", "run": "node --import tsx --test tests/verification-survives-loop-restart.test.ts", "timeoutSeconds": 240 }]
+  "steps": [{ "kind": "command", "name": "Complete across coordinator restart", "run": "node --import tsx tests/helpers/run-tests.ts tests/verification-survives-loop-restart.test.ts", "timeoutSeconds": 240 }]
 }

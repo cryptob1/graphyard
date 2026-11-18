@@ -16,7 +16,8 @@ import { completeCommand } from '../src/cli/complete.js';
 import type { CliContext } from '../src/cli/context.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 
-setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+// Require pre-merge review for the fixture's changed source, just as this sensitive fix does.
+setRepositoryPolicy({ ...repositoryPolicy(), risk: { sensitive: [{ glob: 'app.js', rule: 'fixture requires independent review' }], declared: true }, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 async function until(condition: () => Promise<boolean>, message: string) {
   for (let i = 0; i < 200; i++) { if (await condition()) return; await delay(10); }
@@ -149,7 +150,8 @@ test('e2e:verification-survives-loop-restart — complete retries its preserved 
   await until(async () => (await f.pending()).length === 1, 'retry queued');
   await restarted();
   await assert.rejects(f.api('worker-verifications/finish', { id: old.id, result: f.result }), /409/);
-  assert.equal(await completed, null);
+  const completionError = await completed;
+  if (completionError) throw completionError;
   assert.equal(executions, 1);
   const recorded = (await f.store.list()).find(work => work.id === f.work.id)!;
   assert.equal(recorded.candidate?.sha, f.head); assert.equal(recorded.submission?.epoch, 1);
