@@ -73,13 +73,48 @@ export function pressureAvg60(text: string): number | null {
   return Number.isFinite(value) && value >= 0 ? Math.min(value, 100) : null;
 }
 
-/** The aggregate `cpu` line of /proc/stat as the two counters a steal reading needs. */
-export function cpuStatTotals(text: string): { total: number; steal: number } | null {
+/** The aggregate `cpu` line of /proc/stat as the counters a steal reading and a busy CPU-seconds reading need. */
+export function cpuStatTotals(text: string): { total: number; steal: number; idle: number } | null {
   const fields = /^cpu\s+((?:\d+\s*)+)$/m.exec(text)?.[1]?.trim().split(/\s+/).map(Number);
   if (!fields || fields.length < 8 || fields.some(field => !Number.isFinite(field) || field < 0)) return null;
   // user nice system idle iowait irq softirq steal: guest time is already inside user, so the
   // denominator is the first eight fields — the time the kernel accounted on this CPU.
-  return { total: fields.slice(0, 8).reduce((sum, field) => sum + field, 0), steal: fields[7]! };
+  return { total: fields.slice(0, 8).reduce((sum, field) => sum + field, 0), steal: fields[7]!, idle: fields[3]! + fields[4]! };
+}
+
+/** /proc/stat counts in USER_HZ ticks, 100 a second on Linux. */
+const ticksPerSecond = 100;
+const day = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+/**
+ * GY-3418: the busy CPU-seconds (not idle, iowait or steal) between two readings, added to the UTC
+ * day of `now`. The first day measured stays as the baseline; of the rest only the last eight are
+ * kept. A counter that went backwards (a reboot) or a reading without idle adds nothing.
+ */
+export function tallyCpuSeconds(days: Record<string, number>, previous: { total: number; steal: number; idle?: number } | null, current: { total: number; steal: number; idle: number } | null, now: number) {
+  if (!previous || previous.idle === undefined || !current) return;
+  const busy = (current.total - current.idle - current.steal) - (previous.total - previous.idle - previous.steal);
+  if (!(busy >= 0) || current.total < previous.total) return;
+  const today = day(now), first = Object.keys(days).sort()[0] ?? today, oldest = day(now - 7 * 86_400_000);
+  days[today] = (days[today] ?? 0) + busy / ticksPerSecond;
+  for (const key of Object.keys(days)) if (key !== first && key < oldest) delete days[key];
+}
+
+/**
+ * GY-3418: CPU-seconds per merged item — the host's busy CPU-seconds over the last 7 days divided by
+ * the items merged in them, beside the first measured day's figure and the target, half of it.
+ * `mergedAt` is every merged item's merge time. A window with no merge has no figure.
+ */
+export function cpuPerMergedItem(days: Record<string, number>, mergedAt: readonly string[], now: number) {
+  const first = Object.keys(days).sort()[0];
+  if (!first) return null;
+  const since = day(now - 6 * 86_400_000), merged = mergedAt.map(at => Date.parse(at)).filter(Number.isFinite).map(day);
+  const per = (cpu: number, merges: number) => merges ? Math.round(cpu / merges) : null;
+  const sevenDays = per(Object.entries(days).filter(([key]) => key >= since).reduce((sum, [, seconds]) => sum + seconds, 0), merged.filter(key => key >= since).length);
+  const firstDay = per(days[first]!, merged.filter(key => key === first).length);
+  const target = firstDay === null ? null : Math.round(firstDay / 2);
+  return { sevenDays, firstDay, target,
+    line: `${sevenDays === null ? 'No merge in the last 7 days, so no CPU-seconds per merged item yet' : `${sevenDays} CPU-seconds per merged item over the last 7 days`}; ${target === null
+      ? `the target is set once the first measured day (${first}) has a merge` : `target ${target} or less, half the first day's ${firstDay} (${first})`}` };
 }
 
 /** Steal percent between two /proc/stat readings: the hypervisor's share of the CPU time that passed between them. */
@@ -101,6 +136,7 @@ export async function cpuPressureStep(cycle: { config?: { run: Pick<MasterRun, '
   const samples = reading?.celsius == null ? [] : [...(previous?.samples ?? []).filter(([when]) => at - when < heatWindowMs && when <= at), [at, reading.celsius] as [number, number]];
   const celsius = samples.length ? Math.round(samples.reduce((sum, [, value]) => sum + value, 0) / samples.length) : null;
   const stat = avg60 !== null && reading?.stat ? cpuStatTotals(reading.stat) : null, hot = standingLimit(cycle.config?.run.launchHotCelsius, at);
+  tallyCpuSeconds((state.cpuSeconds ??= { days: {} }).days, previous?.stat ?? null, stat, now());
   state.cpuPressure = avg60 === null && celsius === null ? null
     : { at: new Date(at).toISOString(), avg60, steal: stealPercent(previous?.stat ?? null, stat), stat, celsius, samples, testBudget: sessionTestBudget(), trialCap: previous?.trialCap ?? null,
       ...(hot === undefined ? {} : { hotCelsius: hot }) };

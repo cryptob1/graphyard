@@ -1,0 +1,15 @@
+{
+  "id": "cpu-per-merged-item",
+  "title": "A second merge reuses the installed dependencies and cached test results, and master status shows CPU-seconds per merged item",
+  "description": "Runs two real merge trials: the second head changes one source file, so it installs nothing (the dependency image committed by the first trial is reused) and runs only the test that imports the changed file, skipping the tests that passed before on the same content. Master status's CPU-seconds per merged item reads the loop's busy CPU-seconds per day divided by the merges, with the target: half the first day's figure.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the second trial installs nothing, skips unaffected cached tests, and master status shows the figure with its target",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:cpu-per-merged-item tests/trial-caches.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

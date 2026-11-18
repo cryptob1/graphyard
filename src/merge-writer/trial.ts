@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statfsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join, relative, isAbsolute } from 'node:path';
+import { delimiter, dirname, join, relative, isAbsolute, resolve } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, removeTree, verifyWorktreeRoot, volatileFilesystem, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiEnvironment } from '../cli/test-isolation.js';
@@ -23,6 +23,7 @@ import { configHome } from '../install/secrets.js';
 import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies, trialImage } from './trial-container.js';
+import { cachedPasses, commitDependencies, dependencyKey, moduleFile, recordPasses, testResultKeys, warmDependencies } from './trial-caches.js';
 import { HostDroppedError, readShardHosts, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, splitLocalOnlyTests, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
@@ -695,6 +696,8 @@ export interface RunTrialInput {
   baseTip?: string;
   changedFiles: readonly string[];
   timeoutMs: number;
+  /** GY-3418: keep the dependency image and test-result caches in the repository's git directory (the detached merge trial and batch gate do); absent, a trial caches nothing. */
+  caches?: boolean;
   key?: string;
   run?: ChildRun;
   /** Add criterion files to a declared selector's output before sharding. */
@@ -1003,6 +1006,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let home: string | null = null, temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
   let env: Record<string, string>, wrapper: string[], boundary: ReturnType<typeof trialContainerBoundary>, runImage: string | undefined;
+  let dependencies: string | null = null, warm: string | null = null, caches = '';
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
     try { await removeTree(directory); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
@@ -1057,7 +1061,16 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       log.push(`the base tip's ${trialDockerfile} does not build and this head replaces it: the trial runs in this head's image`);
       chosen = own;
     }
-    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), Date.now() + remaining(), { ...await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge', cpu.cores(), input.cores ?? availableParallelism()), owner: trialStartOwner(input.root, input.mergeSha) }, chosen ?? undefined);
+    // GY-3418: the dependency key — the image and the lockfile — names the committed dependency image a
+    // later head with the same two reuses, and keys the test-result cache; a checkout with no lockfile has neither.
+    const show = (path: string) => Promise.resolve().then(() => run('git', ['-C', input.root, 'show', `${input.mergeSha}:${path}`], { timeoutMs: remaining() })).then(String);
+    const lockfile = input.caches ? await show('package-lock.json').catch(() => show('pnpm-lock.yaml')).catch(() => null) : null;
+    if (lockfile !== null) {
+      // The caches live in the repository's git directory beside its objects, never in the worktree root a trial leaves empty.
+      caches = resolve(input.root, String(await run('git', ['-C', input.root, 'rev-parse', '--git-common-dir'], { timeoutMs: remaining() })).trim());
+      dependencies = dependencyKey(chosen ?? trialImage(), lockfile); warm = warmDependencies(caches, dependencies);
+    }
+    boundary = trialContainerBoundary([checkout.directory, place, temporary, home], [...trialContainerDependencies(input.root), ...(warm ? [warm] : [])], Date.now() + remaining(), { ...await trialLoad(input.root, input.key === gateTrialKey ? 'gate' : 'merge', cpu.cores(), input.cores ?? availableParallelism()), owner: trialStartOwner(input.root, input.mergeSha) }, chosen ?? undefined);
     wrapper = boundary();
     runImage = chosen ?? undefined;
   };
@@ -1229,12 +1242,20 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
       // GY-3200: a pnpm checkout always installs afresh, never through the root's node_modules.
       if (manager.name === 'npm' && existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
-      else if (manager.name === 'pnpm' || await holds('package-lock.json')) {
+      else if (manager.name === 'npm' && warm) {
+        await symlink(warm, join(worktree, 'node_modules'));
+        log.push(`dependency image ${dependencies!.slice(0, 12)} reused: the same trial image and lockfile installed before, so nothing is installed`);
+      } else if (manager.name === 'pnpm' || await holds('package-lock.json')) {
         const [command, ...args] = installArgv(manager);
         const installed = await fetching('install', () => child('install', command!, args, { env: npmCiEnvironment(env) }));
         if (hostEnded(installed) || toolchainStartFailed(installed)) throw runnerFailure('install', installed);
         readOnly('install', installed);
         if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+        if (manager.name === 'npm' && dependencies) {
+          await commitDependencies(caches, dependencies, join(worktree, 'node_modules'))
+            .then(() => log.push(`dependency image ${dependencies!.slice(0, 12)} committed for later trials with the same trial image and lockfile`),
+              error => log.push(`the dependency image was not committed (the next trial installs again): ${error instanceof Error ? error.message : String(error)}`));
+        }
       }
       const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
       // An unreadable package.json builds as before; one the merge broke is its failed build, never the host's (PRRT_kwDOUZby-s6tZsNG); only one that declares no build script skips it.
@@ -1370,15 +1391,25 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     if (hostEnded(selection)) throw runnerFailure('selection', selection);
     if (!selection.ok) return result({ passed: 0, failed: [strategy.command], files: 0 });
     const pattern = new RegExp(strategy.pattern);
-    const selected = selection.out.split('\n').map(line => line.trim()).filter(line => pattern.test(line));
+    let selected = selection.out.split('\n').map(line => line.trim()).filter(line => pattern.test(line));
+    // GY-3418: a selected file that passed in an earlier trial with the same content, imports and
+    // dependencies is not run again — unless the change touches a file whose effect imports cannot
+    // trace (docs, data, configuration); the proof files the caller adds always run.
+    const cached = dependencies && input.changedFiles.every(moduleFile) ? cachedPasses(caches, testResultKeys(worktree, selected, dependencies)) : new Set<string>();
+    if (cached.size) {
+      log.push(`test-result cache: ${cached.size} file(s) passed in an earlier trial with the same content, imports and dependencies, so they are not run again: ${[...cached].join(', ')}`);
+      selected = selected.filter(file => !cached.has(file));
+    }
     let files = selected;
     try { if (input.selectFiles) files = await input.selectFiles(selected, remaining()); }
     catch (error) {
       if ((error as { timedOut?: boolean }).timedOut) throw new TrialTimeoutError('selection', Math.max(0, now() - startedAt), tail());
       throw runnerFailure('selection', endedOf(error, output(error)));
     }
+    // A cached pass counts in the verdict as the pass it was; a file selectFiles runs anyway counts once.
+    const counted = new Set([...files, ...cached]).size;
     // An affected selection of nothing runs nothing.
-    if (!files.length) return result({ passed: 0, failed: [], files: 0 });
+    if (!files.length) return result({ passed: counted, failed: [], files: counted });
     enter('tests');
     enterStep('tests');
     // Each shard is one runner process over the same checkout, `lanes` of them at once. Failing per-file
@@ -1405,7 +1436,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const slotsDirectory = process.env[(await import('../master/verification-slots.js')).slotsDirectoryVariable];
     const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
     input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
-    const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
+    const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null; passed: string[] } | undefined)[] = [];
     let stopped: unknown = null;
     // A shard a host turned away is noted after every shard's output, so the note stays in the log tail kept on the item.
     const dropped = new Map<string, HostDroppedError>();
@@ -1434,7 +1465,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
         const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
         const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out, group))];
-        settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries,
+        // GY-3418: the files that passed — the whole shard when it exited 0 naming none, else those its records name passing.
+        const passed = tests.ok && !failing.length ? group : recorded.filter(record => record.passed && group.includes(record.file) && !failing.includes(record.file)).map(record => record.file);
+        settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries, passed,
           unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
       } catch (error) {
         if (error instanceof HostDroppedError) { if (!dropped.has(error.host)) dropped.set(error.host, error); throw error; }
@@ -1461,12 +1494,16 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     // A shard past the deadline ends the trial as a timeout once every shard has stopped, its log holding what the others printed.
     if (stopped instanceof TrialTimeoutError) throw new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail());
     if (stopped !== null) throw stopped;
-    const groups = ran.map(shard => shard.group), failingOutput = ran.filter(shard => shard.group.failed.length).map(shard => shard.entries.at(-1)!);
+    const groups = ran.map(shard => shard.group);
+    // GY-3418: a trial's passing files key the test-result cache (a worker's own run never reaches here).
+    const passedFiles = ran.flatMap(shard => shard.passed);
+    if (dependencies && passedFiles.length) await recordPasses(caches, [...testResultKeys(worktree, passedFiles, dependencies).values()]).catch(() => {});
+    const failingOutput = ran.filter(shard => shard.group.failed.length).map(shard => shard.entries.at(-1)!);
     const unattributed = ran.find(shard => shard.unattributed)?.unattributed ?? null;
     const failed = [...new Set(groups.flatMap(group => group.failed))];
     if (!failed.length && unattributed) throw unattributed;
     const worst = groups.find(group => group.status !== 0);
-    return result({ passed: Math.max(0, files.length - failed.length), failed, files: files.length }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups,
+    return result({ passed: Math.max(0, counted - failed.length), failed, files: counted }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups,
       failingOutput.length && log.join('\n').length > tailLength ? failureTail(failingOutput) : tail());
   };
   const trial = async (): Promise<TrialRun> => {
