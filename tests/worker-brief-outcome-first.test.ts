@@ -11,7 +11,7 @@ const criteria = [{ id: 'AC-1', text: 'Exports land intact in src/export.ts', pr
 const work = {
   key: 'GY-7', title: 'Exports land intact', type: 'feature' as const, why: 'Owners lose rows on export today.', simplest: 'Stream rows instead of buffering them.',
   description: 'Export writes every row; the page shows how many.', criteria, scenarioRequirements: [],
-  lastAssignment: { epoch: 2, claimedAt: '2026-11-18T10:00:00.000Z' },
+  lastAssignment: { owner: 'graphyard-worker-1', epoch: 2, claimedAt: '2026-11-18T10:00:00.000Z' },
 } as Parameters<typeof workerPrompt>[1];
 const brief = (kind?: string) => workerPrompt({ cliPath: cli, fastGates: true, ...(kind ? { kind } : {}) }, work, { principal: 'graphyard-worker-1' }, 2);
 const words = (text: string) => text.split(/\s+/).filter(Boolean).length;

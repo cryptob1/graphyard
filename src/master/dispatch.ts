@@ -537,7 +537,7 @@ function attemptBoundSection(run: MasterConfig['run'] | undefined, work: Partial
   const claimedAt = (work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : null) ?? work.pipeline?.attempts?.find(attempt => attempt.epoch === epoch)?.claimedAt ?? null;
   if (!claimedAt || !Number.isFinite(Date.parse(claimedAt))) return '';
   const claimed = Date.parse(claimedAt);
-  return `Your session ends at ${new Date(claimed + attemptBoundMs(run)).toISOString()} and extends while your worktree commits or changes files; nothing runs past ${new Date(claimed + attemptCeilingMs(run)).toISOString()}. Commit forward often, and a successor receives your diff. `;
+  return `Your session ends at ${new Date(claimed + attemptBoundMs(run)).toISOString()} and extends while your worktree commits or changes files; nothing runs past ${new Date(claimed + attemptCeilingMs(run)).toISOString()}; commit forward often, and a successor receives your diff. `;
 }
 
 /** What the previous attempt left for this one: the work an exhausted session had not committed, and a human's answer. */
