@@ -138,5 +138,5 @@ test('unit:agents-page-role-launchability — the Agents page states per role wh
   assert.ok(page.includes('data-role-launch="worker" data-can-launch="no"'), 'the worker line');
   assert.ok(page.includes('data-role-launch="reviewer" data-can-launch="no"'), 'the reviewer line');
   assert.ok(page.includes('Reviewers: none can launch — at its concurrency limit (1 of 1 live)'), 'the reason on the page');
-  assert.ok(page.includes('Can launch now? <span class="count">0 of 2</span>'), 'the section counts the roles that can launch');
+  assert.ok(page.includes('>Reviewers · waiting: at its limit</li>'), 'the role reads in one short row, its full verdict in the title');
 });

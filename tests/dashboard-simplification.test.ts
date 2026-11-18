@@ -192,7 +192,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Master, Workers, S
   assert.match(text(unread), /Operator automation could not be read, so what is configured is unknown: unavailable/);
   assert.doesNotMatch(text(unread), /safe bootstrap default/);
   assert.match(unread, /Configured identities <span class="count">—<\/span>/, 'an unknown count is never drawn as zero');
-  assert.match(text(markup(createElement(AutomationPage, { operatorAgents: [], operatorAgentsError: null }))), /safe bootstrap default/);
+  assert.match(text(markup(createElement(AutomationPage, { operatorAgents: [], operatorAgentsError: null }))), /None set up\..*No automation identities\./);
   assert.equal((await probeFeatures(async () => ({ requests: [] }), false, true)).features.validation, false, 'repository cases do not enable the retired validation runner');
   // Delivery slices are about who works on what: on the Workers page once a slice has a lead, never on Work.
   const led = fixtureStatus('admin'); led.delegation.slices[0].lead = { id: 'lead', displayName: 'Pine', sessionKind: 'ai' } as any;
