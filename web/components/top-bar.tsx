@@ -34,9 +34,11 @@ export function TrustStrip({ work, observedAt, onItems }: { work: Work[]; observ
 
 /**
  * Shipped and going live (GY-3452): the week's merges the live commit contains, and those it does
- * not carry yet — the Work page card's one count, so the two never disagree.
+ * not carry yet — the Work page card's one count, so the two never disagree. With no live commit
+ * known the release line already says so, and the strip stays out of the way.
  */
 export function ShippedStrip({ work, observedAt, live }: { work: Work[]; observedAt: number; live?: { commit?: unknown; waiting?: unknown } | null }) {
+  if (typeof live?.commit !== 'string') return null;
   const { shipped, waiting } = shippedCounts(work, live, Number.isNaN(observedAt) ? Date.now() : observedAt);
   return <p className="shipped-strip" aria-label="Shipped" data-shipped={shipped.length} data-waiting={waiting.length}>
     <span className="mono">{shipped.length}</span> shipped · <span className="mono">{waiting.length}</span> going live
