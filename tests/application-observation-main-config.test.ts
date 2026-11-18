@@ -11,6 +11,9 @@ import { declaredServe } from '../src/merge-writer/e2e-trial.js';
 import { parseProjectDelivery } from '../src/model-boundary/project-applications.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Main's own app row (GY-3434) leads; the declared applications follow it.
+const declaredApps = (report: { applications: readonly object[] }) => report.applications.filter((app): app is { id: string; serving: string; main: string; state: string } => 'state' in app);
+
 // GY-3459: master status observes applications as main's graphyard.json declares them, not as a
 // coordinator checkout behind origin/main does, and names a declaration that does not parse rather
 // than reporting no applications. An externally deployed service (a Go service on Railway) is
@@ -59,7 +62,7 @@ test('integration:application-observation-main-config — master status observes
     assert.notEqual(head, main, 'the checkout is behind origin/main');
 
     const report = await status();
-    assert.deepEqual(report.applications.map(({ id, serving, state }) => ({ id, serving, state })), [{ id: 'api', serving: main.slice(0, 12), state: 'current' }],
+    assert.deepEqual(declaredApps(report).map(({ id, serving, state }) => ({ id, serving, state })), [{ id: 'api', serving: main.slice(0, 12), state: 'current' }],
       'main\'s declaration is observed through its versionUrl; the checkout\'s stale "old" app is not');
     assert.equal((report as { applicationsError?: string }).applicationsError, undefined);
     assert.equal(git(checkout, 'rev-parse', 'HEAD'), head, 'observation leaves the checkout where it was');
@@ -86,18 +89,18 @@ test('e2e:application-observation-main-config — from a stale checkout, status 
     const { publish, status } = await staleCheckout('observation-e2e', { mode: 'local' });
     served = await publish({ mode: 'local', applications: [{ id: 'lumina', directory: '.', versionUrl: health.url }] });
     const live = await status();
-    assert.deepEqual(live.applications.map(({ id, serving, main, state }) => ({ id, serving, main, state })), [{ id: 'lumina', serving: served.slice(0, 12), main: served.slice(0, 12), state: 'current' }]);
+    assert.deepEqual(declaredApps(live).map(({ id, serving, main, state }) => ({ id, serving, main, state })), [{ id: 'lumina', serving: served.slice(0, 12), main: served.slice(0, 12), state: 'current' }]);
 
     await publish({ mode: 'local', applications: [{ id: 'Lumina', kind: 'static', directory: '/abs', versionUrl: 'ftp://x' }] });
     const invalid = await status();
-    assert.deepEqual(invalid.applications, []);
+    assert.deepEqual(declaredApps(invalid), []);
     const error = (invalid as { applicationsError?: string }).applicationsError ?? '';
     for (const field of ['applications.0.id', 'applications.0.directory', 'applications.0.versionUrl']) assert.ok(error.includes(field), `${field} is named: ${error}`);
     assert.ok(invalid.attention.some(item => item.subject === 'delivery.applications' && item.text.includes('applications.0.id')), 'the error is an attention line');
 
     await publish({ mode: 'local', applications: [] });
     const empty = await status();
-    assert.deepEqual(empty.applications, []);
+    assert.deepEqual(declaredApps(empty), []);
     assert.equal((empty as { applicationsError?: string }).applicationsError, undefined);
     assert.ok(!empty.attention.some(item => item.subject === 'delivery.applications'));
   } finally { health.close(); }

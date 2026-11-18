@@ -4,7 +4,9 @@ import Term from './term';
 import { viewFor, visibleViews, type View } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
 import { trustCounts, type TrustKind } from '../trust';
+import { shippedCounts } from '../groups';
 import type { Work } from '../../src/model';
+import { OpenApp } from './where-it-runs';
 
 /** The commit as the release line shows it: the first 8 characters, the whole SHA in the title. */
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
@@ -28,6 +30,19 @@ export function TrustStrip({ work, observedAt, onItems }: { work: Work[]; observ
     <span className="beacon" aria-hidden="true"/>{number('verified-by-running', verifiedByRunning, 'verified by running', true)}
     <span aria-hidden="true"> · </span>{number('sent-back', sentBack, 'sent back', true)}
     <span aria-hidden="true"> · </span>{number('reverts', reverts, <Term term="reverts this week" focusable={false}>reverted</Term>)}
+  </p>;
+}
+
+/**
+ * Shipped and going live (GY-3452): the week's merges the live commit contains, and those it does
+ * not carry yet — the Work page card's one count, so the two never disagree. With no live commit
+ * known the release line already says so, and the strip stays out of the way.
+ */
+export function ShippedStrip({ work, observedAt, live }: { work: Work[]; observedAt: number; live?: { commit?: unknown; waiting?: unknown } | null }) {
+  if (typeof live?.commit !== 'string') return null;
+  const { shipped, waiting } = shippedCounts(work, live, Number.isNaN(observedAt) ? Date.now() : observedAt);
+  return <p className="shipped-strip" aria-label="Shipped" data-shipped={shipped.length} data-waiting={waiting.length}>
+    <span className="mono">{shipped.length}</span> shipped · <span className="mono">{waiting.length}</span> going live
   </p>;
 }
 
@@ -146,6 +161,8 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
       {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}
       <div className="top-bar-live">
         <TrustStrip work={work} observedAt={observedAt} onItems={kind => { setSelected(null); setShippedFilter(kind); setView('shipped'); }}/>
+        <ShippedStrip work={work} observedAt={observedAt} live={status?.live}/>
+        <OpenApp status={status}/>
         {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
       </div>
     </div>

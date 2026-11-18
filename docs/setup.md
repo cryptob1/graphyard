@@ -19,12 +19,27 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 - Each trial sends each test shard to the host with the most free CPU under its heat limit. There the shard gets a clone of the commit and runs with no network, under CPU, memory and process limits. A host that drops a shard hands it back: capacity, never a fault. `master status` → `remoteShards` shows each host.
 - Tests that need namespaces (bwrap), Docker or the network — confinement, compose, trial-container and e2e tests, anything starting a server or a database — stay on this machine: a host's shard has no network and no Docker socket, so they would only fail there. Every other test file may run on a host.
 
+## Your app's address
+
+- Onboarding step: add `"app": { "url": "https://HOST.TAILNET.ts.net:PORT" }` to `graphyard.json` on main, with the tailnet or public address where the app runs. The dashboard's top bar then shows Open app, and Work's Where it runs card shows the link, the machine, the serving commit, its deploy time and the dashboard's own link.
+- The master refuses `127.0.0.1`, `localhost` and `::1`, which open only on that machine, and says why; `graphyard master status` names the setting while none is set.
+
 ## Accounts and access
 
 - Workers and reviewers run headless, logged per item (`graphyard guide runtimes`).
 - Where a SAML organization or org policy blocks deploy keys, `--push-auth gh` pushes with your gh login instead of a deploy key.
 - Setup invites or revokes viewers and maintainers.
 - Sharing one machine across installs: the [shared server guide](shared-server.md).
+
+## Shipped means live
+
+Work counts a merge as shipped once the live app runs a commit that contains it; until then it is going live. The top bar and the Work page show the same two numbers. When your app deploys somewhere else, such as Railway, tell Graphyard where to ask which commit is live, in `graphyard.json`:
+
+```json
+{ "app": { "healthUrl": "https://your-app.example.com/version" } }
+```
+
+The URL must answer the commit it runs: the plain SHA, or JSON with a `commit` or `sha` field. Graphyard asks at most once a minute. Without it, Graphyard reads the commit from its own deploy, and with neither nothing counts as shipped.
 
 ## Delivery feedback
 

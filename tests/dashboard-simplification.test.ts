@@ -330,7 +330,7 @@ test('unit:dashboard-simplification — the home page renders its numbers withou
   const page = home();
   const { byGroup } = classify(work, NOW);
   for (const group of groups) assert.match(page, new RegExp(`data-tile="${group}"[^>]*>.*?<strong>${byGroup[group].length}</strong>`), group);
-  assert.match(text(page), /\d+ shipped this week/);
+  assert.match(text(page), /\d+ shipped \d+ going live Latest/);
 });
 
 test('unit:work-page-single-count-row — the page shows one row of counts, the groups; no count appears twice and no two labels differ only by grammatical form', () => {

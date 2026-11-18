@@ -5,8 +5,14 @@ import { type RepositoryConfig, repositoryConfigFile } from '../model/documentat
 /**
  * The whole committed file: delivery, and the repository's own risk, review and E2E policy
  * (model/repository-policy.ts, GY-1843). A `documentation` policy written before GY-2875 is ignored.
+ * `app.healthUrl` (GY-3452) is where an install that deploys elsewhere answers its live commit.
  */
-export const repositoryConfigSchema = z.object({ documentation: z.unknown().optional(), delivery: deliveryPolicySchema.optional(), ...repositoryPolicySchema.shape }).strict();
+export const repositoryConfigSchema = z.object({
+  documentation: z.unknown().optional(),
+  delivery: deliveryPolicySchema.optional(),
+  app: z.object({ healthUrl: z.url().max(500) }).strict().optional(),
+  ...repositoryPolicySchema.shape,
+}).strict();
 
 /** The policy a committed `graphyard.json` declares; refuses a file that does not parse. */
 export function parseRepositoryConfig(text: string): RepositoryConfig {

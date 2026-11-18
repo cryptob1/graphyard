@@ -57,7 +57,7 @@ test('e2e:railway-observed-deploys — master status lists each app\'s versionUr
     const report = await masterStatusReport(root, config, async () => ({ work: [], now: new Date().toISOString() }), run);
 
     const short = (sha: string) => sha.slice(0, 12);
-    assert.deepEqual(report.applications.map(({ id, serving, main, state }) => ({ id, serving, main, state })), [
+    assert.deepEqual(report.applications.flatMap(app => 'state' in app ? [{ id: app.id, serving: app.serving, main: app.main, state: app.state }] : []), [
       { id: 'api', serving: short(deployed), main: short(main), state: 'current' },
       { id: 'web', serving: short(deployed), main: short(main), state: 'lagging' },
       { id: 'worker', serving: null, main: short(main), state: 'failed' },
