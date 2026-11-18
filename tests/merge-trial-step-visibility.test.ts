@@ -140,7 +140,7 @@ test('unit:merge-trial-step-and-elapsed-reported — a trial advancing between s
   assert.deepEqual(withMergePipeline(work, now).pipeline!.merge, mergePipeline(work, now));
   // The Work page: the item is in no Blocked lane, the row names the merge's step, and no PR number appears.
   assert.deepEqual(stalledCards([work], now), [], 'an advancing trial is never stalled');
-  assert.deepEqual(actionlessCards([work], now).flatMap(card => card.movedBy ? [card.movedBy] : []), ['the merge writer\'s trial (tests: test:browser)']);
+  assert.deepEqual(actionlessCards([work], now).flatMap(card => card.movedBy ? [card.movedBy] : []), ['its test merge (tests: test:browser)']);
   const screen = text(renderToStaticMarkup(createElement(WorkCard, { item: work, now, onOpen: () => {} })));
   assert.match(screen, /Merging: tests: test:browser, 25m/);
   assert.doesNotMatch(screen, /PR #\d+/, 'a control-plane candidate names no pull request');
@@ -163,9 +163,9 @@ test('unit:merge-trial-step-and-elapsed-reported — a trial whose process exits
   assert.equal(mergeWriterSummary(made.state.mergeWriter, now).inFlight?.stalled, true, 'master status reads the flight as stalled past the bound');
   const stalled = stalledCards([work], now);
   assert.deepEqual(stalled.map(card => card.item.key), ['GY-1'], 'a trial that exited with no verdict is stalled once no step has advanced for the bound');
-  assert.match(stalled[0]!.missing, /its trial last ran tests: test/);
+  assert.match(stalled[0]!.missing, /its test merge last ran tests: test/);
   const screen = text(renderToStaticMarkup(createElement(WorkCard, { item: work, now, stall: stalled[0] as ActionlessCard, onOpen: () => {} })));
-  assert.match(screen, /its trial last ran tests: test/);
+  assert.match(screen, /its test merge last ran tests: test/);
 });
 
 // ---- AC-2: the checkout starts promptly, and every step's duration reaches the trial's log --------

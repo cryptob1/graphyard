@@ -122,10 +122,9 @@ export function boardStatus(role = 'admin') {
 }
 
 /** The JSON body the control plane would return for `path` over this board. */
-export function boardApi(path: string, role = 'admin') {
+export function boardApi(path: string, role = 'admin', work: any[] = boardWork()) {
   const url = new URL(path.replace(/^\/?(api\/)?/, 'http://fixture/api/'));
   const route = url.pathname.slice('/api/'.length);
-  const work = boardWork();
   if (route === 'status') return boardStatus(role);
   if (route === 'work-snapshot') return { work, jobs: [], now: at(0) };
   // GET /api/board (GY-200): the server's own module over this board, which the Work page renders.

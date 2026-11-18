@@ -1,6 +1,8 @@
 import { readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { test, expect, type Page } from '@playwright/test';
-import { NOW, boardApi, emptyApi } from './ui-board';
+import { NOW, boardApi, boardWork, emptyApi } from './ui-board';
+import { testMergeLabel } from '../src/master/verification-slots';
+import { gateTrialKey } from '../src/merge-writer/trial-load';
 
 // GY-3396: every dashboard page reviewed with real data in it, at desktop and phone width. The
 // seed fixture (browser-tests/ui-board.ts) is a sanitized copy of this install — every page's read
@@ -18,6 +20,11 @@ const routes = [...router.slice(router.indexOf('export const views')).matchAll(/
 // Pages that list what the control plane holds: with nothing to list they draw the shared empty state.
 const lists = ['work', 'now', 'needs-you', 'shipped', 'workers', 'releases', 'tests', 'scenarios', 'product', 'costs', 'agents', 'automation'];
 const banned = /\b(?:trial|epoch|lease|builder)s?\b/i;
+// The seed's merge in flight (GY-21) waits for a host heavy-job slot the batch gate holds: the
+// step text is the control plane's own, so the words it writes onto the Work page are read too.
+const waiting = `waiting for a host heavy-job slot, held by ${testMergeLabel(gateTrialKey)}`;
+const seededWork = boardWork().map(item => item.key === 'GY-21'
+  ? { ...item, mergeLedger: { ...item.mergeLedger, state: 'intent', pushedAt: null, trialStep: { step: waiting, at: new Date(NOW - 2 * 60_000).toISOString() } } } : item);
 // The two widths share one worker, one after the other: the walk is heavy, and a trial host runs
 // the rest of the browser suite beside it.
 test.describe.configure({ mode: 'serial' });
@@ -58,7 +65,7 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
     const data = { seeded: true as boolean };
     await page.route('**/api/**', route => {
       const url = new URL(route.request().url());
-      const answer = data.seeded ? boardApi(url.pathname.slice(1) + url.search) : emptyApi(url.pathname.slice(1) + url.search);
+      const answer = data.seeded ? boardApi(url.pathname.slice(1) + url.search, 'admin', seededWork) : emptyApi(url.pathname.slice(1) + url.search);
       return route.fulfill({ json: answer });
     });
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
@@ -78,6 +85,7 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 900 }, { name: '
         await page.evaluate(id => { location.hash = id; }, route);
         const read = await review(page, route, viewport.width);
         expect(read.sideways, `${route} never scrolls sideways at ${viewport.name} width`).toBeLessThanOrEqual(0);
+        if (seeded && route === 'work') expect(read.words, 'the Work page names the merge that waits for a slot').toContain(`Merging: ${waiting}`);
         const internal = read.words.match(banned);
         expect(internal, `${route} keeps internal words out of sight at ${viewport.name} width (found ${internal?.[0]})`).toBe(null);
         if (lists.includes(route)) {
