@@ -75,9 +75,9 @@ export const reworkReasonMax = 2000;
 export function neededRework(work: Work, exhausted: readonly ExhaustedProof[] = []): Rework | null {
   if (work.stage === 'done' || work.reworkRequested) return null;
   const conflict = baseRefreshConflict(work);
-  if (conflict) return { reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
+  if (conflict) return { reason: `${work.key}: ${conflict}. The base moved: run sync ${work.key}, resolve, then complete ${work.key} EPOCH --head NEWSHA.`, binding: `${work.candidate!.sha}:conflict` };
   const sync = syncConflict(work);
-  if (sync) return { reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
+  if (sync) return { reason: `${work.key}: ${sync.reason}. The base moved: run sync ${work.key}, resolve, then complete ${work.key} EPOCH --head NEWSHA.`, binding: sync.binding };
   const verdict = standingVerdict(work);
   if (verdict) {
     // The engine takes a rework reason of at most reworkReasonMax characters: a long verdict (a product

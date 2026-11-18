@@ -851,7 +851,7 @@ test('unit:trial-merge — a failed trial grounds a rework for the candidate and
   const work = { ...item, stage: evaluated.stage, gates: evaluated.gates, violations: evaluated.violations };
   assert.equal(trialFailedGround(work), `the merge writer's trial of candidate ${head.slice(0, 12)} failed (${reason})`);
   const rework = trialFailureRework(work, head, reason);
-  assert.equal(rework.reason, `GY-3008: the merge writer's trial of candidate ${head.slice(0, 12)} failed: ${reason}. Nothing but a new head can pass the trial, so the item returns to a worker.`);
+  assert.equal(rework.reason, `GY-3008: the merge writer's trial of candidate ${head.slice(0, 12)} failed: ${reason}. Reproduce with node --import tsx tests/helpers/run-tests.ts FILES (the files named above), fix the cause rather than the test, then complete GY-3008 EPOCH --head NEWSHA.`);
   assert.deepEqual(rework.input, { previousWorkerStopped: true, binding: `${head}:merge-writer-trial-failed` });
   const account = actionAccount(work, [work], now);
   assert.equal(account.action, null, 'the merge writer answers the refused trial; no executor row asks for a new head yet');

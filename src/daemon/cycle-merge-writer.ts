@@ -279,7 +279,10 @@ export const snapshotLedger = (work: readonly Work[]): Record<string, MergeLedge
 /** The rework a failed trial grounds (AC-3): its binding names the head and the ground, as every loop rework does, so the server's lane rework finds it. */
 export const trialFailureRework = (work: Work, head: string, reason: string) => {
   // GY-3150: the refusal may fill its 2,000 characters with the failing tests and log tail; the rework cuts the tail's oldest lines to fit the engine's bound.
-  const lead = `${work.key}: the merge writer's trial of candidate ${head.slice(0, 12)} failed: `, tail = '. Nothing but a new head can pass the trial, so the item returns to a worker.';
+  // GY-3488: the tail names the next action: a conflict syncs, a failed test or e2e trial reproduces the files.
+  const lead = `${work.key}: the merge writer's trial of candidate ${head.slice(0, 12)} failed: `, tail = reason.startsWith(`${trialFailurePrefix}: the merge conflicts in `)
+    ? `. The base moved: run sync ${work.key}, resolve the files above keeping both sides' intent, rerun your bound tests, then complete ${work.key} EPOCH --head NEWSHA.`
+    : `. Reproduce with node --import tsx tests/helpers/run-tests.ts FILES (the files named above), fix the cause rather than the test, then complete ${work.key} EPOCH --head NEWSHA.`;
   const room = reworkReasonMax - lead.length - tail.length, marker = '\nlog tail:\n', at = reason.indexOf(marker) + marker.length;
   const fitted = reason.length <= room ? reason : at >= marker.length && at < room ? `${reason.slice(0, at)}${reason.slice(at - room)}` : reason.slice(0, room);
   return { reason: `${lead}${fitted}${tail}`,
