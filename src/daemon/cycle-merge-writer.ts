@@ -23,7 +23,7 @@ import { awaitsMerge } from '../model/merge-queue.js';
 import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import type { PreviewCaseRun } from '../merge-writer/served-previews.js';
 import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '../merge-writer/serve-revert.js';
-import { slotsDirectoryVariable, waitStep, withHeavyJob } from '../master/verification-slots.js';
+import { slotsDirectoryVariable, testMergeLabel, waitStep, withHeavyJob } from '../master/verification-slots.js';
 import { adoptTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
@@ -107,7 +107,7 @@ const output = (error: unknown) => { const failed = error as { stdout?: unknown;
  * project on the host shares, naming the holders as its step, before anything of it starts.
  */
 export const heavyTrial = <T>(key: string, onStep: ((step: string) => void) | undefined, signal: AbortSignal | undefined, trial: () => Promise<T>, until?: AbortSignal, gate?: boolean) =>
-  withHeavyJob(`merge trial ${key}`, trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal, until, reserved: gate });
+  withHeavyJob(testMergeLabel(key), trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal, until, reserved: gate });
 
 /**
  * The reads over the coordinator checkout `root` (its object store holds every submitted head,
@@ -649,7 +649,7 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
         const entry: Flight = { key, id, head: revertSha, startedAt, settled: null, revert: context };
         // Publish the flight only after persisting its revert, so restart recovery can
         // recognize a push even when the process dies before it records the result.
-        writer.inFlight = { key, id, head: revertSha, startedAt, attempt: randomUUID(), step: 'revert trial', stepStartedAt: startedAt, revert: context };
+        writer.inFlight = { key, id, head: revertSha, startedAt, attempt: randomUUID(), step: 'revert test', stepStartedAt: startedAt, revert: context };
         try { await cycle.effects.persist(state); } catch (error) { writer.inFlight = null; throw error; }
         flightsOf(state).add(entry);
         onStep = step => {

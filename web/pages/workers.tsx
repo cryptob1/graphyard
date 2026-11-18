@@ -185,7 +185,7 @@ type HostRow = { host: string; local?: boolean; away: boolean; reason?: string; 
 /**
  * GY-3407: the hosts the loop watches — this machine first, then each one added with
  * `graphyard host add USER@HOST` — as the loop read them this cycle. A host that does not answer
- * reads Away and is read again next cycle. Merge trials send test shards to added hosts (GY-3412), which the note says.
+ * reads Away and is read again next cycle. Test merges send test shards to added hosts (GY-3412), which the note says.
  */
 function Hosts({ hosts }: { hosts: HostRow[] }) {
   if (!hosts.length) return null;
@@ -200,7 +200,7 @@ function Hosts({ hosts }: { hosts: HostRow[] }) {
         <td data-label="Steal">{figure(host.steal, '%')}</td>
         <td data-label="Runs now">{figure(host.runs)}</td></>}
     </tr>)}</tbody>
-  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Merge trials send test shards to added hosts too; previews run on this machine.</p> : null}</section>;
+  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Test merges send test shards to added hosts too; previews run on this machine.</p> : null}</section>;
 }
 
 type SessionUsageRow = { session: string; cpu: number | null; cpuShare: number; memory: number; memoryShare: number; overSince: string | null };
@@ -278,12 +278,12 @@ export default function WorkersPage({ work, observedAt, setSelected, setView, to
   const openCount = view.running.length - stale;
   const table = (rows: WorkerRow[], label: string) => <Table rows={rows} label={label} work={work} now={now} release={release} open={open} setOpen={setOpen} token={token} setSelected={setSelected} setView={setView}/>;
   const cpu = status?.cpu as { avg60: number | null; steal: number | null; celsius?: number | null; testBudget?: number | null; trialCap?: { now: number; full: number } | null; waiting?: boolean | null } | null | undefined;
-  // GY-3401: each new session's share of test parallelism, and the trial cap — halved while the CPU is hot.
+  // GY-3401: each new session's share of test parallelism, and how many test merges run at once — halved while the CPU is hot.
   // GY-3416: and the guard's own word while it holds every new launch.
   const cpuFigures = cpu ? [cpu.avg60 === null ? null : `Host CPU pressure ${Math.round(cpu.avg60)}% · steal ${cpu.steal === null ? '—' : `${Math.round(cpu.steal)}%`}`,
     cpu.celsius == null ? null : `${cpu.avg60 === null ? 'Host CPU ' : ''}temperature ${Math.round(cpu.celsius)}°C`,
     cpu.testBudget == null ? null : `${cpu.testBudget} test workers per session`,
-    cpu.trialCap ? `trials ${cpu.trialCap.now < cpu.trialCap.full ? `${cpu.trialCap.now} of ${cpu.trialCap.full}` : cpu.trialCap.full}` : null,
+    cpu.trialCap ? `${cpu.trialCap.now < cpu.trialCap.full ? `${cpu.trialCap.now} of ${cpu.trialCap.full}` : cpu.trialCap.full} test merges at once` : null,
     cpu.waiting ? 'launches waiting' : null].filter(Boolean).join(' · ') : '';
   return <>
     <PageHeader title="Workers" fact={`${openCount} agent ${openCount === 1 ? 'session' : 'sessions'} open.${stale ? ` ${stale} not seen recently.` : ''} ${view.finished.length} ended.`}>

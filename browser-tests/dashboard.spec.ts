@@ -778,12 +778,12 @@ test('the Tests panel lists each criterion proof with its result from the merge 
   // GY-3392: the trials fold with the gate detail, under Technical details.
   await technicalDetails(page);
   const panel = itemPage(page).locator('section[aria-label="Tests"]');
-  await expect(panel.getByText(/Merge trial of eeeeeeee: build passed · 12 test files ran/)).toBeVisible();
+  await expect(panel.getByText(/Test merge of eeeeeeee: build passed · 12 test files ran/)).toBeVisible();
   await expect(panel.getByText('1 of 2 passed on the current head')).toBeVisible();
   await expect(panel.locator('[data-case="a"]')).toContainText('✓ passed unit:a · AC-1');
-  await expect(panel.locator('[data-case="a"]')).toContainText('2 executed in the merge trial');
+  await expect(panel.locator('[data-case="a"]')).toContainText('2 executed in the test merge');
   await expect(panel.locator('[data-case="b"]')).toContainText('× failed integration:b · AC-1');
-  await expect(panel.locator('[data-case="b"]')).toContainText('1 executed in the merge trial · 1 failed');
+  await expect(panel.locator('[data-case="b"]')).toContainText('1 executed in the test merge · 1 failed');
   // Without a trial of the head nothing has judged the proofs yet.
   await page.getByRole('button', { name: 'Sign out' }).click();
   await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [item(null)], now: '2026-01-01T00:00:00Z' } }));
@@ -793,5 +793,5 @@ test('the Tests panel lists each criterion proof with its result from the merge 
   const waiting = itemPage(page).locator('section[aria-label="Tests"]');
   await expect(waiting.locator('[data-case="a"]')).toContainText('○ not run yet unit:a');
   await expect(waiting.locator('[data-case="b"]')).toContainText('○ not run yet integration:b');
-  await expect(waiting.getByText(/Merge trial of/)).toHaveCount(0);
+  await expect(waiting.getByText(/Test merge of/)).toHaveCount(0);
 });

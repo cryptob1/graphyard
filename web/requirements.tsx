@@ -24,7 +24,7 @@ export default function RequirementsEditor({ item, all, api, onSaved }: {
     } catch (e) { if (alive.current) setError((e as Error).message); }
     finally { if (alive.current) setBusy(false); }
   }}>
-    <p className="notice">This creates a new policy revision. All acceptance evidence and review authorization must be refreshed. A submitted implementation requires a new attempt. A revision under a live worker lease is queued: the worker's next sync shows the changed criteria, and its completion waits for that sync.</p>
+    <p className="notice">This creates a new policy revision. All acceptance evidence and review authorization must be refreshed. A submitted implementation requires a new attempt. A revision while a worker holds the item waits for that worker's next sync: the sync shows the changed criteria, and its completion waits for it.</p>
     <label>Why it helps users<input name="why" maxLength={300} defaultValue={item.why ?? ''}/></label>
     <label>Why it is the simplest thing that works<input name="simplest" maxLength={300} defaultValue={item.simplest ?? ''}/></label>
     <label>Description<textarea name="description" rows={4} maxLength={20000} defaultValue={item.description}/></label>

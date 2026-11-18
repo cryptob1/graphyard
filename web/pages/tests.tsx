@@ -164,7 +164,7 @@ type TestsViewMode = 'matrix' | 'cases';
 export interface MatrixFilter { failing: boolean; category: string; column: MatrixColumn | 'all'; required?: 'all' | 'required' | 'optional' }
 const allPlaces: MatrixFilter = { failing: false, category: 'all', column: 'all', required: 'all' };
 const places: Record<MatrixColumn, { label: string; place: string }> = {
-  trial: { label: 'Trial', place: 'the latest merge trial that ran it' }, main: { label: 'Main', place: 'the batch gate on main' },
+  trial: { label: 'Test merge', place: 'the latest test merge that ran it' }, main: { label: 'Main', place: 'the batch gate on main' },
   served: { label: 'Served', place: 'runs against the release this install serves' }, nightly: { label: 'Nightly', place: 'the daily full run' },
 };
 const ago = (at: string) => {
@@ -217,7 +217,7 @@ export function MatrixView({ cases, filter, setFilter, collapsed, toggle, openIt
   return <>
     <p className="matrix-summary" data-summary="">{inCategory.length} {inCategory.length === 1 ? 'case' : 'cases'} · {inCategory.filter(entry => entry.e2e?.required).length} required · {states.filter(state => state === 'pass').length} passing · {states.filter(state => state === 'fail').length} failing · {states.filter(state => state === 'none').length} not run{filter.column === 'all' ? '' : ` in ${places[filter.column].label}`}</p>
     {categories.length > 0 && <CoverageGrid cases={kept} categories={categories} filter={filter} setFilter={setFilter}/>}
-    <details className="matrix-help"><summary>How this works</summary><p>Trial is the merge trial, which runs an item's bound cases against its candidate merged onto main before it lands. Main is the batch gate, which runs the merged batch's cases on main's tip before anything serves it, and Served is a <code>graphyard e2e run</code> against the release this install serves. Nightly is the daily full run of every case on the last verified commit, which never blocks a merge.</p></details>
+    <details className="matrix-help"><summary>How this works</summary><p>Test merge runs an item's bound cases against its candidate merged onto main before it lands. Main is the batch gate, which runs the merged batch's cases on main's tip before anything serves it, and Served is a <code>graphyard e2e run</code> against the release this install serves. Nightly is the daily full run of every case on the last verified commit, which never blocks a merge.</p></details>
     <div className="case-filters" role="group" aria-label="Filter the matrix">
       <Chip on={filter.failing} onClick={() => setFilter({ ...filter, failing: !filter.failing })}>Only failing</Chip>
       {(['all', 'required', 'optional'] as const).map(value => <Chip key={value} on={required === value} onClick={() => setFilter({ ...filter, required: value })}>{value === 'all' ? 'Required and optional' : value === 'required' ? 'Required' : 'Optional'}</Chip>)}</div>
@@ -255,7 +255,7 @@ export function TestsView({ data, error, loading, filter, setFilter, item = '', 
   return <section className="tests-page" aria-label="Tests">
     <PageHeader title="Tests" fact={data ? total ? `${failing ? `${failing} failing` : 'Nothing failing'}${flaky ? ` · ${flaky} flaky` : ''} · ${total} ${total === 1 ? 'proof' : 'proofs'} tracked.` : 'Nothing is tested yet.' : error ? 'Tests could not be read.' : 'Reading tests…'}
       actions={canEdit && setView && <button type="button" onClick={() => setView('scenarios')}>Define test cases</button>}>
-      Every proof an item must pass, with the item and criterion it proves and its latest trusted result. A result is recorded only from a trusted run bound to its commit; a builder cannot record one.</PageHeader>
+      Every proof an item must pass, with the item and criterion it proves and its latest trusted result. A result is recorded only from a trusted run bound to its commit; a worker cannot record one.</PageHeader>
     {error && <div role="alert" className="notice danger">{error} <button type="button" disabled={loading} onClick={retry}>Retry loading tests</button>{data ? <p>Previously loaded results are shown; they may be stale.</p> : null}</div>}
     {loading && !data && <p role="status">Loading tests…</p>}
     {data?.environments?.length ? <WhereTestsRun environments={data.environments}/> : null}

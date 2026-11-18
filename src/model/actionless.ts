@@ -59,12 +59,12 @@ export function actionlessCards(work: Work[], now: number): ActionlessCard[] {
         : live && failing!.name === 'build' ? item.lease!.owner
           : window ? `its observation window, which closes at ${window.notBefore}`
           : deferredRefusal(refusal) ? refusal.match(/^Dependency (\S+)|: (\S+) is ahead$|^Waiting for (\S+)/)?.slice(1).find(Boolean) ?? 'another item'
-            : step?.fresh && mergeWriterRefusal(failing!.name, refusal) ? `the merge writer's trial (${step.step})`
+            : step?.fresh && mergeWriterRefusal(failing!.name, refusal) ? `its test merge (${step.step})`
             : queued.has(item.id) && mergeWriterRefusal(failing!.name, refusal) ? queuedSentence(queued.get(item.id)!) : null;
       const missing = refusal === undefined ? failing ? `Its ${failing.name} step reports a problem without saying what it is`
           : 'Nothing has been checked about it yet'
           : step && !step.fresh && mergeWriterRefusal(failing!.name, refusal)
-            ? `${plainReason(refusal, failing!.name, now).text}; its trial last ran ${step.step}`
+            ? `${plainReason(refusal, failing!.name, now).text}; its test merge last ran ${step.step}`
             : plainReason(refusal, failing!.name, now).text;
       return { item, gate: failing?.name ?? null, heldSince: item.stageEnteredAt, movedBy, missing };
     })

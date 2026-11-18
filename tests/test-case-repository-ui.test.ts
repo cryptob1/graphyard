@@ -91,22 +91,22 @@ test('integration:item-tests-panel — a Tests panel lists every criterion proof
   const html = renderToStaticMarkup(createElement(TestCasesView, { item: trialledItem(), registry: null, now: new Date(NOW) }));
   const row = (id: string) => text(new RegExp(`<li data-case="${id}">([\\s\\S]*?)</li>`).exec(html)![1]);
   assert.match(text(html), /Tests 1 of 2 passed on the current head/);
-  assert.match(text(html), /Merge trial of dddddddd ?: build passed · 12 test files ran/);
+  assert.match(text(html), /Test merge of dddddddd ?: build passed · 12 test files ran/);
   assert.match(row('a'), /✓ passed unit:a · AC-1/);
-  assert.match(row('a'), /2 executed in the merge trial/);
+  assert.match(row('a'), /2 executed in the test merge/);
   assert.match(row('b'), /× failed integration:b · AC-1/);
-  assert.match(row('b'), /1 executed in the merge trial · 1 failed/);
+  assert.match(row('b'), /1 executed in the test merge · 1 failed/);
   // A trial of an older head is no result on this one; without a trial every proof is still owed.
   const older = trialledItem(); older.mergeLedger!.trial!.head = old;
   const waiting = renderToStaticMarkup(createElement(TestCasesView, { item: older, registry: null, now: new Date(NOW) }));
-  assert.doesNotMatch(waiting, /Merge trial of/);
+  assert.doesNotMatch(waiting, /Test merge of/);
   assert.match(text(waiting), /0 of 2 passed on the current head.*○ not run yet unit:a.*○ not run yet integration:b/);
   const untried = { ...trialledItem(), mergeLedger: null } as Work;
   assert.match(text(renderToStaticMarkup(createElement(TestCasesView, { item: untried, registry: null, now: new Date(NOW) }))), /○ not run yet unit:a · AC-1.*○ not run yet integration:b · AC-1/);
   // A trial that counted none of a proof's cases has judged nothing yet.
   const countedNone = trialledItem(); countedNone.mergeLedger!.trial!.proofs['integration:b'] = { executed: 0, failed: 0 };
   const none = renderToStaticMarkup(createElement(TestCasesView, { item: countedNone, registry: null, now: new Date(NOW) }));
-  assert.match(text(new RegExp(`<li data-case="b">([\\s\\S]*?)</li>`).exec(none)![1]), /○ not run yet integration:b · AC-1 0 executed in the merge trial/);
+  assert.match(text(new RegExp(`<li data-case="b">([\\s\\S]*?)</li>`).exec(none)![1]), /○ not run yet integration:b · AC-1 0 executed in the test merge/);
 });
 
 const at = (seq: number, result: ScenarioRun['result'], sha = head, extra: Partial<ScenarioRun> = {}): ScenarioRun => ({ seq, scenarioId: 'checkout-pays', proof: 'e2e:checkout-pays', result, scenarioRevision: 1, environment: 'staging', executed: 4, skipped: result === 'skipped' ? 1 : 0,

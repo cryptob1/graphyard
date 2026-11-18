@@ -46,7 +46,7 @@ path for a refused reviewer launch once its cause is fixed. Never approve a cand
 yourself, and never submit evidence.
 
 Keep cycling: status, dispatch ready work, shepherd review, record what the merge
-writer's trial and push landed. Repeat until both conditions hold:
+writer's test merge and push landed. Repeat until both conditions hold:
 (1) every in-scope item is Done or has a genuinely external blocker recorded in
 Graphyard; and (2) the release health line in \`master status\` is healthy, or a
 genuinely external deployment blocker is recorded in Graphyard as a follow-up work item.
@@ -59,7 +59,7 @@ Items are system-driven unless created with \`"systemDriven": false\`: for them
 hand actions, naming the loop step. The loop drives an item created \`"systemDriven": false\`
 the same way; opting out only also allows the hand actions, so check master status
 for the loop's pending step before taking one and never request a second.
-The control plane merges: the loop's merge writer trial-merges a submitted head whose
+The control plane merges: the loop's merge writer test-merges a submitted head whose
 gates pass, runs its proofs and pushes it to the base branch with its deploy key. GitHub
 merges nothing and no pull request is opened. A merge of a head whose gates had not passed is held
 as a violation; file the follow-up that re-verifies what it skipped.
