@@ -1,0 +1,13 @@
+{
+  "id": "confined-git-ssh-config",
+  "title": "A confined coordinator fetches its non-default base branch over SSH despite foreign-owned system ssh includes",
+  "description": "Under real bubblewrap, with a root-owned file in /etc/ssh/ssh_config.d that the user namespace reads as owned by nobody: the confined session fetches graphyard-main from a fixture SSH origin with the merge writer's deploy-key environment, real ssh resolves its configuration with host-key checking at accept-new, verification runs on the fetched base, and the loop's fetch-refusal line names an ssh configuration ownership refusal as that host fault rather than a SAML or deploy-key authorization failure.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "confined git ssh config",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/confined-git-ssh-config.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

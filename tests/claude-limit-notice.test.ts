@@ -99,7 +99,7 @@ test('unit:claude-limit-wordings-recognised — Claude\'s session, usage and Fab
     environments: [{ name: 'claude-a', kind: 'claude', home: join(root, 'claude-a') }, { name: 'claude-b', kind: 'claude', home: join(root, 'claude-b') }],
   }) as MasterConfig;
   const fleet = memoryRegistry('machine-a', now, ['claude-a', 'claude-b'].map(name => ({ name, runtime: 'claude', home: join(root, name) })), ['claude-a', 'claude-b']);
-  await recordObservedExhaustion(config, 'claude-a', { at: new Date(now).toISOString(), resetsAt: fableSignal.resetsAt, reason: fableSignal.reason, role: 'worker', profile: 'builder', work: 'GY-48' }, now, { registry: fleet.client });
+  await recordObservedExhaustion(config, 'claude-a', { at: new Date(now).toISOString(), resetsAt: fableSignal.resetsAt, reason: fableSignal.reason, role: 'worker', profile: 'builder', work: 'GY-48' }, now, { registry: fleet.client, smoke: async () => ({ ok: false, error: `Usage limit reached; resets at ${fableSignal.resetsAt}` }) });
   const document = await fleet.client.document();
   const quota = (name: string) => document.accounts.find(account => account.name === name)!.quota;
   assert.deepEqual([quota('claude-a').state, quota('claude-a').resetsAt], ['exhausted', fableSignal.resetsAt], 'the registry holds the account until the Fable reset');

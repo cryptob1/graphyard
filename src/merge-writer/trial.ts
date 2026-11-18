@@ -1317,18 +1317,20 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     if (input.e2eProofs?.length) {
       enter('tests');
       enterStep('tests: e2e');
-      const added = input.e2eFrom ? String(await run('git', ['-C', worktree, 'diff', '--name-only', '--diff-filter=A', '-z', input.mergeSha, input.e2eFrom], { timeoutMs: remaining() })).split('\0').filter(Boolean) : [];
-      if (added.length) await run('git', ['-C', worktree, 'checkout', input.e2eFrom!, '--', ...added], { timeoutMs: remaining() });
+      // Run the candidate's proof against the base application, including edited cases and assertion scripts.
+      const overlay = input.e2eFrom ? String(await run('git', ['-C', worktree, 'diff', '--name-only', '-z', input.mergeSha, input.e2eFrom, '--', 'e2e/', 'tests/'], { timeoutMs: remaining() })).split('\0').filter(Boolean) : [];
+      if (overlay.length) await run('git', ['-C', worktree, 'restore', '--source', input.e2eFrom!, '--staged', '--worktree', '--', ...overlay], { timeoutMs: remaining() });
       const cpuBefore = cpu.sample();
       const ran = await containerTrialE2e({
         worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper, origins: input.e2eOrigins,
         networkWrapper: boundary, runDirectory: input.runDirectory,
         scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
-      }).catch(async error => { throw await networkPoolFault(error, env) ?? error; });
+      }).catch(async error => { throw await networkPoolFault(error, env) ?? error; }).finally(async () => {
+        // Restore both edited and added proof files before any later base checks.
+        if (overlay.length) await run('git', ['-C', worktree, 'restore', '--source', input.mergeSha, '--staged', '--worktree', '--', ...overlay], { timeoutMs: remaining() });
+      });
       const failures = ran.filter(entry => entry.failed);
       cpu.finish(stepLabel, cpuBefore, failures.length > 0 && failures.every(entry => /timed?\s*out|did not answer .* within \d+s|timeout/i.test(entry.failingStep ?? '')), line => log.push(line));
-      // The laid-over files served the cases only: the checks that follow test the base tip as it is.
-      if (added.length) await run('git', ['-C', worktree, 'rm', '-q', '-f', '--', ...added], { timeoutMs: remaining() });
       // GY-3180: a browser or runner that could not start judged nothing, so unless a case failed a step the trial ends with no verdict, as any host failure does.
       const host = ran.find(entry => entry.hostFailure);
       if (host && !ran.some(entry => entry.executed && entry.failed)) throw runnerFailure('tests', { ok: false, out: '', status: null, signal: null, cause: `e2e case ${host.case}: ${host.failingStep}` });

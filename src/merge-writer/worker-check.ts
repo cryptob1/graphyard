@@ -13,10 +13,11 @@ export async function runWorkerCheck(input: { root: string; base: string; baseBr
   const git = async (...args: string[]) => (await defaultChildRun('git', ['-C', input.root, ...args])).trim();
   const baseTip = await git('merge-base', `refs/remotes/origin/${input.baseBranch}`, input.head).catch(() => git('merge-base', input.baseBranch, input.head));
   const changedFiles = (await git('diff', '--name-only', '--no-renames', baseTip, input.head)).split('\n').filter(Boolean);
+  // GY-3447: a worker's own check takes no host heavy-job slot; the trial load cap bounds it. GY-3446: under a host strict cap it does.
   const verdict = await withHeavyJob(`worker check ${input.key} ${input.check}`, () => (input.trial ?? runTrial)({
     root: input.root, base: input.base, mergeSha: input.head, baseTip, changedFiles, timeoutMs: workerVerificationTimeoutMs,
     key: input.key, retries: 0, secretScan: false, only: input.check, hidden: trialHiddenPaths(undefined),
-  }));
+  }), { strictOnly: true });
   const passed = verdict.build === 'pass' && verdict.tests.failed.length === 0;
   return { check: input.check, head: input.head, passed, output: verdict.logTail };
 }

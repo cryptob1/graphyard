@@ -8,7 +8,7 @@ import { unownedFamilySql } from './store/tables/work.js';
 import { registryRoles, RegistryError, chooseSession, emptyRegistry, fleetView, foldObservations, liveSessions, endRegistrySession, runOutcomes, refusalHistoryLimit, settleSessions, type AgentRegistry as RegistryDocument, type FleetSession, type RegistryMutation } from './model/registry.js';
 import { applyRegistryMutation, registryMutationSchemas, observationRequestSchema, selectionRequestSchema } from './model-boundary/registry.js';
 import { implementerProvider, type ReviewDiversity } from './model/review-diversity.js';
-import { holdLimitNoticeAccount } from './model/account-quota.js';
+import { requestLimitNoticeCheck } from './model/account-quota.js';
 
 /**
  * The agent registry as control-plane state.
@@ -77,14 +77,11 @@ const appendRegistry = async (db: Pick<pg.PoolClient, 'query'>, actor: Principal
   return removedRoles.length ? [`Removed retired roles: ${removedRoles.join(', ')}`] : [];
 };
 
-/**
- * A session ended on its provider's limit notice (GY-3096): the account it spent is marked exhausted
- * in the registry, with the notice and its reset, inside the caller's transaction that records the
- * exhaustion on the item — so no selection by any loop, restarted or not, hands it out before the reset.
- */
-export async function recordLimitNoticeHold(db: Pick<pg.PoolClient, 'query'>, actor: Principal, notice: Parameters<typeof holdLimitNoticeAccount>[1], now: Date) {
+/** Persist a session's request for a live account check in the caller's transaction.
+ * Provider I/O runs later on the host, outside the coordination transaction. */
+export async function recordLimitNoticeCheck(db: Pick<pg.PoolClient, 'query'>, actor: Principal, notice: Parameters<typeof requestLimitNoticeCheck>[1], now: Date) {
   const registry = await readRegistry(db), at = now.toISOString();
-  const account = holdLimitNoticeAccount(registry, notice, { actor: actor.id, at });
+  const account = requestLimitNoticeCheck(registry, notice, { actor: actor.id, at });
   if (!account) return null;
   registry.revision++; registry.updatedAt = at;
   await appendRegistry(db, actor, 'observed', registry, { limitNotice: { account, work: notice.work, role: notice.role, reason: notice.reason, resetsAt: notice.resetsAt } });

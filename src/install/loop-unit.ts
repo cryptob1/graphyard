@@ -1,6 +1,7 @@
 // Concern: the master loop's own supervisor unit — unit text, installLoopSupervisor, alignLoopUnit,
 // the durable-checkout preflight and test home guard — and, from inside the running loop, detecting
 // that unit and telling a self-restart that succeeded from one that failed (GY-916).
+import { controlPlaneWeight, sessionWeight } from '../session-share.js';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
@@ -266,6 +267,8 @@ KillSignal=SIGTERM
 StandardOutput=journal
 StandardError=journal
 NoNewPrivileges=yes
+# GY-3438: the loop outweighs every agent session (CPUWeight ${sessionWeight}), so it keeps deciding under full load.
+CPUWeight=${controlPlaneWeight}
 # No PrivateTmp: producer sessions run in Herdr, outside this unit, and create their detached proof
 # worktrees under the shared /tmp. A private /tmp would hide every one of them from the loop.
 PrivateTmp=no

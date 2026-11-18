@@ -60,6 +60,6 @@ test('unit:agy-session-works-confined — a confined agy session reads its login
   assert.match(silent.error!, /started but gave no answer/);
 
   // agy accounts are smoke-tested before a session is chosen on them.
-  const agy = { launch: { kind: 'agy' } } as any, fresh = { enabled: true, smoke: null } as any;
+  const agy = { launch: { kind: 'agy' } } as any, fresh = { enabled: true, smoke: null, quota: { state: 'unknown', loggedIn: null } } as any;
   assert.equal(needsSmoke(fresh, agy), true);
 });

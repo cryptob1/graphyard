@@ -1,0 +1,9 @@
+{
+  "id": "owner-relayed-answer",
+  "title": "The owner answers through an agent and can reverse the relay on the dashboard",
+  "description": "A real CLI and control plane park a goals-and-priorities request, refuse an agent answer without --owner-said, record Not yet with --decline, and remove it from Needs you. The same CLI relays a human-proof answer. The signed-in owner sees both attributed quotes and reverses each from the dashboard; history preserves both answers. Fails on the base tip because --owner-said is refused.",
+  "tags": ["api", "dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Relay owner decisions and reverse them in the dashboard", "run": "node --import tsx --test tests/owner-relayed-answer.test.ts", "timeoutSeconds": 120 }]
+}

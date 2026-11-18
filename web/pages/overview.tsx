@@ -68,7 +68,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
     && (release.unserved.has(w.key) || release.failed.has(w.key) || mergedAt(w) > release.observedAt!)).length;
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} queue={queues.get(w.id)} repository={status?.repository} now={now} onOpen={setSelected} release={release} busy={busy} onPriority={mayChangePriority(status?.actor) ? priority => { void action(w.id, 'priority', { priority, source: 'dashboard' }); } : undefined}/>;
   const shown = (group: OpenGroup) => !only || only === group;
-  const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`panel work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
+  const section = (group: OpenGroup, note?: string) => shown(group) && (byGroup[group].length > 0 || (group === 'needs-you' && only === group)) && <section key={group} className={`panel work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
     <h2><GroupDot group={group}/>{groupLabel[group]} <span className="count">{byGroup[group].length}</span>{note && <small>{note}</small>}{group === 'needs-you' && <button type="button" className="text-button push" onClick={() => setView('needs-you')}>Every request and answer →</button>}</h2>
     {group === 'moving' && <div className="row-head" aria-hidden="true"><span/><span/><span className="row-steps"><StepNames/></span><span>Who acts next</span><span>In step</span></div>}
     <div className="rows">{byGroup[group].map(w => row(w, group))}</div>

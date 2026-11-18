@@ -31,6 +31,7 @@ import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterion
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { cpuPressureHeld, trialCapNow } from './cpu-pressure.js';
+import { standingLimit } from '../master/profiles.js';
 import { reportTrialHostFault, reportTrialImageFault, reportTrialNetworkFault, reportTrialSandboxFault } from './control-plane.js';
 import { reworkReasonMax } from './rework.js';
 import type { Cycle } from './cycle.js';
@@ -46,7 +47,7 @@ export interface MergeWriterReads extends MergePorts {
   admit?(): boolean;
   /** GY-3328: provisions the image trials run when this host lacks it, before a detached trial launches (install/trial-image.ts `ensureTrialImage`); absent, nothing is provisioned. */
   ensureTrialImage?(): Promise<void>;
-  /** GY-3304: the host's heavy-work drain (`master drain`), or null; while it stands no new merge, revert or batch-gate trial starts. Absent, never drained. */
+  /** GY-3304: the host's heavy-work drain (`master drain`), or null; while it stands no new merge or revert trial, nor the diagnostics, starts (GY-3450: the batch gate does). Absent, never drained. */
   drain?(): HeavyDrain | null;
   /** GY-3120: how many queued heads are trialled at once, each alone on the current tip (`run.mergeWriter.parallel`); absent, one. */
   parallel?: number;
@@ -105,8 +106,8 @@ const output = (error: unknown) => { const failed = error as { stdout?: unknown;
  * detached — is one heavy job of the host: it waits here for a slot of the budget every Graphyard
  * project on the host shares, naming the holders as its step, before anything of it starts.
  */
-export const heavyTrial = <T>(key: string, onStep: ((step: string) => void) | undefined, signal: AbortSignal | undefined, trial: () => Promise<T>, until?: AbortSignal) =>
-  withHeavyJob(`merge trial ${key}`, trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal, until });
+export const heavyTrial = <T>(key: string, onStep: ((step: string) => void) | undefined, signal: AbortSignal | undefined, trial: () => Promise<T>, until?: AbortSignal, gate?: boolean) =>
+  withHeavyJob(`merge trial ${key}`, trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal, until, reserved: gate });
 
 /**
  * The reads over the coordinator checkout `root` (its object store holds every submitted head,
@@ -1004,7 +1005,8 @@ export async function mergeWriterStep(cycle: Cycle) {
   // GY-3182: a slot free beside running flights starts the next due head now, without waiting for them
   // to settle; the heads they carry are out of the queue and their open intents out of the reconcile.
   // GY-3401: at the CPU temperature limit, half the cap; the figures ride the CPU reading to master status and the Workers page.
-  const fullCap = trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory));
+  // GY-3446: a temporary trialCap the master set lowers it until it expires.
+  const fullCap = Math.min(trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory)), standingLimit(cycle.config?.run.trialCap, cycle.now()) ?? Infinity);
   const parallel = trialCapNow(state, fullCap);
   if (state.cpuPressure) state.cpuPressure.trialCap = { now: parallel, full: fullCap };
   const gateSlots = batchGateBusySlots(state);

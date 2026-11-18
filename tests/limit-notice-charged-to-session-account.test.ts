@@ -7,7 +7,7 @@ import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
 import { observedExhaustions, recordEnvironmentLog, recordObservedExhaustion, selectionKey } from '../src/master/environments.js';
 import type { MasterConfig } from '../src/master/profiles.js';
 import { holdRepeatedLimitAccount, sessionAccount } from '../src/master/launch-account.js';
-import type { AgentRegistry } from '../src/model/registry.js';
+import { proposedRuntimes, type AgentRegistry } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3100: a claude-c session's "Usage limit reached" held opencode-c — the profile's latest
@@ -30,11 +30,11 @@ test('unit:limit-notice-charged-to-session-account — a notice holds only its s
   assert.equal(await sessionAccount(root, config, 'worker', 'builder', { work: 'GY-9', epoch: 1 }), null, 'a session with no selection of its own is charged to no other launch\'s account');
 
   // The hold stands until an operator sets the account available after it in the registry; a notice printed before that is never re-applied.
-  const registry = (state: 'available' | 'exhausted', observedAt: number, source: 'operator' | 'probe' = 'operator') => ({ runtimes: [], accounts: [{ name: 'opencode-c', credential: { host: 'host-a', home: null },
+  const registry = (state: 'available' | 'exhausted', observedAt: number, source: 'operator' | 'probe' = 'operator') => ({ runtimes: proposedRuntimes, models: [], accounts: [{ name: 'opencode-c', runtime: 'opencode', credential: { host: 'host-a', home: null },
     quota: { loggedIn: true, state, usage: [], resetsAt: null, reason: null, observedAt: iso(observedAt), observedBy: 'master', source } }] }) as unknown as AgentRegistry;
   const observed: unknown[] = [];
   const client = (document: AgentRegistry) => ({ document: async () => document, observe: async (request: unknown) => { observed.push(request); return document; } }) as never;
-  const hold = await recordObservedExhaustion(config, 'opencode-c', { at: iso(now - 10_000), resetsAt: null, reason: 'Usage limit reached', role: 'worker', profile: 'builder', work: 'GY-2' }, now - 10_000, { registry: client(registry('exhausted', now - 10_000, 'probe')) });
+  const hold = await recordObservedExhaustion(config, 'opencode-c', { at: iso(now - 10_000), resetsAt: null, reason: 'Usage limit reached', role: 'worker', profile: 'builder', work: 'GY-2' }, now - 10_000, { registry: client(registry('exhausted', now - 10_000, 'probe')), smoke: async () => ({ ok: false, error: 'Usage limit reached' }) });
   assert.equal(observed.length, 1, 'the notice is reported to the registry');
   assert.equal(await releasedSince(config, 'opencode-c', hold.at, client(registry('available', now - 20_000))), false, 'an operator mark older than the hold does not release it');
   assert.equal(await releasedSince(config, 'opencode-c', hold.at, client(registry('available', now, 'probe'))), false, 'a probe is not an operator release');
@@ -48,10 +48,10 @@ test('unit:limit-notice-charged-to-session-account — a notice holds only its s
     recordedBy: 'loop', owner: null, runtime: 'opencode', partialWork: { state: 'not-applicable' as const, detail: 'n/a' } });
   const work = { key: 'GY-2', epoch: 2, capacity: { spent: [], exhaustions: [exhaustion(1, now - 20_000), exhaustion(2, now - 10_000)] } };
   observed.length = 0;
-  assert.equal(await holdRepeatedLimitAccount(config, work as any, now, { registry: released }), null);
+  assert.equal(await holdRepeatedLimitAccount(config, work as any, now, { registry: released, smoke: async () => ({ ok: false, error: 'Usage limit reached' }) }), null);
   assert.equal(observed.length, 0, 'nothing is reported');
   const later = { ...work, epoch: 3, capacity: { spent: [], exhaustions: [...work.capacity.exhaustions, exhaustion(3, now + 5_000)] } };
-  assert.ok(await holdRepeatedLimitAccount(config, later as any, now + 6_000, { registry: released }), 'a fresh notice after the release holds it again');
+  assert.ok(await holdRepeatedLimitAccount(config, later as any, now + 6_000, { registry: released, smoke: async () => ({ ok: false, error: 'Usage limit reached' }) }), 'a fresh notice after the release holds it again');
   assert.equal(observed.length, 1);
 
   // GY-3302: a free model's allowance spends the account that runs it (hwd-backend retried one across six items).
