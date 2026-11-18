@@ -9,7 +9,8 @@
 // page into it and reports it back, so every install on the machine shows the same link. Servers
 // never read that directory. Optionally the owner saves a Tailscale API token there (0600, sealed to
 // the host in the browser, never read back): the host then makes one single-use device invite per invite.
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -57,11 +58,12 @@ export function shareState(link: ShareLink | null | undefined, now: number): Sha
   return { ...link, state: expires <= now ? 'expired' : expires - now <= shareRefreshMs ? 'refresh' : 'ok' };
 }
 
-const tailscaleJson = (args: string[]) => JSON.parse(execFileSync('tailscale', args, { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }));
+/** The loop asks every pass, so a slow tailscale never blocks it: bounded, and off the event loop. */
+const tailscaleJson = async (args: string[]) => JSON.parse((await promisify(execFile)('tailscale', args, { encoding: 'utf8', timeout: 10_000 })).stdout);
 /** This host's Tailscale node from `tailscale status --json`; no Tailscale, or one not running, is no tailnet (the install carries on locally). */
 export async function readTailnet(): Promise<{ dnsName: string | null; ip: string | null; deviceId: string | null } | null> {
   try {
-    const self = tailscaleJson(['status', '--json'])?.Self;
+    const self = (await tailscaleJson(['status', '--json']))?.Self;
     if (!self || self.Online === false) return null;
     const ip = Array.isArray(self?.TailscaleIPs) ? self.TailscaleIPs.find((address: unknown) => typeof address === 'string' && /^\d+\.\d+\.\d+\.\d+$/.test(address)) ?? null : null;
     const deviceId = typeof self?.ID === 'string' && self.ID ? self.ID : null;
@@ -73,9 +75,9 @@ export async function readTailnet(): Promise<{ dnsName: string | null; ip: strin
  * targets the server's loopback PORT (`up` serves `--http=PORT`; an owner may serve `:8447` over HTTPS
  * instead), from `tailscale serve status --json`. HTTPS wins when both serve it; null when nothing does.
  */
-export function servedUrl(port: string): string | null {
+export async function servedUrl(port: string): Promise<string | null> {
   let config: { TCP?: Record<string, { HTTPS?: boolean }>; Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }> };
-  try { config = tailscaleJson(['serve', 'status', '--json']) ?? {}; } catch { return null; }
+  try { config = await tailscaleJson(['serve', 'status', '--json']) ?? {}; } catch { return null; }
   const targets = (proxy?: string) => { try { return new URL(proxy!).port === port; } catch { return false; } };
   const urls = Object.entries(config.Web ?? {}).filter(([, web]) => Object.values(web?.Handlers ?? {}).some(handler => targets(handler?.Proxy))).map(([address]) => {
     const https = !!config.TCP?.[address.slice(address.lastIndexOf(':') + 1)]?.HTTPS;

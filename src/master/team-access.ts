@@ -25,7 +25,7 @@ export async function syncTeamAccess(config: Pick<MasterConfig, 'url' | 'credent
   if (work.token?.remove) await rm(tokenFile, { force: true });
   else if (work.token?.sealed) await atomicPrivateText(tokenFile, `${unsealToHost(privateKey, work.token.sealed).trim()}\n`);
   // GY-3480: the node and the address serving this install come from the tailscale CLI on every pass, not from what up once recorded.
-  const machine = { ...await readMachine(dir), ...await readTailnet() }, url = servedUrl(new URL(config.url).port || '80'), tokenSaved = await stat(tokenFile).then(() => true, () => false);
+  const machine = { ...await readMachine(dir), ...await readTailnet() }, url = await servedUrl(new URL(config.url).port || '80'), tokenSaved = await stat(tokenFile).then(() => true, () => false);
   for (const invite of work.deviceInvites) {
     const result = await (async () => {
       if (!tokenSaved) return { error: 'No Tailscale API token is saved on this machine' };
