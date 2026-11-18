@@ -467,6 +467,8 @@ html:not([data-theme='daylight']) .work-row.glitch{animation:gy-glitch 2.2s infi
 .trust-strip,.shipped-strip{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0;font-size:var(--type-small);color:var(--text-2);white-space:nowrap}
 .trust-strip .mono,.shipped-strip .mono{color:var(--text)}
 .palette-button{display:inline-flex;align-items:center;gap:4px;min-height:30px;padding:2px 10px;font-size:var(--type-small);font-weight:500;background:var(--raised);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-2)}
+.open-app{display:inline-flex;align-items:center;min-height:30px;padding:2px 12px;font-size:var(--type-small);font-weight:600;background:var(--accent);color:var(--on-accent);border-radius:var(--radius);text-decoration:none}
+.where-it-runs .facts{margin:0}.where-it-runs .facts dd{overflow-wrap:anywhere}
 .palette-button:hover{color:var(--text);border-color:var(--accent)}
 kbd{font-family:var(--font-mono);font-size:11px;color:var(--text);background:var(--raised);border:1px solid var(--border);border-bottom-width:2px;border-radius:4px;padding:1px 5px}
 /* The command palette and the shortcut sheet (GY-3272): the modal's shape, sized for their content. */

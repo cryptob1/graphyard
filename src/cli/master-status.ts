@@ -32,6 +32,7 @@ import { stoppedRoles, type StoppedRole } from '../master/stopped-roles.js';
 import { deliverySpeed, type MergedItem, type SpeedEvent } from '../pipeline-speed.js';
 import { unspecifiedModel, type FleetView } from '../model/registry.js';
 import { observeApplications } from '../production-watch.js';
+import { appRelease } from '../app-url.js';
 import { applicationAttention, reworkAttention } from '../master/attention.js';
 import { trialFloorAttention } from '../merge-writer/trial-load.js';
 import { parkedOnHuman } from '../model/human-request.js';
@@ -114,7 +115,10 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   let declared: ReturnType<typeof loadProjectDelivery>['applications'] = [];
   try { declared = loadProjectDelivery({}, root).applications; } catch { /* an unparseable graphyard.json declares nothing to observe */ }
   const observed = await observeApplications(declared, report.main, args => Promise.resolve(run('git', ['-C', root, ...args])).then(String));
-  const applications = observed.map(app => ({ id: app.id, serving: short(app.serving), main: short(app.main), state: app.state, ...(app.reason ? { reason: app.reason } : {}) }));
+  // GY-3434: first, where the app runs — main's app.url with its machine, serving commit and deploy time, or the setting to add.
+  const app = await appRelease(args => Promise.resolve(run('git', ['-C', root, ...args])).then(String), report, master.hostId);
+  const applications = [{ id: 'app', url: app.url, machine: app.machine, serving: short(app.commit), deployedAt: app.deployedAt, ...(app.refused ? { refused: app.refused } : {}), ...(app.missing ? { missing: app.missing } : {}) },
+    ...observed.map(app => ({ id: app.id, serving: short(app.serving), main: short(app.main), state: app.state, ...(app.reason ? { reason: app.reason } : {}) }))];
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   const session = master.forPerson ? state?.personalMasters[master.forPerson] : state?.master;
   const masterAgent = session?.agentName ? runtime.agents.find(agent => agent.name === session.agentName || (!!session.pane && agent.pane_id === session.pane)) : undefined;
