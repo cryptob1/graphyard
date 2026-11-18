@@ -46,7 +46,7 @@ export interface MergeWriterReads extends MergePorts {
   admit?(): boolean;
   /** GY-3328: provisions the image trials run when this host lacks it, before a detached trial launches (install/trial-image.ts `ensureTrialImage`); absent, nothing is provisioned. */
   ensureTrialImage?(): Promise<void>;
-  /** GY-3304: the host's heavy-work drain (`master drain`), or null; while it stands no new merge, revert or batch-gate trial starts. Absent, never drained. */
+  /** GY-3304: the host's heavy-work drain (`master drain`), or null; while it stands no new merge or revert trial, nor the diagnostics, starts (GY-3450: the batch gate does). Absent, never drained. */
   drain?(): HeavyDrain | null;
   /** GY-3120: how many queued heads are trialled at once, each alone on the current tip (`run.mergeWriter.parallel`); absent, one. */
   parallel?: number;
@@ -105,8 +105,8 @@ const output = (error: unknown) => { const failed = error as { stdout?: unknown;
  * detached — is one heavy job of the host: it waits here for a slot of the budget every Graphyard
  * project on the host shares, naming the holders as its step, before anything of it starts.
  */
-export const heavyTrial = <T>(key: string, onStep: ((step: string) => void) | undefined, signal: AbortSignal | undefined, trial: () => Promise<T>, until?: AbortSignal) =>
-  withHeavyJob(`merge trial ${key}`, trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal, until });
+export const heavyTrial = <T>(key: string, onStep: ((step: string) => void) | undefined, signal: AbortSignal | undefined, trial: () => Promise<T>, until?: AbortSignal, gate?: boolean) =>
+  withHeavyJob(`merge trial ${key}`, trial, { onWait: () => onStep?.(waitStep(process.env[slotsDirectoryVariable]!)), signal, until, reserved: gate });
 
 /**
  * The reads over the coordinator checkout `root` (its object store holds every submitted head,
