@@ -16,7 +16,7 @@ import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { configHome } from './install/secrets.js';
 import { cpuSensorNames } from './merge-writer/trial-load.js';
 import { cpuStatTotals, stealPercent } from './daemon/cpu-pressure.js';
-import { hostProbeScript, hostShimScript } from './host-shim.js';
+import { hostProbeScript, hostShimDigest, hostShimScript } from './host-shim.js';
 
 export interface HostRecord { target: string; addedAt: string }
 export interface HostReading { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null; stat?: { total: number; steal: number } | null }
@@ -88,6 +88,7 @@ else
   "$dir/rootlesskit" --version >/dev/null && "$dir/slirp4netns" --version >/dev/null || { echo "The fetched rootless tools do not run on $arch." >&2; exit 1; }
   setuptool="$dir/dockerd-rootless-setuptool.sh"
 fi
+install -d "$home/.graphyard"
 chown -R "$user:$user" "$home/.graphyard"
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
 sudo -u "$user" XDG_RUNTIME_DIR="/run/user/$uid" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" PATH="$(dirname "$setuptool"):$PATH" "$setuptool" install
@@ -146,10 +147,11 @@ export function parseHostProbe(text: string) {
   const number = (pattern: RegExp) => { const value = Number(pattern.exec(text)?.[1]); return Number.isFinite(value) ? value : null; };
   const temps = [...text.matchAll(/^temp (\S+) (\d+)$/gm)].filter(match => cpuSensorNames.includes(match[1]!)).map(match => Math.floor(Number(match[2]) / 1000));
   const user = /^user (\d+) ?(.*)$/m.exec(text);
-  return { cores: number(/^cores (\d+)$/m), load: number(/^load ([\d.]+)$/m), runs: number(/^runs\s+(\d+)$/m), celsius: temps.length ? Math.max(...temps) : null, stat: cpuStatTotals(text),
+  return { shim: /^shim ([0-9a-f]{64})$/m.exec(text)?.[1] ?? null, cores: number(/^cores (\d+)$/m), load: number(/^load ([\d.]+)$/m), runs: number(/^runs\s+(\d+)$/m), celsius: temps.length ? Math.max(...temps) : null, stat: cpuStatTotals(text),
     uid: user ? Number(user[1]) : null, groups: user ? user[2]!.split(/\s+/).filter(Boolean) : [] };
 }
 
+export const outdatedShimReason = (target: string) => `${target}'s graphyard-host-shim is older than this release: run graphyard host prepare and the script it prints there`;
 const lastLine = (text: string) => text.trim().split('\n').filter(Boolean).at(-1) ?? '';
 /** ssh's arguments for a host target: USER@HOST:PORT becomes -p PORT USER@HOST; USER@HOST and an alias pass as they are. */
 export const sshTarget = (target: string) => { const port = /^(.+@.+):(\d+)$/.exec(target); return port ? ['-p', port[2]!, port[1]!] : [target]; };
@@ -166,6 +168,8 @@ export async function probeHost(target: string | null, run: ChildRun = defaultCh
   }
   const reading = parseHostProbe(output);
   if (!reading) return { ok: false as const, reason: `${target ?? 'this machine'} answers but its Docker does not: run graphyard host prepare and the script it prints there` };
+  // GY-3476: a shim from an older release may lack verbs or checks this one relies on, so its host takes no shards until prepare runs again.
+  if (target && reading.shim !== hostShimDigest) return { ok: false as const, reason: outdatedShimReason(target) };
   return { ok: true as const, ...reading };
 }
 

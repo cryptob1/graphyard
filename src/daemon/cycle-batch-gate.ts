@@ -49,7 +49,9 @@ export function fetchRefusalLine(repository: string, baseBranch: string, error: 
   // GY-3470: ssh refusing one of its own configuration files never reached the remote — a host fault, not the owner's authorization.
   const sshConfig = /Bad owner or permissions on (\S+)/.exec(refusal);
   if (sshConfig) return `The fetch of ${baseBranch} for ${repository} never reached the remote: ssh refuses its configuration file ${sshConfig[1]} ("${refusal}"). This is the host's SSH configuration, not the repository's authorization: make that file owned by root or by the loop's user and writable only by its owner, and the loop retries with backoff until then.`.slice(0, actionDetailMax);
-  return `The remote refuses the fetch of ${baseBranch} for ${repository}: "${refusal}". The owner must authorise the merge writer's access — for a SAML organization, authorise the SSH key for it on GitHub (Settings → SSH and GPG keys → Configure SSO → Authorize), or reinstall with --push-auth gh so the merge writer fetches over https with the gh login — and the loop retries with backoff until then.`.slice(0, actionDetailMax);
+  // GY-3464: only GitHub's SAML SSO refusal earns the authorisation advice; any other failure is reported in its own words.
+  if (!/SAML SSO/i.test(refusal)) return `The fetch of ${baseBranch} for ${repository} fails: "${refusal}". Fix what it names, and the loop retries with backoff until then.`.slice(0, actionDetailMax);
+  return `The remote refuses the fetch of ${baseBranch} for ${repository}: "${refusal}". The owner must authorise the merge writer's access — authorise the SSH key for the SAML organization on GitHub (Settings → SSH and GPG keys → Configure SSO → Authorize), or reinstall with --push-auth gh so the merge writer fetches over https with the gh login — and the loop retries with backoff until then.`.slice(0, actionDetailMax);
 }
 
 /**
@@ -303,6 +305,8 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       if (cycle.state.actions[fetchRefusalKey]) { delete cycle.state.actions[fetchRefusalKey]; await cycle.effects.persist?.(cycle.state); }
       return tip;
     } catch (error) {
+      // GY-3464: a fetch the stopping loop interrupted says nothing about the remote.
+      if (stopped.has(cycle.state)) throw error;
       const entry = storeAction(cycle.state, fetchRefusalKey, { kind: 'attention', work: null, principal: null, state: 'failed',
         detail: fetchRefusalLine(gate.repository, reads.baseBranch, error), attempts: (cycle.state.actions[fetchRefusalKey]?.attempts ?? 0) + 1, epoch: null, cycle: cycle.state.cycle, at: new Date(cycle.now()).toISOString() });
       cycle.log(actionLine(cycle.state.cycle, entry));
@@ -353,7 +357,9 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       if (adopted) return adopted.trial(progress, timing, signal);
       await reads.ensureTrialImage?.();
       const launched = launch({ key: gateKey, head: sha, mergeSha: sha, baseTip: null, changedFiles: [...files], proofs, e2eProofs: e2eProofsOf(item),
-        reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeout, reads.cores) });
+        reproduce: item.type !== 'chore', cores: null, ...trialShareAllowance(share, timeout, reads.cores),
+        // GY-3507: the run's own clock is the gate's, never multiplied by the busy slots' share.
+        ...(timeout ? { timeoutMs: timeout } : {}) });
       gated.inFlight = { ...gated.inFlight!, run: { commit: sha, input, directory: launched.directory } };
       await mergeGateRecord(file, latest => ({ ...gated, ...diagnosticFields(latest, gated) })).catch(() => undefined);
       return launched.trial(progress, timing, signal);

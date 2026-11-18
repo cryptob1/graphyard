@@ -1,0 +1,15 @@
+{
+  "id": "batch-gate-median-bound",
+  "title": "A batch gate run meets twice its verified median, at most 90 minutes",
+  "description": "Runs the real loop gate step and detached trial runner over a recorded history of verified runs with one slow outlier and an inflated catalog time: the run's bound and its runner's clock are twice the verified median, the stalled run is stopped at that bound, the timeout names it and verifies nothing, and the retry runs every check once (GY-3507).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a gate past twice its verified median times out with its bound named and retries every check",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:batch-gate-median-bound tests/batch-gate-own-wait-liveness.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

@@ -39,11 +39,19 @@ import type { PreviewCaseRun } from './merge-writer/served-previews.js';
 
 /** How long one gate may run before it counts as failed (gate timeout). */
 export const gateLimitMs = 45 * 60_000;
+/** GY-3507: the hard ceiling on one gate run's bound, however slow its recent runs were. */
+export const gateCeilingMs = 90 * 60_000;
 /**
- * GY-3444: one gate run's bound — the limit above, or 1.5x the last measured full catalog run when
- * that is longer (61 minutes on vishrog on 2026-11-17), so a loaded host's own catalog never outlasts it.
+ * GY-3507: one gate run's bound — twice the median execution time of the recent verified runs,
+ * never under the limit above (also the cold start, with no verified run) nor over the ceiling.
+ * Only verified runs are sampled, their waits left out, so neither a timeout nor a wait inflates it.
  */
-export const gateBoundMs = (record: Pick<GateRecord, 'catalogMs'>) => Math.max(gateLimitMs, Math.ceil(1.5 * (record.catalogMs ?? 0)));
+export function gateBoundMs(record: Pick<GateRecord, 'verifiedRuns'>): number {
+  const runs = (record.verifiedRuns ?? []).map(run => run.ms).sort((a, b) => a - b), middle = runs.length >> 1;
+  if (!runs.length) return gateLimitMs;
+  const median = runs.length % 2 ? runs[middle]! : (runs[middle - 1]! + runs[middle]!) / 2;
+  return Math.min(gateCeilingMs, Math.max(gateLimitMs, Math.ceil(2 * median)));
+}
 const minutes = (ms: number) => Math.round(ms / 60_000);
 /** How often the full suite and the whole catalog run against the verified commit. */
 export const diagnosticsIntervalMs = 24 * 60 * 60_000;
@@ -112,6 +120,8 @@ export interface GateRecord {
    * elapsed time. Optional only for records an older loop wrote.
    */
   gateRuns?: { ms: number; at: string }[];
+  /** GY-3507: the last few verified gate runs' own execution time (waits left out), newest last: what the bound reads. */
+  verifiedRuns?: { ms: number; at: string }[];
   diagnosticsAt: string | null;
   /**
    * GY-3264: the latest diagnostic run's failures, per check: the exact commit it tested and the
@@ -411,6 +421,7 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
       const reverted = new Set(record.merges.filter(merge => merge.reverted).map(merge => merge.sha));
       record.merges = [...record.merges, ...landings.filter(landing => landing.item && !reverted.has(landing.sha) && !record.merges.some(merge => merge.sha === landing.sha))
         .map(landing => ({ sha: landing.sha, item: landing.item!.key, reverted: false }))].slice(-revertRateWindow);
+      record.verifiedRuns = [...record.verifiedRuns ?? [], { ms: ports.now() - Date.parse(record.inFlight!.startedAt) - (record.inFlight!.waitedMs ?? 0), at: at() }].slice(-gateRunsWindow);
       record.verified = tip; record.verifiedAt = at(); record.attempt = { recuts: 0, timeouts: 0 };
       record.results = Object.fromEntries(Object.entries(record.results).filter(([commit]) => commit === tip));
       // GY-3199: the verified commit is published where every install's deploy watch reads it. A

@@ -48,12 +48,12 @@ test('e2e:stall-alarm — the Master page shows the stall alarm with its cause w
   const { url, close } = await plane(context);
   await serveXterm(context);
   try {
-    // Launches held 11 minutes by heat, one free slot, one ready item: the loop's own check, with
-    // the hold dispatch names this cycle (GY-3473).
+    // Launches held 11 minutes by heat, one free slot, one ready item: the loop's own check.
     const start = Date.parse('2026-11-16T08:00:00Z');
     const state = emptyDaemonState({ url: 'http://127.0.0.1:9', repository: 'fixture/shop' } as never);
     state.cpuPressure = { at: new Date(start).toISOString(), avg60: 20, steal: 0, stat: null, celsius: 96, samples: [], testBudget: null, trialCap: null };
     const item = { key: 'GY-1', stage: 'ready', ready: true, updatedAt: new Date(start).toISOString(), sessions: [] } as unknown as Work;
+    // GY-3473: the cause is dispatch's own hold this cycle, as the loop passes it.
     const holds = [implementationWaiting(state)!];
     const alarm = stallAlarm({ now: start + 11 * 60_000, open: [item], ready: [item], freeSlots: 1, holds, state, registry: null, serving: null });
     expect(alarm).toContain('Cause: launches waiting: CPU 96C');
