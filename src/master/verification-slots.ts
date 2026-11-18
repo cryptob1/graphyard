@@ -311,6 +311,10 @@ async function liveWaiters(directory: string, drained: boolean) {
   }
   return waiters;
 }
+/** The projects queued now, oldest first, read without locking: only for the line a waiting job prints. */
+function queuedProjects(directory: string) {
+  return readdirSync(queueDirectory(directory)).sort().flatMap(name => { try { return [readFileSync(join(queueDirectory(directory), name), 'utf8')]; } catch { return []; } });
+}
 /**
  * GY-3487: who the `free` slots go to. Each goes to the oldest waiter whose project holds none, else to
  * the oldest waiter: a project that holds a slot never takes another while a project holding none
@@ -359,8 +363,10 @@ export async function acquireVerificationSlot(options: AcquireOptions): Promise<
       const holders = await running(options.directory), free = limit - holders.length;
       const waiters = free > 0 && ticket ? await liveWaiters(options.directory, !!readHeavyDrain(options.directory)) : [];
       const project = options.project ?? '', holderProjects = holders.map(entry => entry.owner?.project ?? '');
-      const next = holderProjects.includes(project) ? waiters.find(waiter => waiter.project !== project && !holderProjects.includes(waiter.project)) : undefined;
-      if (next && !blocked) { blocked = true; options.onWait?.(`graphyard: ${options.label} waiting: ${next.project} holds none and is next`); }
+      if (ticket && !blocked && holderProjects.includes(project)) {
+        const next = queuedProjects(options.directory).find(other => other !== project && !holderProjects.includes(other));
+        if (next !== undefined) { blocked = true; options.onWait?.(`graphyard: ${options.label} waiting: ${next} holds none and is next`); }
+      }
       if (free > 0 && (!ticket || admitted(waiters, holderProjects, free).includes(ticket.name))) {
         const held = await tryTake(options.directory, limit, owner, options.firstSlot);
         if (held) {

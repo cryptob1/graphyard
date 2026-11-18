@@ -42,12 +42,12 @@ test('integration:heavy-slot-fairness — at limit 3 project A fills every slot 
   await until(() => aNext.lines.length > 0, 'A\'s fourth job waits');
   const b = waiter(directory, 'merge trial B-1', 'acme/b');
   await until(() => b.lines.length > 0, 'B\'s job waits');
+  await until(() => aNext.lines.some(line => line.includes('waiting: acme/b holds none and is next')), `A's waiter names why it waits`);
   a[0].release();
   await until(() => !!b.held() || !!aNext.held(), 'the freed slot is taken');
   await sleep(200);
   assert.ok(b.held(), 'the project holding none takes the freed slot');
   assert.equal(aNext.held(), null, 'the project holding three does not take a fourth');
-  assert.ok(aNext.lines.some(line => line.includes('waiting: acme/b holds none and is next')), `A's waiter names why: ${aNext.lines.join('\n')}`);
   assert.equal(heldSlots(directory).filter(entry => entry.slot < gateSlot).length, 3, 'never more than the limit; no job was stopped');
   // Once B holds a slot, only A waits: it takes the next freed slot as before.
   a[1].release();
