@@ -137,7 +137,7 @@ for a in "$@"; do
   esac
 done
 mkdir -p "$path"
-[ -n "$mode" ] && /usr/bin/chmod "$mode" "$path"
+[ -z "$mode" ] || /usr/bin/chmod "$mode" "$path"
 `,
   chown: `#!/bin/sh
 D='${dir}'

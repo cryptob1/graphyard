@@ -90,8 +90,8 @@ test(`${proof} — host add accepts the prepared host into the one host list and
   await assert.rejects(main(['host', 'add', 'gy-compute@dockery']), /gy-compute@dockery was not added: gy-compute is in the docker group, which is root on that host/);
   assert.deepEqual(await recorded(), ['gy-compute@box'], 'a refused host is never recorded');
   // The probe only reads: every home holds exactly what prepare left there, nothing more.
-  assert.deepEqual((await readdir(hosts.home('box'))).sort(), ['.ssh', 'bin']);
+  assert.deepEqual((await readdir(hosts.home('box'))).sort(), ['.graphyard', '.ssh', 'bin']);
   assert.deepEqual((await readdir(hosts.home('open', 'vish'))).sort(), ['.ssh']);
   assert.deepEqual((await readdir(hosts.home('rooty', 'root'))).sort(), ['.ssh', 'bin']);
-  assert.deepEqual((await readdir(hosts.home('dockery'))).sort(), ['.ssh', 'bin']);
+  assert.deepEqual((await readdir(hosts.home('dockery'))).sort(), ['.graphyard', '.ssh', 'bin']);
 });
