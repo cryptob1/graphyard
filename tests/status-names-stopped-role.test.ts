@@ -57,6 +57,8 @@ async function report(master: MasterConfig, document: AgentRegistry, work: Work[
     throw new Error(`unexpected read ${path}`);
   };
   return masterStatusReport('.', master, api, async (command, args) => {
+    // main declares no graphyard.json here: git show refuses, so no applications are observed.
+    if (command === 'git' && args.includes('show')) throw new Error('fatal: path graphyard.json does not exist');
     if (!isHerdrCommand(command)) return 'a'.repeat(40);
     return herdrSubcommand(args)[1] === 'list' ? JSON.stringify({ agents: [] }) : '';
   });
