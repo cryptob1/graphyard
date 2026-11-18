@@ -89,11 +89,13 @@ export function HerdrConnect({ watch }: { watch: HerdrWatch }) {
 export function AlertsLine({ status }: { status: any }) {
   const alerts = status?.setup?.alerts;
   const on = typeof alerts === 'number' && alerts > 0;
-  return <p data-alerts={on ? 'on' : alerts === false ? 'off' : 'unknown'}>
-    {on ? <span className="green">Alerts are on: when queued work has neither started nor merged for {alerts} minutes, the loop posts to your webhook URL, repeats at most hourly, and posts an all-clear when work moves again.</span>
-      : alerts === false ? <span className="amber">Alerts are off. To be told when queued work cannot start or merge, set <code>run.alertUrl</code> in <code>.graphyard/master.json</code> on the host that runs the master loop to a webhook URL that takes a POST, such as an ntfy topic (<code>https://ntfy.sh/your-topic</code>); <code>run.alertMinutes</code> sets the stall window (default 20).</span>
-        : 'Whether alerts are on is not known yet: the dashboard learns it from a running master loop. Start the loop on the host with graphyard master run, or check it with graphyard master status.'}
-  </p>;
+  return <div data-alerts={on ? 'on' : alerts === false ? 'off' : 'unknown'}>
+    <p title={on ? `When queued work has neither started nor merged for ${alerts} minutes, the loop posts to your webhook URL, repeats at most hourly, and posts an all-clear when work moves again.` : undefined}>
+      {on ? <span className="green">Stall alerts: on (after {alerts} min)</span> : alerts === false ? <span className="amber">Stall alerts: off</span> : 'Stall alerts: not known yet'}
+    </p>
+    {alerts === false && <MoreDetails summary="Turn them on">To be told when queued work cannot start or merge, set <code>run.alertUrl</code> in <code>.graphyard/master.json</code> on the host that runs the master loop to a webhook URL that takes a POST, such as an ntfy topic (<code>https://ntfy.sh/your-topic</code>); <code>run.alertMinutes</code> sets the stall window (default 20).</MoreDetails>}
+    {!on && alerts !== false && <MoreDetails summary="Why">The dashboard learns it from a running master loop. Start the loop on the host with <code>graphyard master run</code>, or check it with <code>graphyard master status</code>.</MoreDetails>}
+  </div>;
 }
 
 /**
@@ -129,11 +131,11 @@ export function SetupView({ status, work, workUnread, now, onConnect }: { status
   const green = checklistGreen(items) && !open && !workUnread;
   const total = items.length + (onboarding ? 1 : 0), left = items.filter(entry => !entry.done).length + open;
   return <>
-    <PageHeader title="Set up Graphyard" fact={green ? 'Everything is ready.' : !left ? 'Checking whether the onboarding change has merged.' : `${left} of ${total} steps left.`}>{!green && 'This page updates by itself as each step finishes.'}</PageHeader>
+    <PageHeader title="Set up Graphyard" fact={green ? 'Everything is ready.' : !left ? 'Checking whether the onboarding change has merged.' : `${left} of ${total} steps left.`}/>
     {supervised && <p className="notice" data-supervised>An agent reviews each change and Graphyard merges it; no agent approves decisions on your behalf, so you answer each one.</p>}
     <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
-    <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={paneServer(status)}/></PageSection>
     <PageSection title="Be told when the yard stops" label="Be told when the yard stops"><AlertsLine status={status}/></PageSection>
+    <section className="panel" aria-label="Watch agents in a terminal"><MoreDetails summary="Watch agents in a terminal"><HerdrConnect watch={paneServer(status)}/></MoreDetails></section>
     <section className="panel" aria-label="Where things run"><MoreDetails summary="Where things run"><WhereThingsRunPanel where={status?.setup?.where ?? null} panes={status?.setup?.panes ?? null}/></MoreDetails></section>
   </>;
 }
