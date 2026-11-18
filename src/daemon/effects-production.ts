@@ -259,7 +259,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     growWorkers: (config, allowed) => growWorkerPool(root, config, allowed, id => fleetRequest(config as Parameters<typeof fleetRequest>[0], 'worker-identities', { body: { id } })),
     // GY-3225: the checkout's folder-trust refusals (an untrusted checkout carrying repository
     // Claude configuration), read from the registry document and this host's account configs.
-    checkoutTrust: async () => checkoutTrustRefusals(root, await fleetRequest(current() as Parameters<typeof fleetRequest>[0], 'agent-registry/document'), current().hostId),
+    checkoutTrust: registry => checkoutTrustRefusals(root, registry, current().hostId),
     setRuntime: (runtime, reason) => mutate('agent-registry/runtimes', { runtime, reason }, randomUUID()),
     // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick
     // still running past its step's timeout is not started twice. `held` (GY-3348) waits every launch

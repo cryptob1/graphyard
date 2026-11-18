@@ -217,7 +217,9 @@ export const daemonStateSchema = z.object({
     samples: z.array(z.tuple([z.number(), z.number()])).default([]),
     /** GY-3401: the test parallelism a session launched now gets, and the merge writer's trial cap now and when cool. */
     testBudget: z.number().int().min(0).nullable().default(null),
-    trialCap: z.object({ now: z.number().int().min(0), full: z.number().int().min(0) }).strict().nullable().default(null) }).strict().nullable().default(null),
+    trialCap: z.object({ now: z.number().int().min(0), full: z.number().int().min(0) }).strict().nullable().default(null),
+    /** GY-3446: the launch heat limit a temporary `launchHotCelsius` sets while it stands; absent, the default. */
+    hotCelsius: z.number().int().optional() }).strict().nullable().default(null),
   /** GY-3438: every live agent session's scope as the last cycle read it from its cgroup — CPU in cores since the cycle before, memory, its fair share of both, and since when it has used far more than its share of a saturated machine. */
   sessions: z.array(z.object({ unit: z.string().max(200), name: z.string().max(200).optional(), at: z.string(), usec: z.number().min(0), cpu: z.number().min(0).nullable(), cpuShare: z.number().min(0),
     memory: z.number().min(0), memoryShare: z.number().min(0), overSince: z.string().nullable() }).strict()).default([]),
