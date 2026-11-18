@@ -45,7 +45,7 @@ import { actionStallDelay, actionStallThreshold } from '../model/action-progress
 import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
-import { cpuPressureStep, cpuWaiting, implementationWaiting } from './cpu-pressure.js';
+import { cpuPressureStep, cpuWaiting, implementationWaiting, sessionUsageStep } from './cpu-pressure.js';
 import { batchGateRunning } from './trial-slots.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
@@ -507,6 +507,8 @@ async function closeStep(cycle: Cycle) {
   // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new
   // launches while it is saturated — before anything of this cycle starts one.
   await cpuPressureStep(cycle);
+  // GY-3438: and every agent session's use against its CPU and memory caps.
+  sessionUsageStep(cycle);
   // GY-3407: every host is read for the Workers page; one that does not answer reads away until it does.
   if (cycle.effects.hostReadings) cycle.state.hosts = await cycle.effects.hostReadings(cycle.state.hosts).catch(error => { cycle.log(`[graphyard-master] the host readings failed: ${message(error)}`); return cycle.state.hosts; });
 }
