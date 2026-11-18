@@ -12,10 +12,13 @@ import { fileURLToPath } from 'node:url';
  * On 26 September 2026 a 62 GB host ran fourteen full suites and five `tsc --noEmit` runs at once;
  * on 13 November a 24-core host shared by several Graphyard projects sat at load 50–86 and local
  * verification timed out, because each project bounded only its own runs. Every Graphyard project
- * of one user on one host now shares one budget: a heavy job — a session's test, type-check or
- * build command, a host-run worker verification, a merge, gate or diagnostic trial, a preview build,
- * a deploy build — takes one slot first, and at most `limit` (two unless the host says otherwise)
- * ordinary jobs run at once, plus one reserved gate/deploy job shared across all installs.
+ * of one user on one host now shares one budget: a heavy job — a merge, gate or diagnostic trial, a
+ * session's whole suite, a preview build, a deploy build — takes one slot first, and at most `limit`
+ * (two unless the host says otherwise) ordinary jobs run at once, plus one reserved
+ * gate/deploy job shared across all installs. GY-3447: a session's own build, type check and
+ * selected tests, and the host-run verification and checks of its head, take no slot — they ran
+ * behind trials holding both slots for most of an hour — and stay bounded by the session's share of
+ * the host's test parallelism (VITEST_MAX_WORKERS) and the trial load cap.
  *
  * A slot is a directory `slot-N` renamed (atomically) into the host's lock directory
  * (`hostHeavyJobsDirectory`, outside every repository), holding its owner's kernel-locked file. A
@@ -26,8 +29,8 @@ import { fileURLToPath } from 'node:url';
  *
  * The loop and the deploy watch join the budget at start (`joinHostHeavyBudget`); the session
  * harness puts the lock directory on every session's tab with a wrapper directory first on its
- * PATH (`tsc`, `npx`, `npm`, `pnpm`); this repository's own runner (tests/helpers/run-tests.ts)
- * takes the slot for its suite and type check. A run with no lock directory in its environment —
+ * PATH (`npm`, `pnpm`); this repository's own runner (tests/helpers/run-tests.ts) takes the slot
+ * for a whole suite. A run with no lock directory in its environment —
  * CI, a person's shell, a test inside the suite or a trial, which never see GRAPHYARD_* — is not
  * bounded. Work inside a job that holds a slot (`GRAPHYARD_VERIFICATION_SLOT_HELD` in a child,
  * the async context in this process) reuses it and takes none.
@@ -307,20 +310,15 @@ export async function withHeavyJob<T>(label: string, job: () => Promise<T>, opti
   try { return await inheritedVariables.run({ [heldVariable]: '1' }, job); } finally { ended.removeEventListener('abort', held.release); held.release(); }
 }
 
-const heavyScript = /^(test|build|typecheck)\b/;
 /**
- * Whether a command is a heavy job: a `tsc` type check (or one through `npx`), or a package
- * manager's test, build or type-check script. A checkout that carries Graphyard's own runner
- * (tests/helpers/run-tests.ts) is left to it: the runner takes the slot and sizes its breadth by it.
+ * Whether a command is a heavy job: a package manager's whole `test` script, no files or arguments
+ * selecting part of it (GY-3447: builds, type checks and selected tests run at once). A checkout that
+ * carries Graphyard's own runner (tests/helpers/run-tests.ts) is left to it: the runner takes the slot.
  */
 export function heavyCommand(command: string, args: string[], cwd = process.cwd()) {
-  const typecheck = (words: string[]) => !words.some(word => ['--watch', '-w', '--version', '-v', '--help', '-h', '--init'].includes(word));
-  const at = args.findIndex(word => !word.startsWith('-'));
-  if (command === 'tsc') return typecheck(args);
-  if (command === 'npx') return at >= 0 && args[at] === 'tsc' && typecheck(args.slice(at + 1));
-  if (command !== 'npm' && command !== 'pnpm' || at < 0) return false;
-  const script = ['run', 'run-script'].includes(args[at]!) ? args.slice(at + 1).find(word => !word.startsWith('-')) : args[at] === 't' ? 'test' : args[at]!;
-  if (!script || !heavyScript.test(script)) return false;
+  if (command !== 'npm' && command !== 'pnpm') return false;
+  const words = args.filter(word => !word.startsWith('-')), script = ['run', 'run-script'].includes(words[0]!) ? words.slice(1) : words;
+  if (!['test', 't'].includes(script[0]!) || script.length > 1) return false;
   return !existsSync(join(cwd, 'tests/helpers/run-tests.ts'));
 }
 
@@ -332,11 +330,15 @@ export function onPathOf(name: string, path: string) {
 }
 
 /**
- * The wrapper directory a session's PATH starts with: `tsc`, `npx`, `npm` and `pnpm` scripts shipped
+ * The wrapper directory a session's PATH starts with: `npm` and `pnpm` scripts shipped
  * in this installation (bin/verification), each running bin/graphyard-verify.mjs with its command's name.
  * The lock directory is created at launch (sessionSlotsGrant) so a sandboxed runtime can be granted it.
  */
 export const verificationBin = fileURLToPath(new URL('../../bin/verification', import.meta.url));
+
+/** The heavy jobs holding the host's slots now, for master status: what runs, for which project, since when. */
+export const slotHolders = (directory: string) => heldSlots(directory).filter(entry => entry.slot < declarationSlot)
+  .map(entry => entry.owner ? { label: entry.owner.label, project: entry.owner.project ?? null, pid: entry.owner.pid, since: entry.owner.at } : { label: `slot-${entry.slot}`, project: null, pid: null, since: null });
 
 /** The variables a session's tab carries: the host's lock directory, its project, and PATH with the wrappers first. */
 export function verificationEnvironment(project: string, environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
@@ -347,7 +349,7 @@ export function verificationEnvironment(project: string, environment: NodeJS.Pro
 /**
  * A session's tab environment: the harness's variables with the launch's own laid over them, except
  * that a launch which sets its own PATH keeps the wrappers first on it, so an account environment
- * never takes a session's `tsc` and `npx tsc` out of the bound.
+ * never takes a session's whole suite out of the bound.
  */
 export function withVerificationPath(harness: Record<string, string>, launch: Record<string, string>): Record<string, string> {
   const merged = { ...harness, ...launch };

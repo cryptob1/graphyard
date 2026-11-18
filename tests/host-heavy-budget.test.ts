@@ -27,14 +27,14 @@ async function host() {
   const installs = ['acme/app', 'acme/site'].map(project => {
     const root = join(scratch, project.replace('/', '-')), managed = join(scratch, `${project.replace('/', '-')}-managed`);
     mkdirSync(join(root, 'site'), { recursive: true }); mkdirSync(managed);
-    // The session's commands: each script is the recorded job, and one run with NESTED starts another heavy command through the wrappers.
-    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'fixture', scripts: { 'test:affected': 'node job.mjs', build: 'node job.mjs', 'build:nested': 'node job.mjs nested' } }));
+    // The session's commands: the whole suite is the recorded job, and one run with NESTED starts another whole suite through the wrappers.
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'fixture', scripts: { test: 'node job.mjs' } }));
     writeFileSync(join(root, 'job.mjs'), `import { appendFileSync, existsSync } from 'node:fs'; import { execFileSync } from 'node:child_process';
-const nested = process.argv[2] === 'nested', id = (nested ? 'nested-' : '') + process.env.JOB_ID;
+const nested = !!process.env.NESTED_CHILD, id = (nested ? 'nested-' : '') + process.env.JOB_ID;
 appendFileSync(process.env.RUN_LOG, 'start ' + id + '\\n');
 if (nested) await new Promise(done => setTimeout(done, 50));
 else { while (!existsSync(process.env.RUN_GO)) await new Promise(done => setTimeout(done, 20)); await new Promise(done => setTimeout(done, 200)); }
-if (!nested && process.env.NESTED) execFileSync(${JSON.stringify(join(verificationBin, 'npm'))}, ['run', 'build:nested'], { stdio: 'inherit' });
+if (!nested && process.env.NESTED) execFileSync(${JSON.stringify(join(verificationBin, 'npm'))}, ['test'], { stdio: 'inherit', env: { ...process.env, NESTED_CHILD: '1' } });
 appendFileSync(process.env.RUN_LOG, 'end ' + id + '\\n');\n`);
     writeFileSync(join(root, 'site', 'index.html'), '<h1>Site</h1>');
     mkdirSync(join(root, 'e2e', 'cases'), { recursive: true });
@@ -74,7 +74,7 @@ function peak(events: [string, string][]) {
   return most;
 }
 
-test('e2e:host-heavy-budget — two installs on one host launch nine heavy jobs from their own processes, and two ordinary jobs plus one gate or deploy run at once', { timeout: 180_000 }, async () => {
+test('e2e:host-heavy-budget — two installs on one host launch eight heavy jobs from their own processes, and two ordinary jobs plus one gate or deploy run at once', { timeout: 180_000 }, async () => {
   const fixture = await host(), [app, site] = fixture.installs;
   // Both installs resolve the one host directory, outside both repositories and both managed roots.
   const environments = fixture.installs.map(install => verificationEnvironment(install.project, { PATH: '/usr/bin', GRAPHYARD_DATA_HOME: fixture.data }));
@@ -85,31 +85,32 @@ test('e2e:host-heavy-budget — two installs on one host launch nine heavy jobs 
   assert.deepEqual(Object.keys(environments[0]).sort(), ['GRAPHYARD_HEAVY_JOB_PROJECT', 'GRAPHYARD_VERIFICATION_SLOTS_DIR', 'PATH']);
   assert.equal(heavyJobLimit(fixture.directory), 2, 'two unless the host says otherwise');
 
-  // Worker verification (the affected tests and a build, each nesting another heavy command), merge
-  // and batch-gate trials, a host-run worker check, a preview build and a deploy build — across both installs at once.
+  // Sessions' whole suites (each nesting another), merge and batch-gate trials, a preview build and
+  // deploy builds — across both installs at once. Worker builds and selected tests are not heavy jobs
+  // (GY-3447, tests/worker-verify-not-queued.test.ts).
   const jobs = [
-    fixture.session(app, 'affected-app', 'test:affected', true), fixture.session(site, 'build-site', 'build', true),
+    fixture.session(app, 'suite-app', 'test', true), fixture.session(site, 'suite-site', 'test', true),
     fixture.launch(app, 'trial', 'GY-1'), fixture.launch(site, 'trial', 'GY-2'), fixture.launch(app, 'gate', 'gate-app'),
-    fixture.launch(site, 'check', 'GY-3'), fixture.launch(app, 'preview', 'preview-app'), fixture.launch(site, 'deploy', 'deploy-site'), fixture.launch(app, 'deploy', 'deploy-app'),
+    fixture.launch(app, 'preview', 'preview-app'), fixture.launch(site, 'deploy', 'deploy-site'), fixture.launch(app, 'deploy', 'deploy-app'),
   ];
-  // Every process reaches the budget before any job ends: three run, and the other six say what they wait for.
+  // Every process reaches the budget before any job ends: three run, and the other five say what they wait for.
   const waiting = /waits for a host heavy-job slot|waiting for a host heavy-job slot/;
-  await until(() => fixture.events().length + jobs.filter(job => waiting.test(job.stderr())).length >= jobs.length, 'all nine run or wait');
-  assert.equal(fixture.events().length, 3, `three run while six wait: ${JSON.stringify(fixture.events())}`);
+  await until(() => fixture.events().length + jobs.filter(job => waiting.test(job.stderr())).length >= jobs.length, 'all eight run or wait');
+  assert.equal(fixture.events().length, 3, `three run while five wait: ${JSON.stringify(fixture.events())}`);
   fixture.go();
   const codes = await Promise.all(jobs.map(job => job.closed));
   assert.deepEqual(codes, jobs.map(() => 0), jobs.map(job => `${job.id}: ${job.stderr()}`).join('\n'));
-  const events = fixture.events(), ids = ['affected-app', 'build-site', 'GY-1', 'GY-2', 'gate-app', 'GY-3', 'preview-app', 'deploy-site', 'deploy-app'];
+  const events = fixture.events(), ids = ['suite-app', 'suite-site', 'GY-1', 'GY-2', 'gate-app', 'preview-app', 'deploy-site', 'deploy-app'];
   for (const event of ['start', 'end']) assert.deepEqual(events.filter(entry => entry[0] === event && !entry[1].startsWith('nested-')).map(entry => entry[1]).sort(), [...ids].sort(), `every queued job ${event}s`);
   assert.equal(peak(events), 3, `never more than three heavy jobs at once across both installs, and both slots used: ${JSON.stringify(events)}`);
   // Nested work ran inside its parent, on its parent's slot: it neither waited nor counted.
-  for (const id of ['affected-app', 'build-site']) {
+  for (const id of ['suite-app', 'suite-site']) {
     const order = events.filter(entry => entry[1].endsWith(id)).map(entry => entry.join(' '));
     assert.deepEqual(order, [`start ${id}`, `start nested-${id}`, `end nested-${id}`, `end ${id}`]);
   }
   // A job that waited said what it waits for and which jobs of which projects hold it — the other install's among them.
   const waits = jobs.flatMap(job => job.stderr().split('\n').filter(line => waiting.test(line)).map(line => ({ job, line })));
-  assert.equal(new Set(waits.map(({ job }) => job.id)).size, 6, `six of nine waited: ${waits.map(({ job }) => job.id).join(', ')}`);
+  assert.equal(new Set(waits.map(({ job }) => job.id)).size, 5, `five of eight waited: ${waits.map(({ job }) => job.id).join(', ')}`);
   for (const { line } of waits) assert.match(line, /held by .+\(acme\/(app|site)\)/);
   assert.ok(waits.some(({ job, line }) => line.includes(`(${job.project === 'acme/app' ? 'acme/site' : 'acme/app'})`)), 'a waiter names a holder of the other project');
   assert.ok(waits.some(({ line }) => line.includes('every Graphyard project on this host shares 2 at once') && line.includes(join(fixture.directory, 'limit'))), 'and the shared limit, with where it is set');
@@ -121,7 +122,7 @@ test('e2e:host-heavy-budget — nested heavy work under a limit of one runs on i
   mkdirSync(fixture.directory, { recursive: true });
   writeFileSync(join(fixture.directory, 'limit'), '1\n');
   fixture.go();
-  const job = fixture.session(app, 'affected-app', 'test:affected', true);
+  const job = fixture.session(app, 'suite-app', 'test', true);
   assert.equal(await job.closed, 0, job.stderr());
   assert.doesNotMatch(job.stderr(), /waits for a host heavy-job slot/);
   // In one process too: a preview build inside a trial, a trial inside a gate.
@@ -131,8 +132,8 @@ test('e2e:host-heavy-budget — nested heavy work under a limit of one runs on i
   } finally { delete process.env[slotsDirectoryVariable]; }
   // This repository's own runner takes the slot itself, so the wrapper leaves its scripts alone; another project's scripts are wrapped.
   assert.equal(heavyCommand('npm', ['test'], join(import.meta.dirname, '..')), false);
-  assert.equal(heavyCommand('npm', ['run', 'test:affected'], app.root), true);
-  assert.equal(heavyCommand('pnpm', ['build'], app.root), true);
+  assert.equal(heavyCommand('npm', ['test'], app.root), true);
+  assert.equal(heavyCommand('pnpm', ['run', 'test'], app.root), true);
   assert.equal(heavyCommand('npm', ['run', 'dev'], app.root), false);
   assert.equal(heavyCommand('npm', ['install'], app.root), false);
 });
@@ -204,8 +205,8 @@ test('integration:gate-slot-across-installs — every install gate and deploy us
   const fixture = await host(), [core, lumina] = fixture.installs;
   const started = (id: string) => fixture.events().some(([event, name]) => event === 'start' && name === id);
   const trial = fixture.launch(core, 'trial', 'core-trial', true);
-  const verification = fixture.launch(core, 'check', 'core-check', true);
-  await until(() => started('core-trial') && started('core-check'), 'Core fills both ordinary slots');
+  const verification = fixture.launch(core, 'trial', 'core-trial-2', true);
+  await until(() => started('core-trial') && started('core-trial-2'), 'Core fills both ordinary slots');
   const queued = fixture.launch(core, 'trial', 'core-queued', true);
   await until(() => /host heavy-job slot/.test(queued.stderr()), 'another Core trial waits');
   assert.equal(started('core-queued'), false);
@@ -223,7 +224,7 @@ test('integration:gate-slot-across-installs — every install gate and deploy us
     assert.equal(await job.closed, 0, job.stderr());
   }
   resumeHeavyDrain(fixture.directory);
-  fixture.release('core-trial'); fixture.release('core-check'); fixture.release('core-queued');
+  fixture.release('core-trial'); fixture.release('core-trial-2'); fixture.release('core-queued');
   assert.deepEqual(await Promise.all([trial.closed, verification.closed, queued.closed]), [0, 0, 0]);
   assert.deepEqual(heldSlots(fixture.directory), []);
 });

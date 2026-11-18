@@ -21,7 +21,7 @@ import { detectLoggedOut } from './master/logged-out.js';
 import type { ExhaustionSignal } from './model/capacity.js';
 import type { CredentialMask } from './master/confinement.js';
 import { endRun, liveRun, registerRun, sessionTestBudget, type AdoptedRun } from './runner/registry.js';
-import { detachedLaunch, processIdentity, readRunMeta, runAlive, runContainment, runEnvironment, runFiles, signalRun, type RunMeta } from './runner/pi.js';
+import { sessionLaunch, processIdentity, readRunMeta, runAlive, runContainment, runEnvironment, runFiles, signalRun, type RunMeta } from './runner/pi.js';
 import { runRecord } from './runner/types.js';
 import { underTestRunner } from './runtime-environment.js';
 import { acceptedFlags, runtimeAdapter } from './master/runtimes.js';
@@ -84,7 +84,7 @@ const readText = (file: string) => { try { return readFileSync(file, 'utf8'); } 
 export const spawnHeadless: HeadlessExec = async (command, args, options) => {
   mkdirSync(options.run, { recursive: true, mode: 0o700 });
   rmSync(runFiles(options.run).exit, { force: true });
-  const id = basename(options.run), containment = runContainment(), launch = detachedLaunch(options.run, id, command, args, containment);
+  const id = basename(options.run), containment = runContainment(), launch = sessionLaunch(options.run, id, command, args, containment);
   let failure: string | null = null;
   const child = spawn(launch.file, launch.args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'ignore', 'ignore'], detached: true });
   child.on('error', error => { failure = `${command} could not be started: ${error.message}`; });
