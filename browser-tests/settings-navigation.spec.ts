@@ -35,10 +35,10 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await open(page, 'admin');
     await heading(page, 'Work');
 
-    // Settings is configuration: Agents and Setup as tabs, Operator automation behind Advanced, nothing everyday.
+    // Settings is configuration: Agents, Setup and Delivery as tabs, Operator automation behind Advanced, nothing everyday.
     await entry(page, 'Settings');
     await heading(page, 'Agents');
-    await expect(tabs(page).getByRole('button')).toHaveText(['Agents', 'Setup']);
+    await expect(tabs(page).getByRole('button')).toHaveText(['Agents', 'Setup', 'Delivery']);
     await expect(tabs(page).getByText('Advanced', { exact: true })).toBeVisible();
     await expect(tabs(page).getByRole('button', { name: 'Operator automation', includeHidden: true })).toBeHidden();
     for (const everyday of ['Product', 'Costs', 'Test cases']) await expect(tabs(page).getByRole('button', { name: everyday, exact: true })).toHaveCount(0);
@@ -72,6 +72,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await page.keyboard.press('Enter');
     await heading(page, 'Set up Graphyard');
     await page.keyboard.press('Tab');
+    await page.keyboard.press('Tab');
     await expect(tabs(page).locator('summary')).toBeFocused();
     await page.keyboard.press('Enter');
     await page.keyboard.press('Tab');
@@ -101,8 +102,8 @@ test('e2e:settings-navigation — identities without the permission gain no conf
   await heading(page, 'Work');
   await entry(page, 'Settings');
   await heading(page, 'Agents');
-  // A reader sees Agents alone: no Setup, no Advanced fold, no Operator automation.
-  await expect(tabs(page)).toHaveCount(0);
+  // A reader sees Agents and Delivery: no Setup, no Advanced fold, no Operator automation.
+  await expect(tabs(page).getByRole('button')).toHaveText(['Agents', 'Delivery']);
   await expect(page.getByText('Advanced', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Open the first-run Setup checklist' })).toHaveCount(0);
   // Everyday pages stay reachable for them outside Settings.

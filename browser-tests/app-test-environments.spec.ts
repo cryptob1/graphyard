@@ -74,7 +74,7 @@ test('e2e:app-test-environments — the Tests view\'s Where tests run block show
     // It fits the width and adds no Settings page.
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     await primary.getByRole('button', { name: 'Settings', exact: true }).click();
-    await expect(page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button')).toHaveText(['Agents', 'Setup']);
+    await expect(page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button')).toHaveText(['Agents', 'Setup', 'Delivery']);
 
     // The same block answers at phone width: every row still readable, nothing overflows, the
     // navigation folds behind the menu, and it still adds no Settings page.
@@ -88,7 +88,7 @@ test('e2e:app-test-environments — the Tests view\'s Where tests run block show
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     if (await menu.getAttribute('aria-expanded') !== 'true') await menu.click();
     await primary.getByRole('button', { name: 'Settings', exact: true }).click();
-    await expect(page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button')).toHaveText(['Agents', 'Setup']);
+    await expect(page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button')).toHaveText(['Agents', 'Setup', 'Delivery']);
   } finally {
     if (previous === undefined) delete process.env.GRAPHYARD_REPOSITORY_ROOT; else process.env.GRAPHYARD_REPOSITORY_ROOT = previous;
     http.closeAllConnections();
