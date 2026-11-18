@@ -24,7 +24,7 @@ The details the [README](../README.md) leaves out. `graphyard guide setup` print
 - A project is onboarded only when main's `graphyard.json` declares two things: an `e2e.serve` that starts the real application, and a feature map (`featureMap`). Setup and `graphyard master status` read them from main, not from your working copy.
 - The feature map lists each feature of the app: its name, the URL path on the served app or a command to run, and its traps (known pitfalls, empty when none). Example: `"featureMap": [{"name":"Home","url":"/","traps":[]}]`.
 - Every batch check runs the feature map against the served app, and every deploy check runs it against the deployed site.
-- A missing serve, a missing feature map, or the generated placeholder serve that runs none of the app shows as a Master fault naming the project in `graphyard master status`, and Setup shows Project not onboarded. The checks never report a pass for it. The master files the work to add the real serve and map; there is nothing for you to do.
+- A missing serve, a missing feature map, or the generated placeholder serve that runs none of the app shows as a Master fault naming the project in `graphyard master status`, and Setup shows the same Master fault. The checks never report a pass for it. The master files the work to add the real serve and map; there is nothing for you to do.
 
 ## Your app's address
 

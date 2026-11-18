@@ -32,8 +32,7 @@ test('e2e:real-app-onboarding — Setup names the placeholder fault and recogniz
     const { code } = await signIn.json() as { code: string };
     await page.goto(`${baseURL}/#sign-in=${code}&setup`);
     const item = page.locator('[data-setup-item="real-app"]');
-    await expect(item).toContainText('Project not onboarded');
-    await expect(item).toContainText('Master fault: owner/Lumina');
+    await expect(item).toContainText('Master fault: owner/Lumina is not onboarded');
     await expect(item).toContainText('Placeholder serve');
     await expect(item).toHaveAttribute('data-done', 'no');
     await expect(item).not.toContainText('Needs you');
