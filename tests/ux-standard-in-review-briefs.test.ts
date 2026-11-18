@@ -21,6 +21,7 @@ test('unit:ux-standard-in-review-briefs — the AGENTS.md UX standard is in the 
   assert.ok(product.includes(section), 'the product review carries the standard');
   assert.match(product, /Request changes on any violation of this UX standard, with a screenshot of it/);
   assert.ok(codeReview(['web/pages/x.tsx']).includes(section), 'a code review of a web/ change carries the standard');
-  assert.ok(workerPrompt({ cliPath: cli }, { key: 'GY-1', title: 'Example' }, { principal: 'graphyard-worker-1' }, 1).includes(section), 'the worker brief carries the standard');
+  assert.ok(workerPrompt({ cliPath: cli }, { key: 'GY-1', title: 'Example', type: 'feature' }, { principal: 'graphyard-worker-1' }, 1).includes(section), 'the worker brief carries the standard');
+  assert.ok(!workerPrompt({ cliPath: cli }, { key: 'GY-1', title: 'Example', type: 'chore' }, { principal: 'graphyard-worker-1' }, 1).includes(section), 'a chore\'s brief stays short');
   assert.ok(!codeReview(['src/app.ts']).includes(section), 'a code review touching only src/ omits it');
 });
