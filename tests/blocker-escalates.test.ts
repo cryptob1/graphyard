@@ -118,7 +118,7 @@ test('integration:blocker-escalates — however long the blocker waits it never 
   assert.equal(dashboard.board.groups['needs-you'].some(entry => entry.key === 'GY-1'), false, 'never grouped under Needs you');
   assert.equal(dashboard.board.groups.blocked.find(entry => entry.key === 'GY-1') !== undefined, true, 'it stays Blocked');
   assert.ok(dashboard.master.includes('GY-1') && dashboard.master.includes('Fix the export'), 'the Master page lists it');
-  assert.ok(dashboard.master.includes('blocked 35m ago'), `the Master page says how long it has stood: ${dashboard.master}`);
+  assert.ok(dashboard.master.includes('blocked 35m'), `the Master page says how long it has stood: ${dashboard.master}`);
 });
 
 test('integration:blocker-escalates — a blocker with no recorded instant (a record older than blockedAt) never reads as freshly raised', async () => {

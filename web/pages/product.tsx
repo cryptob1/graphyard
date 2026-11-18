@@ -22,8 +22,8 @@ export default function ProductPage({ api }: { api: (path: string) => Promise<an
 export function ProductView({ brief, error, loading, retry }: { brief: ProductBrief | null; error: string; loading: boolean; retry(): void }) {
   const when = (at: string) => new Date(at).toLocaleString();
   return <section className="product-page" aria-label="Product">
-    <PageHeader title="Product" fact={brief ? `What the product is for, set ${when(brief.updatedAt)} by ${brief.by}.` : loading ? 'Reading the product brief…' : error ? 'The product brief could not be read.' : 'No product brief yet.'}
-      actions={error && <button type="button" onClick={retry}>Retry</button>}>{brief && <>{brief.why}. Kept by the master in project memory; this page is read-only.</>}</PageHeader>
+    <PageHeader title="Product" fact={brief ? `Updated ${new Date(brief.updatedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} by the master.` : loading ? 'Reading the product brief…' : error ? 'The product brief could not be read.' : 'No product brief yet.'}
+      actions={error && <button type="button" onClick={retry}>Retry</button>}/>
     {error && <p role="alert" className="amber">{error}</p>}
     {!loading && !error && !brief && <EmptyState title="The master has not written the brief.">It records one with <code>master brief set FILE REASON</code>.</EmptyState>}
     {brief && <article className="product-brief">{

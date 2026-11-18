@@ -38,7 +38,7 @@ export function masterOwes(work: Work[], now: number) {
  * The Master page (GY-3211): the master agent's live Herdr pane, typed into by the operator and
  * watched by everyone else. Its title reads Master (GY-3307). Above the terminal, what the Master
  * owes: the standing blockers that are the Master's, not the owner's (GY-3394) — Needs you carries
- * only the owner's three decisions.
+ * only the owner's three decisions. Messages with other installs fold away below it (GY-3481).
  */
 export default function MasterPage({ work, observedAt, token, api, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'token' | 'api' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -54,21 +54,21 @@ export default function MasterPage({ work, observedAt, token, api, setSelected, 
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const owes = masterOwes(work, now);
   return <>
-    <PageHeader title="Master" fact={owes.length ? `${owes.length} ${owes.length === 1 ? 'blocker waits' : 'blockers wait'} on the Master.` : 'Files, routes and unsticks the work.'}/>
+    <PageHeader title="Master" fact="Files, routes and unsticks the work."/>
     {stall && <p className="stall-alarm" role="alert">{stall}</p>}
-    {owes.length > 0 && <section className="panel" aria-label="Blockers the Master owes"><h2>Blockers <small>· the Master clears these</small></h2>
+    {owes.length > 0 && <section className="panel" aria-label="Blockers the Master owes"><h2>Blocked ({owes.length})</h2>
       <ul className="master-owes">{owes.map(entry => <li key={entry.id}>
         <button className="text-button" onClick={() => setSelected(entry.id)}>{entry.key} <span data-title>{entry.title}</span></button>
-        <span className="muted">{entry.since !== null ? `blocked ${formatAge(entry.since, now)} ago` : 'blocked'}</span>
-        <span className="muted">{entry.blocker}</span>
+        <span className="muted">{entry.since !== null ? `blocked ${formatAge(entry.since, now)}` : 'blocked'}</span>
+        <span className="muted master-owes-blocker" title={entry.blocker}>{entry.blocker}</span>
       </li>)}</ul>
     </section>}
-    {threads.length > 0 && <section className="master-messages" aria-label="Messages with other installs">
-      {threads.slice(0, 5).map(thread => <article key={thread.entries[0]!.id} className="master-thread" aria-label={`Thread with ${thread.peer}`}>
+    <LiveTerminal token={token} label="Master terminal"/>
+    {threads.length > 0 && <details className="panel master-messages"><summary>Messages with other installs ({threads.length})</summary>
+      {threads.map(thread => <article key={thread.entries[0]!.id} className="master-thread" aria-label={`Thread with ${thread.peer}`}>
         <h2>With {thread.peer}</h2>
         <ol>{thread.entries.map(entry => <li key={entry.id}><b>{entry.who}</b> <time dateTime={entry.at}>{new Date(entry.at).toLocaleString()}</time><p>{entry.text}</p></li>)}</ol>
       </article>)}
-    </section>}
-    <LiveTerminal token={token} label="Master terminal"/>
+    </details>}
   </>;
 }
