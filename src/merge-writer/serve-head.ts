@@ -8,7 +8,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { extname, join, resolve, sep } from 'node:path';
 import { buildStaticSite, groupBuildShell, type StaticBuildShell } from '../release-project.js';
 import { composeBounds, composeProjectName, composeStack, dockerEnvironment, type ComposeBounds, type Docker } from '../compose-preview.js';
-import type { Application } from '../project-applications.js';
+import type { PreviewableApplication } from '../project-applications.js';
 import { freePort, installCommand } from '../serve-app.js';
 import { trialContainerWaiting } from './trial-load.js';
 import type { E2eServe } from '../model/repository-policy.js';
@@ -16,7 +16,7 @@ import type { E2eServe } from '../model/repository-policy.js';
 /** A head served by a command until a URL answers: what a graphyard.json `e2e.serve` declares, read as an application. */
 export type CommandApplication = { id: string; kind: 'command' } & E2eServe;
 /** Every application a head can be served as. */
-export type ServedApplication = Application | CommandApplication;
+export type ServedApplication = PreviewableApplication | CommandApplication;
 /** graphyard.json's `e2e.serve`, migrated to the application it declares. */
 export const commandApplication = (serve: E2eServe): CommandApplication => ({ id: 'serve', kind: 'command', ...serve });
 

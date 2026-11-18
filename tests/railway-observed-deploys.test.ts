@@ -40,12 +40,12 @@ test('e2e:railway-observed-deploys — master status lists each app\'s versionUr
   const deployed = await commit(root, twoHoursAgo, 'README.md', 'v1\n');
   // On main for an hour, past the watch's 15 minutes: web must serve it by now; api's directory is untouched.
   const webChange = await commit(root, hourAgo, 'web/index.html', '<h1>v2</h1>\n');
-  const main = await commit(root, hourAgo, 'README.md', 'v2\n');
   assert.ok(first);
 
   const api = await endpoint(JSON.stringify({ commit: deployed }), 'application/json'), web = await endpoint(`${deployed}\n`, 'text/plain'), gone = await closedPort();
   try {
-    await writeFile(join(root, 'graphyard.json'), JSON.stringify({ delivery: { mode: 'local', applications: [
+    // GY-3459: observation reads the declaration main holds.
+    const main = await commit(root, hourAgo, 'graphyard.json', JSON.stringify({ delivery: { mode: 'local', applications: [
       { id: 'api', kind: 'compose', file: 'api/compose.yml', service: 'api', port: 8080, versionUrl: api.url },
       { id: 'web', kind: 'static', directory: 'web', versionUrl: web.url },
       { id: 'worker', kind: 'static', directory: 'worker', versionUrl: gone },

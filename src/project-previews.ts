@@ -1,6 +1,6 @@
 // Concern: an item's openable preview (GY-1902, GY-1903) — which declared application an item's cases need, and the durable preview record the loop keeps on the item.
 import { z } from 'zod';
-import type { ProjectDelivery } from './project-applications.js';
+import { previewable, type PreviewableApplication, type ProjectDelivery } from './project-applications.js';
 import type { Work } from './model/work.js';
 
 // ---------------------------------------------------------------------------
@@ -118,10 +118,10 @@ export const previewDatabase = (key: string) => `${previewInstance(key)}-db`;
  * declared that its cases cite; the cases it cites of any other application are `omitted`, and the
  * preview's detail names them.
  */
-export function previewDemand(work: Pick<Work, 'criteria'>, delivery: ProjectDelivery | null): { application: ProjectDelivery['applications'][number]; cases: string[]; omitted: string[] } | null {
+export function previewDemand(work: Pick<Work, 'criteria'>, delivery: ProjectDelivery | null): { application: PreviewableApplication; cases: string[]; omitted: string[] } | null {
   if (!delivery || delivery.previews !== 'local') return null;
   const cited = [...new Set(work.criteria.flatMap(criterion => criterion.proofs).flatMap(proof => proof.startsWith('e2e:') ? [proof.slice(4)] : []))];
-  const application = delivery.applications.find(entry => cited.some(id => delivery.cases[id] === entry.id));
+  const application = previewable(delivery.applications).find(entry => cited.some(id => delivery.cases[id] === entry.id));
   if (!application) return null;
   return { application, cases: cited.filter(id => delivery.cases[id] === application.id), omitted: cited.filter(id => delivery.cases[id] !== application.id && delivery.applications.some(entry => entry.id === delivery.cases[id])) };
 }
