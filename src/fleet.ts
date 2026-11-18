@@ -187,7 +187,7 @@ export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = D
   (account.quota.source === 'operator' || account.quota.state === 'exhausted' || !!account.quota.session && !account.quota.since || account.quota.loggedIn === false || smokeTestedKinds.includes(runtime.launch.kind) && (!account.smoke || smokeFailureDue(account, now)));
 
 /** Run a tiny request with precisely this account's launch login; narratives are never evidence. */
-export async function checkAccountLive(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, model: string | null = account.model): Promise<QuotaObservation> {
+export async function checkAccountLive(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, model: string | null = null): Promise<QuotaObservation> {
   const home = account.credential.home, key = home ?? `${account.credential.host}/${account.name}`;
   const pending = checksInFlight.get(key);
   if (pending) return pending;
@@ -210,7 +210,7 @@ export async function checkAccountLive(account: FleetAccount, runtime: FleetRunt
   return running;
 }
 
-export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, allAccounts: readonly FleetAccount[] = [account], model = account.model): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
+export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, allAccounts: readonly FleetAccount[] = [account], model?: string): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
   const now = probe.now?.() ?? Date.now(), saved = account.credential.home ? hostAccountCheck(account.credential.home) : null;
   const cached = saved && JSON.stringify(saved.key ?? null) === JSON.stringify(account.credential.key ?? null) ? saved : null;
   // Preserve the confined master's unreadable-home rule: only the host executor can test these logins.

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { writeFile, chmod } from 'node:fs/promises';
+import { writeFile, readFile, chmod } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { withDatabase } from './helpers/postgres.js';
@@ -28,6 +28,7 @@ test('quota-live-check: only each login’s live request holds it, across instal
       await chmod(provider, 0o700);
       const runtime = structuredClone(proposedRuntimes.find(runtime => runtime.name === kind) ?? { ...proposedRuntimes.find(runtime => runtime.name === 'pi')!, name: kind });
       runtime.launch.kind = kind;
+      if (kind === 'muse') runtime.launch.homeVariable = 'HOME';
       assert.ok(runtime, kind);
       runtime.launch.environment = { ...runtime.launch.environment, TEST_LOGIN: home, ...(kind !== 'agy' && runtime.launch.homeVariable ? { TEST_HOME_VARIABLE: runtime.launch.homeVariable } : {}), TEST_KIND: kind };
       const registries = stores.map(store => new AgentRegistry(store));
@@ -42,8 +43,8 @@ test('quota-live-check: only each login’s live request holds it, across instal
       const document = (index = 0) => registries[index].document(operator);
       const client: Pick<FleetClient, 'document' | 'observe'> = { document: () => document(), observe: request => registries[0].observe(operator, request, randomUUID()) };
       const reply = (ok: boolean, error: string | null = null) => writeFile(state, JSON.stringify({ ok, error }));
-      const signal = () => recordObservedExhaustion({ credentialFile: '', hostId: 'host' }, kind,
-        { at: new Date(now).toISOString(), role: 'worker', profile: 'fixture', work: null, reason: 'Quoted fixture: usage limit reached', resetsAt: null }, now, { registry: client, smoke });
+      const signal = (role: 'worker' | 'master' = 'worker') => recordObservedExhaustion({ credentialFile: '', hostId: 'host' }, kind,
+        { at: new Date(now).toISOString(), role, profile: 'fixture', work: null, reason: 'Quoted fixture: usage limit reached', resetsAt: null }, now, { registry: client, smoke });
       const check = async (index = 0) => {
         const doc = await document(index), account = doc.accounts.find(account => account.name === kind)!;
         const observed = await observeAccount(account, runtime, { now: () => now, smoke, quota: false, opencodeAuth: null, opencodeModels: null }, doc.accounts);
@@ -51,9 +52,10 @@ test('quota-live-check: only each login’s live request holds it, across instal
         return observed.quota;
       };
       await reply(true); await signal();
+      assert.ok(!JSON.parse((await readFile(join(home, 'calls'), 'utf8')).trim().split('\n')[0]).includes('fixture'), 'a model label with no provider id uses the runtime default');
       assert.equal((await document()).accounts.find(account => account.name === kind)!.quota.state, 'available', `${kind}: a quoted limit cannot hold a passing account`);
       assert.equal((await check()).state, 'available', `${kind}: quoted narrative does not hold`);
-      await signal();
+      await signal('master');
       assert.equal(calls, 1, 'repeated notices reuse the scheduled live check');
       assert.equal((await check(1)).state, 'available'); assert.equal(calls, 1, 'second install reuses host result');
       now += 30 * 60_000;

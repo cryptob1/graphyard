@@ -36,4 +36,3 @@ export async function headlessArgv(launch: { kind: string; args: readonly string
   const accepted = launch.contract?.headlessArgs || !form ? [] : await acceptedFlags(program, form.before, form.optional ?? [], env);
   return [program, ...headlessArgs(launch.kind, launch.args, request, launch.contract, accepted)];
 }
-
