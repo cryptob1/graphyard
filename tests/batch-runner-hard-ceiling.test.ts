@@ -97,16 +97,21 @@ test('e2e:batch-runner-hard-ceiling — a new batch run through the loop\'s gate
   };
   yard.reads.adoptTrialRun = async () => null;
   const flight = (await batchGateStep(yard.loop()))!.gate!;
-  for (const deadline = Date.now() + 15_000; !directories.length;) { assert.ok(Date.now() < deadline, 'the gate launched its run'); await new Promise(resolve => setTimeout(resolve, 20)); }
+  const until = async (condition: () => boolean, what: string) => { for (const deadline = Date.now() + 15_000; !condition();) { assert.ok(Date.now() < deadline, what); await new Promise(resolve => setTimeout(resolve, 20)); } };
+  await until(() => !!yard.record().inFlight?.run, 'the gate launched its run and saved it on the record');
   const directory = directories[0]!;
-  const spec = (await readTrialRunSpec(directory))!;
-  const meta = JSON.parse(readFileSync(runFiles(directory).meta, 'utf8')) as { timeoutMs: number };
-  assert.ok(spec.timeoutMs <= ceilingMs, `the batch spec's timeout is ${spec.timeoutMs} ms`);
-  assert.ok(meta.timeoutMs <= ceilingMs, `the run's outer deadline is ${meta.timeoutMs} ms`);
-  assert.equal(spec.timeoutMs, gateCeilingMs);
-  assert.deepEqual(yard.record().inFlight!.checks, ['build', 'affected'], 'every required check is retained');
-  assert.equal(yard.record().inFlight!.run!.directory, directory);
-  await writeFile(trialRunFiles(directory).result, `${JSON.stringify({ ok: true, run: passing })}\n`);
+  try {
+    const spec = (await readTrialRunSpec(directory))!;
+    const meta = JSON.parse(readFileSync(runFiles(directory).meta, 'utf8')) as { timeoutMs: number };
+    assert.ok(spec.timeoutMs <= ceilingMs, `the batch spec's timeout is ${spec.timeoutMs} ms`);
+    assert.ok(meta.timeoutMs <= ceilingMs, `the run's outer deadline is ${meta.timeoutMs} ms`);
+    assert.equal(spec.timeoutMs, gateCeilingMs);
+    assert.deepEqual(yard.record().inFlight!.checks, ['build', 'affected'], 'every required check is retained');
+    assert.equal(yard.record().inFlight!.run!.directory, directory);
+  } finally {
+    // The run's verdict, written as the detached runner writes it, so the gate settles whatever the assertions found.
+    await writeFile(trialRunFiles(directory).result, `${JSON.stringify({ ok: true, run: passing })}\n`);
+  }
   await flight;
   assert.equal(yard.record().verified, yard.tip, 'the run\'s verdict settles the batch');
 });
