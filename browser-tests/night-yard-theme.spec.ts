@@ -98,8 +98,8 @@ test('e2e:night-yard-theme — Night Yard serves by default with rain over grain
   expect(await background(page)).toEqual([7, 11, 20]);
   expect(await rain(page)).toBe('gy-rain');
   expect(await grain(page)).toContain('svg');
-  // The strip carries the trust numbers; a builder's row gets its friendly name, and the Master page's title reads Master (GY-3307).
-  await expect(page.locator('.trust-strip')).toContainText('verified by running');
+  // The strip carries what is happening now; a builder's row gets its friendly name, and the Master page's title reads Master (GY-3307).
+  await expect(page.locator('.activity-strip')).toContainText('agents working');
   await expect(page.locator('[data-row="GY-14"] .row-who')).toContainText('Theo is running GY-14');
   await page.keyboard.press('Control+k');
   await page.getByLabel('Search commands').fill('Master');
@@ -159,7 +159,7 @@ test('e2e:night-yard-theme — with reduced motion the rain, the glitch flicker 
   expect(await rain(page)).toBe('none');
   // The grain holds still — it is a texture, not a movement — and the beacons do not breathe.
   expect(await grain(page)).toContain('svg');
-  expect(await page.evaluate(() => getComputedStyle(document.querySelector('.trust-strip .beacon')!).animationName)).toBe('none');
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector('.activity-strip .beacon')!).animationName)).toBe('none');
   // A merge still brings the toast, but no pulse runs on it.
   state.work = state.work.map(item => item.key === 'GY-15' ? merged(item) : item);
   const toast = page.locator('[data-toast="GY-15"]');

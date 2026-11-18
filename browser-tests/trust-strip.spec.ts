@@ -2,10 +2,10 @@ import { test, expect, type Page } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
 import { boardStatus, realDeliveredWork, NOW } from './ui-board';
 
-// GY-3395: the header's strip is a trust strip — three numbers for the last seven days computed
-// from the records Graphyard already keeps (deliveries, proofs, send-backs and the batch gate's
-// reverts), replacing the agent counts. Each number links to the items behind it on the Shipped
-// page. The seeded week: four deliveries, one verified by running, one sent back, one reverted,
+// GY-3395: the trust strip — three numbers for the last seven days computed from the records
+// Graphyard already keeps (deliveries, proofs, send-backs and the batch gate's reverts). It sits on
+// the Shipped page since the header shows only what is happening now (GY-3483); each number
+// filters the page to the items behind it. The seeded week: four deliveries, one verified by running, one sent back, one reverted,
 // and one delivery eight days old that counts for none of them.
 const hour = 3_600_000;
 const at = (offset: number) => new Date(NOW + offset).toISOString();
@@ -47,9 +47,10 @@ async function serve(page: Page) {
   return state;
 }
 
-test('e2e:trust-strip — the header shows the week’s trust numbers, no agent counts, and each number links to its items', async ({ page }) => {
+test('e2e:trust-strip — the Shipped page shows the week’s trust numbers, no agent counts, and each number links to its items', async ({ page }) => {
   test.setTimeout(60_000);
   await serve(page);
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Shipped', exact: true }).click();
   const strip = page.locator('.trust-strip');
   // The three numbers, matching the seeded records: four deliveries this week, one whose proof ran
   // the real app, one sent back, one reverted by the batch gate. The delivery eight days old and
@@ -61,7 +62,7 @@ test('e2e:trust-strip — the header shows the week’s trust numbers, no agent 
   await expect(strip).toContainText('1/4 verified by running');
   await expect(strip).toContainText('1/4 sent back');
   await expect(strip).toContainText('1 reverted');
-  // The header carries no agent counts.
+  // The strip carries no agent counts.
   await expect(strip).not.toContainText('agents working');
   await expect(strip).not.toContainText('in trial');
 
@@ -76,6 +77,7 @@ test('e2e:trust-strip — the header shows the week’s trust numbers, no agent 
   // The item itself opens from the list.
   await page.locator('.shipped-page').getByRole('button', { name: /GY-163/ }).click();
   await expect(page.locator('article.item-page')).toContainText('Resolve review threads the reviewer listed');
+  await page.getByRole('button', { name: '← Back', exact: true }).click();
 
   await page.locator('[data-trust="sent-back"]').click();
   await expect(list).toContainText('GY-164');

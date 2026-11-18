@@ -64,7 +64,7 @@
       "kind": "browser",
       "name": "the release line names the served commit verified",
       "action": "expectText",
-      "text": "Serving 12345678 · verified",
+      "text": "Live: 12345678 · verified",
       "exact": false
     },
     {

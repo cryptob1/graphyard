@@ -31,7 +31,7 @@ test('e2e:one-mode-no-fun-toggle — no Fun control on any page, a stored Fun pr
   await expect(page.locator('html')).not.toHaveAttribute('data-fun', /.*/);
   await expect(page.locator('[data-build-line]')).toBeVisible();
   await expect(page.locator('[data-row="GY-14"] .row-who')).toContainText('is running GY-14');
-  await expect(page.locator('.trust-strip')).toContainText('verified by running');
+  await expect(page.locator('.activity-strip')).toContainText('agents working');
 
   const noFun = async () => {
     await expect(page.getByRole('button', { name: /^fun$/i, includeHidden: true })).toHaveCount(0);

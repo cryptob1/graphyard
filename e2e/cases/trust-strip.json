@@ -1,7 +1,7 @@
 {
   "id": "trust-strip",
-  "title": "A trust strip in the header: verified by running, sent back, reverts this week",
-  "description": "A real browser on the built dashboard: with seeded deliveries, proofs, send-backs and a batch-gate revert, the header's strip shows three numbers for the last seven days — the share of delivered items whose proofs ran the real app, the share sent back for rework, and the reverted items — matching those records, with no agent counts; each number links to the items behind it on the Shipped page, and a delivery older than the week counts for none of them.",
+  "title": "A trust strip on the Shipped page: verified by running, sent back, reverts this week",
+  "description": "A real browser on the built dashboard: with seeded deliveries, proofs, send-backs and a batch-gate revert, the Shipped page's trust strip shows three numbers for the last seven days — the share of delivered items whose proofs ran the real app, the share sent back for rework, and the reverted items — matching those records, with no agent counts; each number filters the Shipped page to the items behind it, and a delivery older than the week counts for none of them.",
   "tags": ["dashboard"],
   "target": "any",
   "required": false,

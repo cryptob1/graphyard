@@ -14,7 +14,7 @@ async function serveBoard(page: Page, route: Route) {
 
 // Browser-only API fixtures: no production requests, credentials, or writes.
 const work = { dependencies: [], scenarioRequirements: [], id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef1234567890abcdef1234567890abcdef12' } };
-async function fixture(page: Page, role = 'admin') {
+async function fixture(page: Page, role = 'admin', extra: Record<string, unknown> = {}) {
   const state = { offline: false, unauthorized: false, writes: 0, pause: false };
   await page.route('**/api/**', async route => {
     if (state.offline) return route.abort();
@@ -23,7 +23,7 @@ async function fixture(page: Page, role = 'admin') {
     if (route.request().method() !== 'GET') state.writes++;
     const path = new URL(route.request().url()).pathname;
     if (path.endsWith('/board')) return serveBoard(page, route);
-    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, engineers: [{ id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }, { key: 'GY-3', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
+    return route.fulfill({ json: path.endsWith('/status') ? { ...extra, actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, engineers: [{ id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }, { key: 'GY-3', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
   });
   await page.goto('/?sign-in'); return state;
 }
@@ -103,13 +103,11 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
       return route.fulfill({ json: [] });
     });
     await page.goto('/?sign-in'); await login(page);
-    // The release line: the served commit, its health, and the merged change it does not carry yet.
+    // The release line: the live commit and the merged change it does not carry yet; health is named only when ill.
     const release = page.locator('[data-release-line="serving"]');
     await expect(release).toHaveAttribute('data-healthy', 'true');
     await expect(release).toHaveAttribute('data-pending', '1');
-    await expect(release).toContainText('Serving a1b2c3d4');
-    await expect(release).toContainText('healthy');
-    await expect(release).toContainText('1 merged change not carried yet');
+    await expect(release).toHaveText('Live: a1b2c3d4 · 1 change not live yet');
     // The four states, in order, over the Moving rows; each row shows its own current state.
     await expect(page.locator('[data-group-section="moving"] .work-row')).toHaveCount(2);
     await expect(page.locator('.step-name')).toHaveText(['Not started', 'Building', 'Testing, review, merge', 'Done']);
@@ -130,7 +128,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
 for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'phone', width: 390, height: 844 }]) {
   test(`the release line and the section tabs share the top bar on ${viewport.name}`, async ({ page }) => {
     await page.setViewportSize(viewport);
-    await fixture(page); await login(page);
+    await fixture(page, 'admin', { production: { observedAt: '2026-01-01T00:00:00Z', serving: 'a'.repeat(40), error: null, pending: ['GY-9'], incidents: [] } }); await login(page);
     await openPage(page, 'Tests', 'Test cases');
     const line = page.locator('.release-line');
     const tabs = page.getByRole('navigation', { name: 'Pages in this section' });
@@ -229,13 +227,15 @@ test('invalid login remains on login; whitespace is trimmed and loading never cl
 
 test('connection loss labels stale data, recovers, and revoked sessions clear the dashboard', async ({ page }) => {
   const state = await fixture(page); await login(page);
-  await expect(page.getByText(/^Live · updated/)).toBeVisible();
+  const connection = page.locator('.sidebar .connection');
+  await expect(connection).toHaveText('Live');
+  await expect(connection).toHaveAttribute('title', /^Last update /);
   state.offline = true;
-  await expect(page.getByText(/^Disconnected · last updated/)).toBeVisible({ timeout: 10000 });
+  await expect(connection).toHaveText('Offline · retrying', { timeout: 10000 });
   await expect(page.getByRole('alert')).toContainText('stale');
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toBeVisible();
   state.offline = false;
-  await expect(page.getByText(/^Live · updated/)).toBeVisible({ timeout: 10000 });
+  await expect(connection).toHaveText('Live', { timeout: 10000 });
   await expect(page.getByRole('alert')).toHaveCount(0);
   state.unauthorized = true;
   await expect(page.getByLabel('Access token')).toBeVisible({ timeout: 10000 });
@@ -316,16 +316,16 @@ test('slice view names leads, workers, reviewers and bottlenecks and labels each
   await expect(slices).toContainText('Rowan');
   await expect(slices).toContainText('legacy-proof');
   await expect(slices.getByText('Session kind undeclared', { exact: true })).toHaveCount(1);
-  // The signed-in summary names who and in which role, and carries no session-kind badge (GY-161, AC-10).
+  // The signed-in summary names the role as the owner reads it, never the principal id (GY-3483), and carries no session-kind badge (GY-161, AC-10).
   const session = page.locator('.sidebar-bottom');
-  await expect(session).toContainText('fixture · admin');
+  await expect(session.locator('.signed-in')).toHaveText('Owner');
   await expect(session.locator('.identity')).toHaveCount(0);
 });
 
 test('an AI session is named in the signed-in summary without a session-kind badge', async ({ page }) => {
   await fixture(page, 'worker'); await login(page);
   const session = page.locator('.sidebar-bottom');
-  await expect(session).toContainText('fixture · worker', { timeout: 15_000 });
+  await expect(session.locator('.signed-in')).toHaveText('Maintainer', { timeout: 15_000 });
   await expect(session.locator('.identity')).toHaveCount(0);
 });
 
