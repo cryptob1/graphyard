@@ -464,7 +464,7 @@ html:not([data-theme='daylight']) .work-row.glitch{animation:gy-glitch 2.2s infi
    so the strip adds its news without adding the page a new line of height. */
 .top-bar-row{display:flex;align-items:baseline;justify-content:space-between;gap:var(--space-3);flex-wrap:wrap}
 .top-bar-live{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.trust-strip{display:flex;align-items:center;gap:6px;margin:0;font-size:var(--type-small);color:var(--text-2);white-space:nowrap}
+.trust-strip{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0;font-size:var(--type-small);color:var(--text-2);white-space:nowrap}
 .trust-strip .mono{color:var(--text)}
 .palette-button{display:inline-flex;align-items:center;gap:4px;min-height:30px;padding:2px 10px;font-size:var(--type-small);font-weight:500;background:var(--raised);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-2)}
 .palette-button:hover{color:var(--text);border-color:var(--accent)}
