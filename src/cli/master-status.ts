@@ -180,7 +180,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const trialImageFault = state?.actions[trialImageKey]?.state === 'failed' ? [{ subject: 'trial image', text: state.actions[trialImageKey]!.detail, next: 'Fix Docker on the trial host as the error names; the next merge trial provisions the image again and clears this' }] : [];
   // GY-3336: the remote refusing the fetch of the base branch — one line quoting the remote's
   // refusal and the fix — while the loop's backoff stands.
-  const fetchRefused = state?.actions[fetchRefusalKey]?.state === 'failed' ? [{ subject: 'the repository', text: state.actions[fetchRefusalKey]!.detail, next: 'Authorise the merge writer\'s access as the line names; the loop fetches again once its backoff passes and clears this' }] : [];
+  const fetchRefused = state?.actions[fetchRefusalKey]?.state === 'failed' ? [{ subject: 'the repository', text: state.actions[fetchRefusalKey]!.detail, next: 'Fix what the line names; the loop fetches again once its backoff passes and clears this' }] : [];
   // GY-3336: the master session's launch failing the same way three times — one line while the
   // loop's backoff stands, instead of a failed pane per cycle.
   const launchRefused = state?.actions[masterLaunchKey];
