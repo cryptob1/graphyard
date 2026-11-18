@@ -22,7 +22,7 @@ const until = async (condition: () => boolean, what: string, timeoutMs = 60_000)
 };
 const waiting = /waits for a host heavy-job slot|waiting for a host heavy-job slot/;
 
-/** One host whose two slots a merge trial (acme/app) and a batch gate (acme/site) hold until `go`. */
+/** Two item trials fill the ordinary host slots and a batch gate holds the reservation until `go`. */
 async function fullHost() {
   const scratch = await temporaryDirectory('worker-verify'), data = join(scratch, 'data'), log = join(scratch, 'runs.log'), go = join(scratch, 'go');
   const root = join(scratch, 'app'), managed = join(scratch, 'managed');
@@ -51,13 +51,13 @@ async function fullHost() {
     launch: (mode: string, id: string, project = 'acme/app') => track(id, spawn(process.execPath, ['--import', 'tsx', launcher, mode, id, root, managed],
       { stdio: ['ignore', 'ignore', 'pipe'], env: { ...base, FIXTURE_PROJECT: project } })),
   };
-  const holders = [fixture.launch('trial', 'GY-1'), fixture.launch('gate', 'gate-site', 'acme/site')];
-  await until(() => fixture.ran('GY-1') && fixture.ran('gate-site'), 'a merge trial and a batch gate hold both slots');
-  assert.equal(heldSlots(fixture.directory).length, 2);
+  const holders = [fixture.launch('trial', 'GY-1'), fixture.launch('trial', 'GY-2'), fixture.launch('gate', 'gate-site', 'acme/site')];
+  await until(() => fixture.ran('GY-1') && fixture.ran('GY-2') && fixture.ran('gate-site'), 'two merge trials and a batch gate fill the host budget');
+  assert.equal(heldSlots(fixture.directory).length, 3);
   return { ...fixture, holders, scratch };
 }
 
-test('integration:worker-verify-not-queued — with both slots held by a merge trial and a batch gate, a worker build and selected tests start at once; a merge trial and a whole suite still wait', { timeout: 180_000 }, async () => {
+test('integration:worker-verify-not-queued — with both ordinary slots held by merge trials and the reservation held by a batch gate, a worker build and selected tests start at once; a merge trial and a whole suite still wait', { timeout: 180_000 }, async () => {
   const host = await fullHost();
   // A worker's build, its affected tests, a named test file and its host-run check: none waits.
   const worker = [host.session('build', ['run', 'build']), host.session('affected', ['run', 'test:affected']), host.session('selected', ['test', '--', 'tests/a.test.ts'])];
@@ -95,8 +95,8 @@ test('integration:worker-verify-not-queued — with both slots held by a merge t
   for (const job of [...host.holders, check, trial, suite]) assert.equal(await job.closed, 0, job.stderr());
   assert.ok(host.ran('GY-4') && host.ran('suite'), 'both ran once a slot freed');
   let running = 0, peak = 0;
-  for (const [event, id] of host.events()) if (['GY-1', 'gate-site', 'GY-4', 'suite'].includes(id)) { running += event === 'start' ? 1 : -1; peak = Math.max(peak, running); }
-  assert.equal(peak, 2, 'heavy jobs still never exceed the limit');
+  for (const [event, id] of host.events()) if (['GY-1', 'GY-2', 'gate-site', 'GY-4', 'suite'].includes(id)) { running += event === 'start' ? 1 : -1; peak = Math.max(peak, running); }
+  assert.equal(peak, 3, 'two ordinary jobs plus one reserved gate never exceed the budget');
   assert.deepEqual(heldSlots(host.directory), []);
 });
 
@@ -104,7 +104,7 @@ test('e2e:worker-verify-not-queued — while trials fill the host budget a worke
   const host = await fullHost();
   const worker = [host.session('build', ['run', 'build']), host.session('affected', ['run', 'test:affected'])];
   for (const job of worker) { assert.equal(await job.closed, 0, job.stderr()); assert.doesNotMatch(job.stderr(), waiting); assert.ok(host.ran(job.id)); }
-  assert.equal(heldSlots(host.directory).length, 2, 'the trials still hold both slots');
+  assert.equal(heldSlots(host.directory).length, 3, 'the trials still hold both ordinary slots and the reservation');
 
   const root = await temporaryDirectory('worker-verify-status');
   const master = masterConfigSchema.parse({
@@ -116,7 +116,7 @@ test('e2e:worker-verify-not-queued — while trials fill the host budget a worke
   try {
     const report = await masterStatusReport(root, master, async () => ({ work: [], now: new Date().toISOString() }), async () => { throw new Error('no git in the fixture'); });
     assert.equal(report.heavyJobs.limit, 2);
-    assert.deepEqual(report.heavyJobs.holders.map(holder => `${holder.label} (${holder.project})`).sort(), ['merge trial GY-1 (acme/app)', 'merge trial batch-gate (acme/site)']);
+    assert.deepEqual(report.heavyJobs.holders.map(holder => `${holder.label} (${holder.project})`).sort(), ['merge trial GY-1 (acme/app)', 'merge trial GY-2 (acme/app)', 'merge trial batch-gate (acme/site)']);
     for (const holder of report.heavyJobs.holders) { assert.ok(holder.pid! > 0); assert.ok(holder.since); }
   } finally { if (previous === undefined) delete process.env[slotsDirectoryVariable]; else process.env[slotsDirectoryVariable] = previous; }
   host.go();
