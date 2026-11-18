@@ -9,17 +9,18 @@ import type { Work } from '../../src/model';
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
 
 /**
- * The city-at-night strip (GY-3272): how many agents are on shift, how many merges are in trial
- * and how many shipped tonight, read off the same snapshot the page below shows. The numbers
+ * The city-at-night strip (GY-3272): how many agents are on shift, how many merges are in trial,
+ * how many shipped this week and how many wait to go live (GY-3452), read off the same snapshot the page below shows. The numbers
  * carry data attributes with exactly what the sentence says, so a reader (and a test) checks the
- * words against the counts the Workers page and the ledger read, in the app's own words: agents working, shipped today.
+ * words against the counts the Workers page and the ledger read, in the app's own words: agents working, shipped this week, waiting to go live.
  */
-export function CityStrip({ work, observedAt }: { work: Work[]; observedAt: number }) {
-  const { onShift, inTrial, shippedTonight } = cityCounts(work, observedAt);
-  return <p className="city-strip" aria-label="Activity" data-on-shift={onShift} data-in-trial={inTrial} data-shipped-tonight={shippedTonight}>
+export function CityStrip({ work, observedAt, live }: { work: Work[]; observedAt: number; live?: { commit?: unknown; waiting?: unknown } | null }) {
+  const { onShift, inTrial, shipped, waiting } = cityCounts(work, observedAt, live);
+  return <p className="city-strip" aria-label="Activity" data-on-shift={onShift} data-in-trial={inTrial} data-shipped={shipped} data-waiting={waiting}>
     <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> agent{onShift === 1 ? '' : 's'} working
     <span aria-hidden="true"> · </span><span className="mono">{inTrial}</span> in trial
-    <span aria-hidden="true"> · </span><span className="mono">{shippedTonight}</span> shipped today
+    <span aria-hidden="true"> · </span><span className="mono">{shipped}</span> shipped this week
+    <span aria-hidden="true"> · </span><span className="mono">{waiting}</span> waiting to go live
   </p>;
 }
 
@@ -137,7 +138,7 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
     <div className="top-bar-row">
       {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}
       <div className="top-bar-live">
-        <CityStrip work={work} observedAt={observedAt}/>
+        <CityStrip work={work} observedAt={observedAt} live={status?.live}/>
         {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
       </div>
     </div>

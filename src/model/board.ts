@@ -54,11 +54,15 @@ export function releasedAt(work: Work, release: ReleaseView = noRelease): number
 }
 
 /**
- * Shipped this week: delivered items the release was seen serving in the last seven days, dated
- * from that observation. The Work page's footer and the Insights headline read this one count.
+ * Shipped means live (GY-3452): of the week's merges, those the live commit contains are shipped
+ * and the rest are waiting to go live. `live` is /api/status's answer — the live commit and the
+ * merged items it does not contain; with no live commit known, nothing is claimed shipped. The top
+ * bar and the Work page's card both read this one count.
  */
-export function shippedThisWeek(work: Work[], now: number, release: ReleaseView = noRelease): Work[] {
-  return work.filter(w => groupOf(w, now, undefined, undefined, release) === 'shipped' && releasedAt(w, release) !== null && now - releasedAt(w, release)! <= 7 * 24 * 60 * 60 * 1000);
+export function shippedCounts(work: Work[], live: { commit?: unknown; waiting?: unknown } | null | undefined, now: number): { shipped: Work[]; waiting: Work[] } {
+  const merged = work.filter(w => w.stage === 'done' && !isClosed(w) && !!(w.delivery?.mergedAt ?? w.observation?.mergedAt) && now - mergedAt(w) <= 7 * 24 * 60 * 60 * 1000);
+  const waiting = typeof live?.commit === 'string' && Array.isArray(live.waiting) ? new Set(live.waiting) : null;
+  return { shipped: merged.filter(w => waiting && !waiting.has(w.key)), waiting: merged.filter(w => !waiting || waiting.has(w.key)) };
 }
 
 /** When a delivered item merged. */
@@ -74,8 +78,7 @@ export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> 
   if (isClosed(work)) return null;
   // Merged work is Done (GY-1979): it has left the board, whichever delivery state it is in — the
   // top bar's release line carries the commit production serves, its health and what it does not
-  // carry yet. It still counts as shipped this week only once the release is observed serving it
-  // (`shippedThisWeek`), and `leftFlowAt` stays the delivery record's own rule.
+  // carry yet. It counts as shipped only once the live commit contains it (`shippedCounts`), and `leftFlowAt` stays the delivery record's own rule.
   if (work.stage === 'done') return 'shipped';
   if (humanOnly.has(work.id) || parkedOnHuman(work)) return 'needs-you';
   const phase = phaseOf(work, now);
