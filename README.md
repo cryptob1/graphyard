@@ -6,7 +6,7 @@
 
 ## Why Graphyard
 
-- **You decide goals, money, credentials.** They wait under Needs you; blockers are the Master's.
+- **You decide goals, money, credentials.** Tell any agent your decision; it records your own words. Reverse a relayed answer under Needs you. Blockers are the Master's.
 - **Every change is proven.** Workers build, agents review, main trials each head.
 - **Production stays safe.** Main deploys itself; failures revert automatically.
 

@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { Agent } from './fun';
 
-type Event = { seq: number; kind: string; actor: string; created_at: string; payload?: { details?: { oldPriority?: number; newPriority?: number; reason?: string } } };
+type Answer = { ownerSaid?: string; by: string; text?: string; note?: string };
+type Event = { seq: number; kind: string; actor: string; created_at: string; payload?: { details?: { oldPriority?: number; newPriority?: number; reason?: string; request?: { answer?: Answer }; answer?: Answer } } };
 export default function History({ events }: { events: Event[] }) {
   const [limit, setLimit] = useState(20);
   const [groupObservations, setGroupObservations] = useState(true);
@@ -20,6 +21,7 @@ export default function History({ events }: { events: Event[] }) {
       <div className="timeline">{groups.slice(0, limit).map(({ newest, oldest, count }) => <div key={newest.seq}>
         <span>{new Date(newest.created_at).toLocaleString()}{count > 1 && <> back to {new Date(oldest.created_at).toLocaleString()}</>}</span>
         <strong>{newest.kind === 'priority' ? 'Priority changed' : newest.kind}{count > 1 && ` × ${count}`}</strong><small><Agent id={newest.actor}/></small>{newest.kind === 'priority' && <p>P{newest.payload?.details?.oldPriority} → P{newest.payload?.details?.newPriority} · {newest.payload?.details?.reason}</p>}
+        {(newest.kind === 'human.answered' || newest.kind === 'human-proof.answered') && <AnswerHistory answer={newest.payload?.details?.request?.answer ?? newest.payload?.details?.answer}/>}
       </div>)}</div>
       {events.length === 0 && <p>No history loaded.</p>}
     </div>
@@ -27,4 +29,9 @@ export default function History({ events }: { events: Event[] }) {
     {groups.length > limit && <button className="text-button" onClick={() => setLimit(n => n + 20)}>Show more history</button>}
     {limit > 20 && <button className="text-button" onClick={() => setLimit(20)}>Show less history</button>}
   </section>;
+}
+
+function AnswerHistory({ answer }: { answer?: Answer }) {
+  if (!answer) return null;
+  return <p>{answer.text ?? answer.note}{answer.ownerSaid && <span> · relayed by {answer.by} from the owner: "{answer.ownerSaid}"</span>}</p>;
 }

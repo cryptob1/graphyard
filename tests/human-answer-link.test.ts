@@ -36,8 +36,7 @@ test('integration:human-answer-link — a master answer on a human-only request 
       assert.ok(String(refused.body.error).includes(`${url}/#${work.key}`), `${agent.id}: the refusal names the item link: ${JSON.stringify(refused.body)}`);
       assert.match(String(refused.body.error), /signed in/);
     }
-    assert.match(masterInstructions, /approve in this chat/);
-    assert.match(masterInstructions, /Give the owner that link/);
-    assert.match(masterInstructions, /\/#GY-N/);
+    assert.match(masterInstructions, /--owner-said/);
+    assert.match(masterInstructions, /reverse/);
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); await database.close(); }
 });

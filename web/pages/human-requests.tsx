@@ -38,16 +38,22 @@ export default function HumanRequestsPage({ work, status, observedAt, action, bu
   const open = requests.length + (growth ? 1 : 0);
   return <>
     <PageHeader title="Needs you" fact={open ? `${open} ${open === 1 ? 'action waits' : 'actions wait'} on you.` : 'Nothing is waiting on you.'}>
-      Agents decide everything except goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. An item that reaches one waits here without holding a worker; everything else is the Master's, on the Master page.</PageHeader>
+      Agents decide everything except goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. You can give your decision to any agent, which records your own words. You can reverse a relayed answer here. An item that reaches one waits here without holding a worker; everything else is the Master's, on the Master page.</PageHeader>
     {actor && <p className="muted signed-in-as">Signed in as <strong>{actor.displayName ?? actor.id}</strong> · {signedInAs(actor)}</p>}
     {growth && <div className="card human-request" data-worker-growth><div className="card-top"><strong>Worker pool cannot grow</strong></div><p>{growth}</p></div>}
     {requests.length === 0 ? !growth && <EmptyState title="All clear.">Goals, money, accounts and credentials for people come here when an item needs one of them.</EmptyState>
       : <div className="cards">{requests.map(row => <RequestCard key={row.request.id} row={row} refusal={refusalFor(row)} busy={busy} open={() => setSelected(row.id)} signIn={signOut}
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}</div>}
-    {answered.length > 0 && <section className="panel" aria-label="Recently answered"><h2>Recently answered</h2><ul className="shipped-list">{answered.map(({ item, request }) => <li key={request.id}>
+    {work.flatMap(item => (item.humanProofs ?? []).filter(check => check.answer?.ownerSaid).map(check => <section className="panel" key={check.id}>
+      <strong>{item.key} · {check.proof}</strong><p>relayed by {check.answer!.by} from the owner: "{check.answer!.ownerSaid}"</p>
+      {!humanOnlyRefusal('human-proof', actor ?? {}) && <button disabled={busy} onClick={() => action(item.id, 'human-proof', { request: check.id, reverses: check.answer!.at, outcome: check.answer!.outcome === 'pass' ? 'fail' : 'pass', note: 'Owner reversed the relayed answer' })}>Reverse check answer</button>}
+    </section>))}
+    {answered.length > 0 && <section className="panel" aria-label="Recently answered"><h2>Recently answered</h2><ul className="shipped-list">{answered.map(({ item, request }) => <li key={`${request.id}:${request.answer!.at}`}>
       <button className="text-button" onClick={() => setSelected(item.id)}>{item.key} <span data-title>{item.title}</span></button>
       <span className="muted">{humanDecisionLabel[request.kind]} · {request.answer!.outcome} by {request.answer!.by} after {formatDuration(request.answer!.waitedMs / 60000)}</span>
       <span>{shortShas(request.answer!.text)}</span>
+      {request.answer!.ownerSaid && <><span>relayed by {request.answer!.by} from the owner: "{request.answer!.ownerSaid}"</span>
+        {!humanOnlyRefusal('human-request', actor ?? {}) && !item.humanRequest && item.humanRequests?.findLast(entry => entry.id === request.id) === request && <button disabled={busy} onClick={() => action(item.id, 'answer', { request: request.id, reverses: request.answer!.at, outcome: request.answer!.outcome === 'declined' ? 'provided' : 'declined', answer: 'Owner reversed the relayed answer' })}>Reverse answer</button>}</>}
     </li>)}</ul></section>}
   </>;
 }

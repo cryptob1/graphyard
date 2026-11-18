@@ -122,6 +122,7 @@ export const operatorAgentRouteGuard: Route = {
     if (actor.role === 'operator-agent') demand(
       url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events'
       || url.pathname === '/api/delegation' || url.pathname === '/api/intake' || /^\/api\/work(?:\/[^/]+(?:\/[a-z]+)?)?$/.test(url.pathname)
+      || (req.method === 'POST' && /^\/api\/work\/[^/]+\/human-proof$/.test(url.pathname))
       // E2E case recording (GY-1614): the registry and its run route, only for a holder of e2e:record.
       || (/^\/api\/scenarios(?:\/[^/]+\/runs)?$/.test(url.pathname) && !!actor.capabilities?.includes('e2e:record'))
       // The release-filing identity reads imported runs and seals a released candidate; never imports.
