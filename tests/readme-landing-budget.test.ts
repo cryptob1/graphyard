@@ -21,3 +21,9 @@ test('e2e:readme-landing-budget — README is at most 290 words, links the setup
   const guide = read('docs/setup.md');
   for (const fact of moved) assert.ok(guide.includes(fact), `docs/setup.md carries: ${fact}`);
 });
+
+test('unit:readme-landing-budget-pinned — the owner-relay fact (GY-1857 answers through any agent) fits inside the README budget', () => {
+  const readme = read('README.md');
+  assert.match(readme, /Tell any agent; reverse relayed answers under Needs you\./, 'README says any agent relays the owner answer and Needs you reverses it');
+  assert.ok(readme.trim().split(/\s+/).length <= 290, 'README stays at most 290 words with the relay fact');
+});

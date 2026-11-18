@@ -1,0 +1,14 @@
+{
+  "id": "host-shim-outdated",
+  "title": "A host whose graphyard-host-shim is older than this release takes no shards and is named in master status",
+  "description": "A merge trial with one added host reached over SSH through graphyard-host-shim. When the host's shim probe reports a digest other than this release's shim, the host gets no shard: every shard runs on this machine with the one-host verdict, master status remoteShards lists the host away with the 'older than this release: run graphyard host prepare' reason, and an attention line names it. With the current shim the same host takes shards again.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Run a trial with a stale-shim host, then with the current shim",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/host-shim-outdated.test.ts",
+    "timeoutSeconds": 900
+  }]
+}
