@@ -21,7 +21,7 @@ export function windowHold(quota: QuotaObservation, ceiling: number, now: number
 /** A usage read that failed keeps the account's last good windows until each one's own reset, marked with when they were read (GY-3494). */
 export function lastGoodUsage(account: FleetAccount, read: QuotaObservation, now: number): QuotaObservation['usage'] {
   if (read.usage.length || read.loggedIn === false) return read.usage;
-  return account.quota.usage.filter(usage => !!usage.resetsAt && Date.parse(usage.resetsAt) > now)
+  return (account.quota.usage ?? []).filter(usage => !!usage.resetsAt && Date.parse(usage.resetsAt) > now)
     .map(usage => ({ ...usage, readAt: usage.readAt ?? account.quota.observedAt ?? new Date(now).toISOString() }));
 }
 
