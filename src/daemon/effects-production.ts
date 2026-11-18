@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { workerVerificationPump, moveBranchToHead } from './worker-verification.js';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -41,6 +41,7 @@ import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
 import { liveRuns } from '../runner/registry.js';
+import { sessionScopes } from '../session-share.js';
 import { runLogTail } from '../headless-session.js';
 import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
@@ -53,6 +54,7 @@ import { upstreamFiler } from './control-plane.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
 import { failedRequiredProofs } from '../cli/worker-verification.js';
 import { trialRunsDirectory } from '../merge-writer/trial-run.js';
+import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { graphyardVolumes, reclaimGraphyardLeftovers, reclaimJobLeftovers, stopOrphanTrialContainers, trialContainerMaxAgeMs } from './disk-headroom.js';
 import { dataDirectory } from '../install/worktree-root.js';
 import { durableTemporaryRoot, trialCheckoutRoots } from '../merge-writer/trial.js';
@@ -221,11 +223,16 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
+    // GY-3432: the commit the deploy unit serves, which the stall alarm compares to the loop's own.
+    servingCommit: () => readDeployRecord(deployRecordPath(root))?.tip ?? null,
     // GY-3348: the host's CPU before every launch, and its hottest sensor (GY-3373); each null where unreadable.
     cpuPressure: async () => {
       const read = (path: string) => readFile(path, 'utf8').then(text => text, () => null);
       return { pressure: await read('/proc/pressure/cpu'), stat: await read('/proc/stat'), celsius: await cpuCelsius() };
     },
+    // GY-3438: each session's scope as its cgroup counts it; a headless run is named by the session it holds.
+    sessionScopes: () => sessionScopes(),
+    sessionName: unit => liveRuns().find(entry => entry.run.directory && `graphyard-run-${basename(entry.run.directory)}.scope` === unit)?.name,
     // GY-3407: the read runs beside the cycle, so a host taking its SSH timeout never slows the loop; the cycle takes the latest finished one.
     hostReadings: async previous => {
       hostsReading ??= readHostReadings(previous, { run }).then(readings => { hostsLatest = readings; }, () => {}).finally(() => { hostsReading = null; });

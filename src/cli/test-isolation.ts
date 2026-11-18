@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { createServer } from 'node:net';
+import { hostMemoryVariable } from '../master/host-memory.js';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +43,30 @@ export function isolatedTestEnvironment(environment: NodeJS.ProcessEnv = process
 /** The base port of the runner's shared temporary Postgres cluster. */
 export function testPortEnvironment(base: number): Record<string, string> {
   return { GRAPHYARD_TEST_PORT: String(base) };
+}
+
+/** The port one run's shared Postgres cluster sits on: the Node run's own base, or one window above the browser run's port. */
+export const sharedClusterPort = (base: number, browser?: boolean) => browser ? base + testPortSpan : base;
+
+/**
+ * The variables one suite run hands its children (GY-3356): both suites name the run's one shared
+ * Postgres cluster through GRAPHYARD_TEST_DATABASE_URL. The Node suite always did; the browser
+ * suite booted one cluster per worker process instead, so every database-backed browser spec — 24
+ * of them, headless-workers among it — spent its own test budget copying the template and starting
+ * Postgres, the part of its boot that scales worst on a loaded host. On 15 November 2026 that blew
+ * browser-tests/headless-workers.spec.ts's 120 s cap once on main, beside two other specs' own caps
+ * in the same loaded run, and all three passed their re-run. With the cluster named,
+ * signInDatabase and withDatabase create a database on it (tests/helpers/postgres.ts `clusterUrl`)
+ * and no browser spec boots a cluster of its own.
+ */
+export function suiteRunEnvironment(input: { browser?: boolean; browserPort: number; clusterPort: number; clusterUrl: string; dataHome: string; tmpRoot?: string | null }): Record<string, string> {
+  return {
+    ...(input.browser
+      ? { GRAPHYARD_BROWSER_PORT: String(input.browserPort), GRAPHYARD_TEST_DATABASE_URL: input.clusterUrl }
+      : { ...testPortEnvironment(input.clusterPort), GRAPHYARD_TEST_DATABASE_URL: input.clusterUrl, [hostMemoryVariable]: 'unreadable' }),
+    GRAPHYARD_DATA_HOME: input.dataHome,
+    ...(input.tmpRoot ? { TMPDIR: input.tmpRoot, TMP: input.tmpRoot, TEMP: input.tmpRoot } : {}),
+  };
 }
 
 /** Whether nothing on this host listens on `port` at 127.0.0.1. */

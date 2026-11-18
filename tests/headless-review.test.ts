@@ -18,6 +18,7 @@ import { loadMasterConfig, observedExhaustions, setupMaster } from '../src/maste
 import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, unpostedVerdict } from '../src/reviewer.js';
 import { reviewBindingFile } from '../src/review-post.js';
 import { liveRun } from '../src/runner/registry.js';
+import { realRuntimeBinary } from '../src/runtime-binary.js';
 import { headlessArgs, headlessKind, headlessRunsDirectory, spawnHeadless, type HeadlessExec } from '../src/headless-session.js';
 import { readRunMeta, runAlive } from '../src/runner/pi.js';
 import { runDaemon } from '../src/daemon/run.js';
@@ -126,7 +127,7 @@ test('integration:headless-review — a review request is one headless run whose
   const [running] = (await readReviewLedger(root)).reviews;
   const token = JSON.parse(await readFile(join(running!.sessionDirectory, reviewBindingFile), 'utf8')).verdictToken as string;
   const [child] = fake.runs;
-  assert.equal(child!.command, 'claude');
+  assert.equal(child!.command, realRuntimeBinary('claude', child!.env), 'the installed Claude binary, including a resolved mise shim');
   assert.deepEqual(child!.args.slice(-4, -1), ['-p', '--output-format', 'json'], 'print mode with its JSON report, the request its last argument');
   const prompt = child!.args.at(-1)!;
   assert.match(prompt, /\[AC-1\] The flag reads headless/, 'the request names the criteria');

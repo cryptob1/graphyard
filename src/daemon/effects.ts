@@ -104,6 +104,11 @@ export interface DaemonEffects {
   cpuPressure?: () => Promise<{ pressure: string | null; stat: string | null; celsius?: number | null } | null>;
   /** GY-3407: this machine and every added host read once, steal measured from the previous readings. */
   hostReadings?: (previous: HostReading[]) => Promise<HostReading[]>;
+  /** GY-3438: every live agent session's scope with its cgroup counters, and the session a scope holds where this process knows it. */
+  sessionScopes?: () => import('../session-share.js').SessionScope[];
+  sessionName?: (unit: string) => string | undefined;
+  /** The host's cores the session share divides; the host's own by default. */
+  cores?: () => number;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   /** Stops what still runs naming a removed worktree (GY-3185), answering what was stopped. */
@@ -157,6 +162,8 @@ export interface DaemonEffects {
   release?: (work: Work, reason: string) => Promise<unknown>;
   /** One reviewer and producer dispatch tick over the cycle's snapshot (dispatch/tick.ts). `held`, while set (GY-3348: the host's CPU is saturated), is the one wait line every launch the tick would make records instead. */
   dispatchTick?: (snapshot: { work: Work[]; now: string }, held?: string) => Promise<unknown>;
+  /** GY-3432: the commit the deploy unit serves, for the stall alarm's stale-loop cause; absent or null when none is recorded. */
+  servingCommit?: () => string | null;
   /** The loop's own master session (GY-898): absent, none is launched. */
   masterSession?: MasterSessionEffects;
   /** GY-3345: the messages to this install's Master (`GET master/messages`); each unanswered one from another install wakes the session once. Absent, none is read. */
