@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
-import { emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry } from '../src/model/registry.js';
-import { heldOverlay, observedExhaustions, recordObservedExhaustion, registryHoldObservations, releasedSince } from '../src/master/environments.js';
+import { emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry, type QuotaObservation } from '../src/model/registry.js';
+import { observedExhaustions, recordObservedExhaustion, releasedSince } from '../src/master/environments.js';
 import type { MasterConfig } from '../src/master/profiles.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -23,10 +23,8 @@ test('unit:quota-decision-retires-stale-observations — an exhaustion observed 
   await writeFile(credentialFile, 'token', { mode: 0o600 });
   const config = { credentialFile, hostId: HOST } as Pick<MasterConfig, 'credentialFile' | 'hostId'>;
   const hold = await recordObservedExhaustion(config, 'opencode-c', { at: iso(t0), resetsAt: '2026-11-05T13:00:00Z', reason: 'Usage limit reached · limit resets 1pm', role: 'worker', profile: 'builder', work: 'GY-1' }, t0, { registry: { document: async () => registry, observe: async () => registry }, smoke: async () => ({ ok: false, error: 'Usage limit reached; resets at 2026-11-05T13:00:00Z' }) });
-  const replayed = heldOverlay({ 'opencode-c': hold }, 'opencode-c', { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null });
-  assert.equal(replayed.since, hold.at, 'a replayed hold names when it was observed');
-  const [reported] = registryHoldObservations(registry, HOST, 'opencode-c', hold)!;
-  assert.equal(reported.quota.since, hold.at);
+  const replayed: QuotaObservation = { loggedIn: true, state: 'exhausted', usage: [], resetsAt: hold.until, reason: hold.reason, since: hold.at, session: 'named' };
+  const reported = { quota: replayed };
 
   const fold = (quota: typeof replayed, at: number, smoke?: { result: 'pass'; reason: string }) =>
     foldObservations(registry, { host: HOST, observations: [{ account: 'opencode-c', quota, ...smoke ? { smoke } : {} }] }, { actor: 'master-loop', at: iso(at) });

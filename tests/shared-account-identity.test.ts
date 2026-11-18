@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FleetClient, FleetSelection } from '../src/fleet.js';
 import { masterConfigSchema, selectAccount, type MasterConfig } from '../src/master.js';
-import * as environments from '../src/master/environments.js';
 import { recordObservedExhaustion } from '../src/master/environments.js';
 import { accountIneligibility, chooseSession, emptyRegistry, fleetView, foldObservations, proposedRuntimes, type AgentRegistry, type FleetSession, type QuotaObservation } from '../src/model/registry.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
@@ -21,8 +20,6 @@ const resetsAt = new Date(Date.UTC(2026, 9, 11, 5)).toISOString();
 const notice = `You've hit your weekly limit · resets Oct 10, 10pm (America/Los_Angeles)`;
 const shared = 'claude:' + 'a'.repeat(32), other = 'claude:' + 'b'.repeat(32);
 const directories: string[] = [];
-// Read off the module, so a checkout without them fails these cases rather than the file's import.
-const heldObservation: typeof environments.heldObservation = (...args) => environments.heldObservation(...args);
 after(async () => { for (const directory of directories) await rm(directory, { recursive: true, force: true }); });
 
 function registryOf(accounts: { name: string; home?: string | null }[]): AgentRegistry {
@@ -96,7 +93,7 @@ test('unit:shared-identity-exhaustion-is-local — matching identities do not sp
   const guessed = registryOf([{ name: 'claude-a' }, { name: 'claude' }]);
   observe(guessed, [{ account: 'claude-a', state: 'unknown', identity: shared }, { account: 'claude', state: 'unknown', identity: shared }], spentAt);
   const unknownReset = { at: new Date(spentAt).toISOString(), until: new Date(spentAt + 3_600_000).toISOString(), resetsAt: null, reason: 'limit reached', role: 'worker' as const, profile: 'builder', work: 'GY-1571', identity: shared };
-  foldObservations(guessed, { host: HOST, observations: [{ account: 'claude-a', quota: heldObservation('claude-a', unknownReset, { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null, identity: shared }) }] }, { actor: 'executor', at: new Date(now).toISOString() });
+  foldObservations(guessed, { host: HOST, observations: [{ account: 'claude-a', quota: { loggedIn: true, state: 'exhausted', usage: [], resetsAt: unknownReset.until, reason: unknownReset.reason, session: 'guessed', since: unknownReset.at } }] }, { actor: 'executor', at: new Date(now).toISOString() });
   assert.match(accountIneligibility(guessed, guessed.accounts.find(account => account.name === 'claude-a')!, now, HOST)!, /^claude-a quota is exhausted/, 'the source itself is held for the hour');
   assert.equal(accountIneligibility(guessed, guessed.accounts.find(account => account.name === 'claude')!, now, HOST), null, 'its twin is not held by a guessed reset');
 

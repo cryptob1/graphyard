@@ -20,7 +20,7 @@ import { failureText } from '../disk-space.js';
 import { shellQuote } from '../shell-quote.js';
 import { describeObservedExhaustion, providerIdentity } from './account-identity.js';
 import { getCachedPlanUsage, setCachedPlanUsage } from '../provider-usage.js';
-export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
+export { describeObservedExhaustion, providerIdentity } from './account-identity.js';
 // The per-provider login and quota probes live in ./environment-quota.ts, reached through each runtime's adapter.
 import type { PlanReading } from './environment-quota.js';
 import { accountHomeEnvironment, runtimeAdapter, type AccountReading } from './runtimes.js';

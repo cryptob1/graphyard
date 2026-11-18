@@ -184,7 +184,7 @@ async function readAccount(account: FleetAccount, runtime: FleetRuntime, probe: 
 const checksInFlight = new Map<string, Promise<QuotaObservation>>();
 export const accountCheckIntervalMs = 30 * 60_000;
 export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => account.enabled &&
-  (account.quota.state === 'exhausted' || account.quota.loggedIn === false || smokeTestedKinds.includes(runtime?.launch.kind) && (!account.smoke || smokeFailureDue(account, now)));
+  (account.quota.source === 'operator' || account.quota.state === 'exhausted' || !!account.quota.session && !account.quota.since || account.quota.loggedIn === false || smokeTestedKinds.includes(runtime.launch.kind) && (!account.smoke || smokeFailureDue(account, now)));
 
 /** Run a tiny request with precisely this account's launch login; narratives are never evidence. */
 export async function checkAccountLive(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, model: string | null = account.model): Promise<QuotaObservation> {
@@ -223,7 +223,7 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
   }
 
   // An operator or session signal after the last request asks for another request immediately.
-  const signalled = account.quota.state === 'exhausted' && (account.quota.source === 'operator' || !!account.quota.session && !account.quota.since)
+  const signalled = (account.quota.source === 'operator' || !!account.quota.session && !account.quota.since)
     && (!cached || Date.parse(account.quota.observedAt ?? '') > Date.parse(cached.at));
   if (cached && !signalled && Date.parse(cached.nextCheck) > now) {
     if (cached.quota.state !== 'available') return { quota: cached.quota, health: null };
@@ -292,9 +292,10 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
   try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null, failover: null }; }
   if (!fleet.managed) return null;
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
-  const observations = await Promise.all(fleet.registry.accounts.filter(account => account.enabled && account.credential.host === host && (needsSmoke(account, fleet.registry.runtimes.find(runtime => runtime.name === account.runtime)!, now) || !!account.credential.home && !!hostAccountCheck(account.credential.home))).flatMap(account => {
+  const observations = await Promise.all(fleet.registry.accounts.filter(account => account.enabled && account.credential.host === host).flatMap(account => {
     const runtime = fleet.registry.runtimes.find(runtime => runtime.name === account.runtime);
-    return runtime ? [(async () => ({ account: account.name, ...await observeAccount(account, runtime, probe, fleet.registry.accounts, fleet.registry.models.find(model => model.name === account.model)?.id ?? undefined) }))()] : [];
+    if (!runtime || !needsSmoke(account, runtime, now) && !(account.credential.home && hostAccountCheck(account.credential.home))) return [];
+    return [(async () => ({ account: account.name, ...await observeAccount(account, runtime, probe, fleet.registry.accounts, fleet.registry.models.find(model => model.name === account.model)?.id ?? undefined) }))()];
   }));
   if (observations.length && fleet.client.observe && host) {
     await fleet.client.observe({ host, observations: observations.map(({ account, quota }) => ({ account, quota })) });

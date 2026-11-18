@@ -1,8 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { heldObservation, type ObservedExhaustion } from '../src/master/environments.js';
+import { type ObservedExhaustion } from '../src/master/environments.js';
 import { accountIneligibility, emptyRegistry, foldObservations, proposedRuntimes, type AgentRegistry, type QuotaObservation } from '../src/model/registry.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+
+const heldObservation = (_name: string, held: ObservedExhaustion, read: QuotaObservation = { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null }): QuotaObservation =>
+  ({ ...read, state: 'exhausted', session: held.resetsAt ? 'named' : 'guessed', resetsAt: held.until, reason: held.reason, identity: held.resetsAt ? held.identity : null, since: held.at });
 
 /**
  * GY-1581: a session that ran out mid-work reports its account exhausted until the reset it named
@@ -29,7 +32,7 @@ const fold = (registry: AgentRegistry, observations: { account: string; quota: Q
   foldObservations(registry, { host: HOST, observations }, { actor: 'executor', at: new Date(at).toISOString() });
 const ineligible = (registry: AgentRegistry, name: string, at: number) => accountIneligibility(registry, registry.accounts.find(account => account.name === name)!, at, HOST);
 
-test('unit:session-exhaustion-survives-later-probe — a session-reported exhausted mark stands against a later ordinary probe until the reset that session named, holding its shared-login twin too; a probe after the reset replaces it', () => {
+test('unit:session-exhaustion-survives-later-probe — a session-reported exhausted mark stands against a later ordinary probe until the reset that session named, leaving other logins independent; a probe after the reset replaces it', () => {
   const registry = registryOf(['claude-a', 'claude']);
   fold(registry, [{ account: 'claude-a', quota: heldObservation('claude-a', held) }, { account: 'claude', quota: probe }], spentAt);
   const before = Date.parse(resetsAt) - 60_000;
@@ -43,7 +46,7 @@ test('unit:session-exhaustion-survives-later-probe — a session-reported exhaus
   assert.equal(spent.resetsAt, resetsAt);
   assert.equal(spent.identity, shared, 'the hold keeps the login it was reported on');
   assert.match(ineligible(registry, 'claude-a', before) ?? '', /claude-a quota is exhausted/);
-  assert.equal(ineligible(registry, 'claude', before), `claude quota is exhausted until ${resetsAt}: it is the same provider login as claude-a, whose quota is exhausted (${spent.reason})`);
+  assert.equal(ineligible(registry, 'claude', before), null, 'matching identities do not share holds');
 
   // A probe after the named reset replaces it, and the twin is free.
   const after = Date.parse(resetsAt) + 60_000;
@@ -67,7 +70,7 @@ test('a probe-read exhaustion is still replaced by a later probe before its rese
   assert.equal(registry.accounts[0]!.quota.resetsAt, later);
 });
 
-test('unit:session-exhaustion-survives-later-probe — on an explicitly shared plan, a later probe of another account reading available does not outrank the session-reported mark: the spent account and its plan stay held until the named reset', () => {
+test('unit:session-exhaustion-survives-later-probe — on an explicitly shared plan, a later probe of another account reading available does not outrank the session-reported mark: only the checked account stays held until the named reset', () => {
   const registry = registryOf(['claude-a', 'claude-b'], 'team-max');
   const other = 'claude:' + 'b'.repeat(32);
   fold(registry, [{ account: 'claude-a', quota: heldObservation('claude-a', held) }, { account: 'claude-b', quota: { ...probe, identity: other } }], spentAt);
@@ -77,7 +80,7 @@ test('unit:session-exhaustion-survives-later-probe — on an explicitly shared p
   fold(registry, [{ account: 'claude-a', quota: probe }], before - 30_000);
   assert.equal(registry.accounts.find(account => account.name === 'claude-a')!.quota.state, 'exhausted');
   assert.match(ineligible(registry, 'claude-a', before) ?? '', new RegExp(`^claude-a quota is exhausted until ${resetsAt}`));
-  assert.match(ineligible(registry, 'claude-b', before) ?? '', /^claude-b quota is exhausted on plan .*\(claude-a quota is exhausted until/);
+  assert.equal(ineligible(registry, 'claude-b', before), null, 'a shared plan cannot hold an unchecked account');
 
   const after = Date.parse(resetsAt) + 60_000;
   assert.equal(ineligible(registry, 'claude-a', after), null, 'the mark lapses at its reset even before a probe replaces it');

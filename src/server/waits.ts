@@ -19,7 +19,7 @@ import { save } from '../store.js';
 import { eventWorkSql } from '../store/snapshot-delta.js';
 import type { Services } from './routes.js';
 import { decisionWork } from '../store/decision-read.js';
-import { recordLimitNoticeHold } from '../agent-registry.js';
+import { recordLimitNoticeCheck } from '../agent-registry.js';
 
 /**
  * The two waits that must stall nothing but the item that has them (GY-89): a session whose
@@ -244,7 +244,7 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
       // A worker that died is not a spent account: the same record, its own history entry.
       const interrupted = report.cause === 'interrupted';
       // GY-3096: a session spent on its provider's limit is held in the registry in this same transaction.
-      if (!interrupted) await recordLimitNoticeHold(db, actor, { role: report.role, work: work!.key, principal: owner, account: report.account, reason: report.reason, resetsAt: report.resetsAt }, now);
+      if (!interrupted) await recordLimitNoticeCheck(db, actor, { role: report.role, work: work!.key, principal: owner, account: report.account, reason: report.reason, resetsAt: report.resetsAt }, now);
       work!.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
       return commit(services, db, now, work!, all, actor, interrupted ? 'capacity.interrupted' : 'capacity.exhausted', { exhaustion: record, ...(endedBlocker ? { endedBlocker } : {}), requeued: report.role === 'worker' ? (interrupted ? 'the attempt ended as released with its partial work on the record; the item is claimable again' : 'the attempt ended as released; the item is claimable on another account') : 'the request is launched again on another account' });
     }
