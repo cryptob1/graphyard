@@ -125,7 +125,7 @@ test('e2e:keyboard-palette — g m opens Master, g w Work, g s Setup, and ? show
   await expect(sheet(page)).toHaveCount(0);
 });
 
-test('e2e:keyboard-palette — the top bar strip counts the shift, the trials and tonight’s ships, matching the Workers page', async ({ page }) => {
+test('e2e:keyboard-palette — the top bar strip counts the shift, the trials, what shipped and what waits to go live, matching the Workers page', async ({ page }) => {
   test.setTimeout(60_000);
   await serve(page);
   // The fixture holds two fresh running sessions (a third not seen for forty minutes), one pushed
@@ -133,10 +133,12 @@ test('e2e:keyboard-palette — the top bar strip counts the shift, the trials an
   const strip = page.locator('.city-strip');
   await expect(strip).toHaveAttribute('data-on-shift', '2');
   await expect(strip).toHaveAttribute('data-in-trial', '1');
-  await expect(strip).toHaveAttribute('data-shipped-tonight', '1');
+  // Shipped means live (GY-3452): the fixture names no live commit, so the week's two merges wait to go live.
+  await expect(strip).toHaveAttribute('data-shipped', '0');
+  await expect(strip).toHaveAttribute('data-waiting', '2');
   await expect(strip).toContainText('2 agents working');
   await expect(strip).toContainText('1 in trial');
-  await expect(strip).toContainText('1 shipped today');
+  await expect(strip).toContainText('2 waiting to go live');
   // The same numbers the Workers page reads off the same board.
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Workers', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Workers', exact: true, level: 1 })).toBeVisible();
