@@ -9,14 +9,14 @@ import { runtimeAdapter, cursorLoginFile, accountHomeEnvironment } from './maste
 import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { NoHealthyAccountError, agentEnvironmentRoot, checkAgentEnvironment, discoverAgentEnvironments, type AccountSkip, type AccountSkipCause, type EnvironmentHealth, type EnvironmentProbe } from './master/environments.js';
+import { NoHealthyAccountError, defaultQuotaCeilingPercent, agentEnvironmentRoot, checkAgentEnvironment, discoverAgentEnvironments, type AccountSkip, type AccountSkipCause, type EnvironmentHealth, type EnvironmentProbe } from './master/environments.js';
 import { environmentKinds, type AgentEnvironment, type EnvironmentKind, type MasterConfig } from './master/profiles.js';
 import { readCredentialFile } from './private-file.js';
 import { masterConfinementVariable } from './master/confinement.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, deriveAccountPlan, fleetRoles, liveSessions, roleLimit, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, lastGoodUsage, windowHold, deriveAccountPlan, fleetRoles, liveSessions, roleLimit, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 import { hostAccountCheck, recordHostAccountCheck, clearEndedHostAccountSessions, clearHostAccountSession, hostAccountSessions, registerHostAccountSession } from './host-accounts.js';
 export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
 
@@ -187,7 +187,7 @@ export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = D
   (account.quota.source === 'operator' || account.quota.state === 'exhausted' || !!account.quota.session && !account.quota.since || account.quota.loggedIn === false || smokeTestedKinds.includes(runtime.launch.kind) && (!account.smoke || smokeFailureDue(account, now)));
 
 /** Run a tiny request with precisely this account's launch login; narratives are never evidence. */
-export async function checkAccountLive(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, model: string | null = null): Promise<QuotaObservation> {
+export async function checkAccountLive(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, model: string | null = null, usage: QuotaObservation['usage'] = []): Promise<QuotaObservation> {
   const home = account.credential.home, key = home ?? `${account.credential.host}/${account.name}`;
   const pending = checksInFlight.get(key);
   if (pending) return pending;
@@ -201,7 +201,7 @@ export async function checkAccountLive(account: FleetAccount, runtime: FleetRunt
     const reason = result.ok ? null : (result.error || 'The live request failed').replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim().slice(0, 500);
     const reset = reason ? runtimeResetTime(reason, runtime.launch.kind, now) : null;
     const nextCheck = reset && Date.parse(reset) > now ? reset : new Date(now + accountCheckIntervalMs).toISOString();
-    const quota: QuotaObservation = { loggedIn: result.ok || !detectLoggedOut(reason ?? ''), state: result.ok ? 'available' : 'exhausted', usage: [], since: new Date(now).toISOString(),
+    const quota: QuotaObservation = { loggedIn: result.ok || !detectLoggedOut(reason ?? ''), state: result.ok ? 'available' : 'exhausted', usage, since: new Date(now).toISOString(),
       resetsAt: result.ok ? null : nextCheck, reason, ...(result.ok ? {} : { session: reset && Date.parse(reset) > now ? 'named' as const : 'guessed' as const }) };
     if (home) recordHostAccountCheck(home, { key: account.credential.key ?? null, at: new Date(now).toISOString(), nextCheck, quota });
     return quota;
@@ -226,15 +226,17 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
   // An operator or session signal after the last request asks for another request immediately.
   const signalled = (account.quota.source === 'operator' || !!account.quota.session && !account.quota.since)
     && (!cached || Date.parse(account.quota.observedAt ?? '') > Date.parse(cached.at));
+  const ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
   if (cached && !signalled && Date.parse(cached.nextCheck) > now) {
     if (cached.quota.state !== 'available') return { quota: cached.quota, health: null };
     const reading = await readAccount(account, runtime, probe, allAccounts, model);
-    return { ...reading, quota: { ...cached.quota, usage: reading.quota.usage, identity: reading.quota.identity } };
+    return { ...reading, quota: windowHold({ ...cached.quota, usage: lastGoodUsage(account, reading.quota, now), identity: reading.quota.identity }, ceiling, now) };
   }
   const reading = await readAccount(account, runtime, { ...probe, ...(account.quota.loggedIn === false ? { cacheMs: 0 } : {}) }, allAccounts, model);
+  const usage = lastGoodUsage(account, reading.quota, now);
   if (cached || signalled || needsSmoke(account, runtime, now) || reading.quota.state === 'exhausted')
-    return { ...reading, quota: await checkAccountLive(account, runtime, probe, model) };
-  return reading;
+    return { ...reading, quota: windowHold(await checkAccountLive(account, runtime, probe, model, usage), ceiling, now) };
+  return { ...reading, quota: windowHold({ ...reading.quota, usage }, ceiling, now) };
 }
 
 /**
