@@ -21,7 +21,7 @@ import { credentialMaskFor, CredentialMaskError, type MaskProbe } from './confin
 import { accountLaunch, agentLaunchPlan, NoHealthyAccountError, onSelectedSession, recordObservedExhaustion, selectAccount, sharedGitDirectory } from './environments.js';
 import type { FleetProbe } from '../fleet.js';
 import { repinPath, type CanaryOffer } from '../model/registry.js';
-import { reviewStandards } from '../review-prompt.js';
+import { criteriaListing, featureCaseRule, reviewStandards } from '../review-prompt.js';
 import { launcherCoordinatorRoot, preservePartialWork, prepareConfinedGitPaths, sessionConfinement } from './launch.js';
 import { defaultHeadlessExec, HeadlessConfigurationError, startHeadlessWorker, type HeadlessExec } from '../headless-session.js';
 import { liveRun } from '../runner/registry.js';
@@ -30,7 +30,7 @@ import { runTranscript } from '../model/sessions.js';
 import { detectHeadlessExhaustion } from './runtime-prompt.js';
 import { detectLoggedOut } from './logged-out.js';
 import { cycleBaseTip, dependencyDirectories, failureText, preservedWorkNote, shareDependencies, type SharedDependencies } from './worktrees.js';
-import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
+import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sandboxFailureRule, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
 import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
 import { dispatchedFile, DispatchReservedError, profileLaunchedFile } from './dispatch-reservation.js';
@@ -39,9 +39,8 @@ import { readProjectMemory } from '../project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from '../verification-maps.js';
 import { namedPaths } from '../model/documentation-glob.js';
 import { appliedReworkBrief, reworkBriefSection, type AppliedRework } from './rework-brief.js';
-import { workerBeforePushSection, workerFastGatesPresent } from './worker-fast-gates.js';
+import { workerFastGatesPresent, workerFastGatesSentence } from './worker-fast-gates.js';
 import { attemptBoundMs, attemptCeilingMs } from './attempt-bound.js';
-import { attemptProgressWindowMs } from '../model/attempt-bound.js';
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
 type WorkerCommand = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
@@ -372,7 +371,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // GY-2956: the prompt reads the claimed document when the preparer returned it, not the
     // snapshot the dispatch chose from — an attempt preserved in the same cycle is in the claim's
     // record, and a handoff built from the older copy would send the worker back to the shared base.
-    const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root) }, prepared.work ?? work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, maps, rework, diagnosis + await preservedWorkNote(root, work.key, defaultChildRun));
+    const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root), kind: launch.kind }, prepared.work ?? work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, maps, rework, diagnosis + await preservedWorkNote(root, work.key, defaultChildRun));
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
     const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
     let sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
@@ -395,7 +394,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         kind: launch.kind!, args: [...args, ...sessionHarness.args], contract: launch.contract, credentialMask, role: sessionHarness.role, directory: prepared.path, prompt, root, exec: headless, coordinatorRoot,
         environment: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile!, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_HERDR_AGENT_KIND: launch.kind!, ...(process.env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR } : {}), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS } : {}), ...withVerificationPath(sessionHarness.environment, launch.environment) },
         supervisor: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], timeoutMs: attemptCeilingMs(config.run), startupMs,
-        settle: async ({ output }) => { await stoppedOnLimit(output).catch(() => null); await settleReservation?.(`the ${launch.kind} worker run ended`); } });
+        settle: async ({ output, ok }) => { await stoppedOnLimit(output, ok).catch(() => null); await settleReservation?.(`the ${launch.kind} worker run ended`); } });
       const run: WorkerRun = { epoch: prepared.epoch, run: started.id, runtime: launch.kind!, account: launch.account ?? null, outcome: null };
       await onRun?.(run).catch(() => {});
       if (started.ended) {
@@ -419,9 +418,9 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
    * ended and its supervisor released its lease, so its work is kept on its branch and the handoff
    * and the account hold are recorded on the item, where the next attempt's brief reads them.
    */
-  function stoppedOnLimit(output: string) { return limitCheck ??= checkStoppedLimit(output); }
-  async function checkStoppedLimit(output: string) {
-    const notice = detectHeadlessExhaustion(output, launch.kind!, Date.now());
+  function stoppedOnLimit(output: string, ok: boolean) { return limitCheck ??= checkStoppedLimit(output, ok); }
+  async function checkStoppedLimit(output: string, ok: boolean) {
+    const notice = detectHeadlessExhaustion(output, launch.kind!, Date.now(), ok);
     if (!notice || !launch.account) return null;
     const checkedAt = Date.now();
     const hold = await recordObservedExhaustion(config, launch.account, { at: new Date(checkedAt).toISOString(), reason: notice.reason, resetsAt: notice.resetsAt,
@@ -440,7 +439,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
    * 0 simply finished early; any other early exit fails the launch.
    */
   async function settleEarlyExit({ output, ok }: { output: string; ok: boolean }) {
-    const notice = await stoppedOnLimit(output);
+    const notice = await stoppedOnLimit(output, ok);
     if (notice) throw new HeadlessWorkerExit(`the ${launch.kind} worker stopped at once on its provider's limit notice: ${notice.reason}`, true, prepared.epoch);
     if (ok) return;
     const loggedOut = detectLoggedOut(output);
@@ -470,7 +469,7 @@ export function autonomousSession(outcome: string, blocker: string, failureExcep
  * whose target it cannot resolve, even with its permission checks skipped — and a session stopped
  * on one waits for a person (GY-197). Worker and producer requests say how to never trigger it.
  */
-export const destructivePromptGuidance = 'Never give rm or mv a glob or variable target outside your mktemp -d directory: the destructive-operation prompt waits for nobody. A refused cleanup of untracked files is not a blocker: leave them, git add only your own paths and submit; stop only when a refusal blocks the change. ';
+export const destructivePromptGuidance = 'Never give rm or mv a glob or variable target outside your mktemp -d directory; its prompt waits for nobody. A refused cleanup of untracked files is not a blocker: leave them, git add only your own paths and submit; stop only when a refusal blocks the change. ';
 /**
  * OpenCode asks before reaching any path outside its launch directory — a worker reaches one as
  * soon as it creates a second worktree (a bisect) or reads a sibling path (GY-2959) — so the
@@ -483,8 +482,8 @@ export const externalDirectoryPromptGuidance = 'Your launch already granted the 
 export const workerLeadSection = (work: Partial<Pick<Work, 'why' | 'simplest'>>) => work.why || work.simplest
   ? `Read why and simplest first and stay inside them. Why: ${work.why ?? 'not stated'} Simplest: ${work.simplest ?? 'not stated'} ` : '';
 export function workerPrompt(
-  config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository' | 'run'>> & { fastGates?: boolean },
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'why' | 'simplest' | 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'policyRevision' | 'messages'>>,
+  config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository' | 'run'>> & { fastGates?: boolean; kind?: string },
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'type' | 'why' | 'simplest' | 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'scenarioRequirements' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'policyRevision' | 'messages'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -498,18 +497,19 @@ export function workerPrompt(
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha: baseSha ?? undefined });
-  const standards = reviewStandards(work);
-  return `Implement ${work.key}: ${work.title}. ${workerLeadSection(work)}Claimed as ${profile.principal} under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Use the assigned worktree; never weaken criteria; commit on the assigned branch, and submit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action: complete ends your lease; stop at once on lease loss (node ${config.cliPath} guide complete). `
+  const standards = reviewStandards(work), criteria = criteriaListing(work.criteria, work.scenarioRequirements);
+  return `Implement ${work.key}: ${work.title}. ${workerLeadSection(work)}Done when every criterion below holds on a commit on your assigned branch, submitted with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action; on lease loss stop at once (node ${config.cliPath} guide complete). `
+    + `Run node ${config.cliPath} status ${work.key} before editing, and never weaken criteria. Write the bound proof first and see it fail without the change. `
     + attemptBoundSection(config.run, work, epoch)
-    + `Do not submit trusted evidence or merge; review and producers are requested on their own. `
     + installed
     + (memoryDigest || '')
     // The maps for the areas the item's description and criteria name.
     + verificationMapDigest(verificationMaps, [...new Set([work.description ?? '', ...(work.criteria ?? []).map(criterion => criterion.text)].flatMap(namedPaths))], 'worker')
-    + submissionPolicyRule
-    + destructivePromptGuidance
-    + externalDirectoryPromptGuidance
     + standards.simplicity
+    // GY-3478: features and bugs can change what the owner sees; chores keep the brief short.
+    + (work.type === 'feature' || work.type === 'bug' ? standards.ux : '')
+    // GY-3489: a runtime's own prompt guidance reaches only that runtime's workers.
+    + (config.kind === 'claude' ? destructivePromptGuidance : config.kind === 'opencode' ? externalDirectoryPromptGuidance : '')
     // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
     + reworkBriefSection(work, rework)
     // GY-3104: two equal failures in a row ask for a diagnosis, not a blind retry.
@@ -519,12 +519,13 @@ export function workerPrompt(
     + (work.messages?.some(message => !message.acknowledged) ? `Unread messages from the master (your next sync ${work.key} acknowledges them): ${work.messages.filter(message => !message.acknowledged).map(message => `[${message.at} ${message.by}] ${message.text}`).join(' ')} ` : '')
     // GY-1726: a follow-up whose reading cannot exist yet waits for it rather than escalating.
     + (work.criteria?.some(criterion => criterion.proofs.some(servingReleaseProof)) ? `If the observation this item owes cannot exist yet (its window has not elapsed on the serving release), do not record a blocker: defer it with node ${config.cliPath} defer ${work.key} ${epoch} NOT-BEFORE REASON (NOT-BEFORE is the ISO instant the reading can first exist, at most 30 days away), which ends your lease and holds dispatch until then, then stop. ` : '')
-    + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — park it with node ${config.cliPath} park ${work.key} ${epoch} (guide park names the fields) and stop; parking ends your lease. Do not write it as a blocker. `
-    // GY-3166: the reviewers' standards for this item's own criteria, known from the start of the work; only the verdict-posting text stays with the reviewer.
-    + (work.criteria?.length ? `Reviewers judge your head by this checklist, with the simplicity rule above: ${standards.criteria}. ${standards.repetition}For a user-facing feature, judge: ${standards.product}` : '')
-    // GY-1987: the worker judges its own diff by the reviewer's standard (graphyard review self) before it submits, so a blocking finding costs a push, not a review round.
-    + `Last step before complete: check your diff against the reviewers' standards (node ${config.cliPath} review self ${work.key} prints them) and fix each BLOCKING finding you would expect. `
-    + autonomousSession('implement the item, commit it and submit the head with complete --head', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`, ', other than a test failing only for the sandbox limitations described above');
+    + `Park a decision only a human may make (${humanOnlyDecisions.join('; ')}) with node ${config.cliPath} park ${work.key} ${epoch} and stop; guide park names the fields. `
+    // GY-3166: the criteria the reviewers judge; review self prints the rest of their standards.
+    + (work.criteria?.length ? `Criteria: ${criteria.listed}. ${criteria.proofs ? `Proof bindings: ${criteria.proofs}. ${featureCaseRule}` : ''}` : '')
+    // GY-3489: the one pre-submit list; GY-1987: review self judges the diff by the reviewer's standard, so a blocking finding costs a push, not a review round.
+    + `Before complete: 1. Run node ${config.cliPath} sync ${work.key} and resolve conflicts. 2. ${submissionPolicyRule}${config.fastGates ? workerFastGatesSentence : ''}`
+    + `3. Run node ${config.cliPath} review self ${work.key} and fix each BLOCKING finding. 4. ${sandboxFailureRule}`
+    + `You decide and act on your own; end with complete or a recorded blocker naming the command and its error (node ${config.cliPath} blocked ${work.key} ${epoch} REASON).`;
 }
 
 /**
@@ -536,7 +537,7 @@ function attemptBoundSection(run: MasterConfig['run'] | undefined, work: Partial
   const claimedAt = (work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : null) ?? work.pipeline?.attempts?.find(attempt => attempt.epoch === epoch)?.claimedAt ?? null;
   if (!claimedAt || !Number.isFinite(Date.parse(claimedAt))) return '';
   const claimed = Date.parse(claimedAt);
-  return `Your session ends at ${new Date(claimed + attemptBoundMs(run)).toISOString()} unless it keeps making progress: the bound extends while your worktree commits or changes files (a stop needs ${Math.round(attemptProgressWindowMs / 60_000)} minutes without either past the bound), and nothing runs past ${new Date(claimed + attemptCeilingMs(run)).toISOString()}; commit forward often, and a successor receives your diff. `;
+  return `Your session ends at ${new Date(claimed + attemptBoundMs(run)).toISOString()} and extends while your worktree commits or changes files; nothing runs past ${new Date(claimed + attemptCeilingMs(run)).toISOString()}; commit forward often, and a successor receives your diff. `;
 }
 
 /** What the previous attempt left for this one: the work an exhausted session had not committed, and a human's answer. */

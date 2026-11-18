@@ -13,6 +13,11 @@ export const simplicityParagraph = 'Keep it simple. Build the simplest thing tha
  * what users need. The master prompt carries the short form, held to its brief's word budget;
  * `master guide` opens with the full rule.
  */
+/**
+ * GY-3478: the UX standard, a short paragraph in AGENTS.md and the `ux` piece of reviewStandards(),
+ * so every worker, every review of a web/ change and the product reviewer judge UI by the same text.
+ */
+export const uxStandard = 'UX standard: write for the owner first. One plain sentence per idea. Show state, numbers and the one next action, not prose. Keep internal ids, jargon and agent-to-agent chatter out of the primary view; Details holds the rest. An error says what to do in one line and is never false. Show nothing twice. Every page works at 390 and 1280 px with no horizontal scroll. ';
 export const itemLeadBrief = 'Write why and simplest first in each item. ';
 export const itemLeadRule = 'Before anything else in an item you file, write why (one sentence: how it helps users) and simplest (one sentence: why it is the simplest thing that works); keep the description short, and cut scope until the second sentence can be written. ';
 /** The blocking standard (GY-2000): the only findings a review may hold a head with, stated beside the simplicity paragraph in both review prompts; anything else is at most a Nit. */
@@ -40,17 +45,10 @@ export function singleCaseReviewSection(criteria?: readonly ReviewCriterion[]) {
   if (!flagged.length) return '';
   return `${flagged.join(', ')} ${flagged.length === 1 ? 'checks' : 'check'} one case: a head can pass by tuning to that case. For each, inspect the implementation and test coverage for other seeds or inputs, and request changes if the code only handles the pinned case or the coverage does not establish the required generality. `;
 }
-/**
- * The criteria rule (GY-166). GY-164 took 19 attempts: its reviewer confirmed both
- * criteria met around round 16 and kept requesting changes for new edge cases. The reviewer judges
- * the item's acceptance criteria; anything worth fixing is BLOCKING and fixed on the same head,
- * and the rest are nits, never filed as work items (GY-1249). `criteria` are the item's own, written by its operator.
- * GY-2972: the finding classification and verdict rules moved to `guide review`; the brief names
- * that topic beside the criteria instead of restating them.
- * GY-3166: this is the judging half, ending mid-sentence so the worker's checklist can carry it;
- * a reviewer's request continues with criteriaVerdictRule.
- */
-export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCriterion[] = [], scenarioRequirements: Work['scenarioRequirements'] = []) {
+/** What a feature's proof must be, in the reviewer's criteria rule and the worker brief. */
+export const featureCaseRule = 'A feature must add or change an e2e case its criteria name. ';
+/** The item's criteria verbatim and their launch-snapshot proof bindings: the reviewer's criteria rule and the worker brief (GY-3489) list them alike. */
+export function criteriaListing(criteria: ReviewCriterion[] = [], scenarioRequirements: Work['scenarioRequirements'] = []) {
   // Each criterion verbatim: a condition cut from its tail would be judged FOLLOW-UP and silently
   // dropped, and collapsed whitespace changes an indented fragment or exact output it quotes.
   const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text}`).join(' ');
@@ -62,8 +60,22 @@ export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCr
     }));
     return `[${criterion.id}] proofs: ${JSON.stringify(bindings)}`;
   }).join(' ');
+  return { listed, proofs };
+}
+/**
+ * The criteria rule (GY-166). GY-164 took 19 attempts: its reviewer confirmed both
+ * criteria met around round 16 and kept requesting changes for new edge cases. The reviewer judges
+ * the item's acceptance criteria; anything worth fixing is BLOCKING and fixed on the same head,
+ * and the rest are nits, never filed as work items (GY-1249). `criteria` are the item's own, written by its operator.
+ * GY-2972: the finding classification and verdict rules moved to `guide review`; the brief names
+ * that topic beside the criteria instead of restating them.
+ * GY-3166: this is the judging half, ending mid-sentence so the worker's checklist can carry it;
+ * a reviewer's request continues with criteriaVerdictRule.
+ */
+export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCriterion[] = [], scenarioRequirements: Work['scenarioRequirements'] = []) {
+  const { listed, proofs } = criteriaListing(criteria, scenarioRequirements);
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
-    + (proofs ? `Launch snapshot proof bindings: ${proofs}. Unlisted scenario pins are absent from this snapshot; do not invent revisions. A feature must add or change an e2e case its criteria name. ` : '')
+    + (proofs ? `Launch snapshot proof bindings: ${proofs}. Unlisted scenario pins are absent from this snapshot; do not invent revisions. ${featureCaseRule}` : '')
     + `Every feature or bug needs at least one proof that fails without the change. Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases`;
 }
 /** What a verdict-posting reviewer adds to the criteria rule: nothing here is a worker's to do. */
@@ -101,6 +113,7 @@ export function reviewStandards(work: Pick<Work, 'key'> & { criteria?: ReviewCri
     criteria: criteriaRuleSection(work.key, head, work.criteria, work.scenarioRequirements),
     repetition: repetitionReviewSection(files),
     product: productQuestions,
+    ux: uxStandard,
   };
 }
 
@@ -126,7 +139,8 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
     + singleCaseReviewSection(criteria)
     + controlPlaneFindingSection
     + blockingStandardSection
-    + standards.repetition;
+    + standards.repetition
+    + (files?.some(file => file.startsWith('web/')) ? standards.ux : '');
 }
 
 /** Nits stay advisory and are kept for later workers. */

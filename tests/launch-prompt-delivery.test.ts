@@ -151,7 +151,7 @@ test('e2e:worker-request-trial-only-tests — dispatched worker receives the tri
     assert.match(request, /record command and environment error in the commit message, submit with complete instead of recording a blocker; the merge trial runs the test and decides/);
     assert.match(request, /For sandbox-only test failures, including required criteria tests/);
     assert.match(request, /Fix or block assertion failures, build errors and refusals of your own writes/);
-    assert.match(request, /cannot succeed, other than a test failing only for the sandbox limitations described above, record a blocker/);
+    assert.match(request, /end with complete or a recorded blocker naming the command and its error/);
     assert.match(request, /complete GY-93 4 --head as your last action/);
     assert.doesNotMatch(request, /a failure of your own criteria's tests always blocks/);
   } finally { await cleanup(); }

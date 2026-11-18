@@ -1,0 +1,13 @@
+{
+  "id": "fetch-interrupted-not-sso",
+  "title": "A fetch interrupted by a loop restart is not reported as the remote refusing access",
+  "description": "The batch gate's fetch of main: one the stopping loop interrupted records no attention line and no SSO text; one whose git stderr carries GitHub's SAML SSO refusal still produces the authorise message; one failing with any other stderr reports that stderr, not the SSO advice.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "fetch interrupted not sso",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/fetch-interrupted-not-sso.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
