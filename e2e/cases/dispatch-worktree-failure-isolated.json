@@ -1,0 +1,16 @@
+{
+  "id": "dispatch-worktree-failure-isolated",
+  "title": "A worktree git refuses for one item does not hold back the next ready item",
+  "description": "Runs the loop's real cycle, CLI and git against a temporary control plane with ready items and free worker slots. Git refuses the first item's worktree; the next item launches in the same cycle, the first backs off alone with git's own error and the CLI that ran it, and launches by itself once the workspace is repaired. A submitted head is left as it was, and capacity and heat still hold launches.",
+  "tags": ["dispatch", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "Run two ready items through the loop with the first item's worktree refused by git",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/dispatch-worktree-failure-isolated.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

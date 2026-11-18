@@ -3,6 +3,7 @@ import type { Work } from '../../src/model';
 import type { Board, OpenGroup } from '../groups';
 import type { IntegrationJob } from '../../src/coordination';
 import type { Features } from '../features';
+import type { TrustKind } from '../trust';
 
 /**
  * The dashboard state every page reads and the actions it may take. The App in
@@ -18,6 +19,8 @@ export interface Dashboard {
   view: string; setView(view: string): void;
   /** The Work page's group filter: the tile last pressed, or null for every group. */
   filter: OpenGroup | null; setFilter(filter: OpenGroup | null): void;
+  /** The Shipped page's trust filter (GY-3395): the header number last pressed, or null for every delivered item. */
+  shippedFilter: TrustKind | null; setShippedFilter(kind: TrustKind | null): void;
   selected: string | null; setSelected(id: string | null): void;
   creating: boolean; setCreating(creating: boolean): void;
   busy: boolean; setBusy(busy: boolean): void;

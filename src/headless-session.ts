@@ -247,7 +247,7 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
         refused = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 400);
         // The provider's limit notice, read as a pane's is: the account is spent, so it is held and not run again.
         const raw = output ?? (error as { output?: string })?.output ?? String((error as Error)?.message ?? error), printed = runtimeReport(raw).reply ?? raw;
-        const notice = detectHeadlessExhaustion(raw, launch.kind, Date.now());
+        const notice = detectHeadlessExhaustion(raw, launch.kind, Date.now(), output !== null);
         if (notice) {
           const hold = await input.holdAccount?.(notice);
           if (!hold?.until || Date.parse(hold.until) > Date.now()) {

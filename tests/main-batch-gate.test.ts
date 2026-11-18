@@ -483,7 +483,7 @@ test('unit:batch-gate-own-deadline — a gate run is bounded by its own 45-minut
     const record = bootstrapGate(repository, verified);
     assert.equal((await runGate(ports, record)).outcome, 'verified');
     assert.equal(record.verified, tip);
-    assert.deepEqual(limits, [3 * gateLimitMs], 'the trial gets the gate\'s 45 minutes left plus a backstop of two bounds; the gate\'s own clock stops it (GY-3444)');
+    assert.deepEqual(limits, [gateLimitMs], 'the trial gets the gate\'s 45 minutes left, never a multiple (GY-3444, GY-3509)');
   }
   // Only a run past 45 minutes counts as a gate timeout.
   {

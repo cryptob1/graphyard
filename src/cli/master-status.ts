@@ -21,7 +21,7 @@ import { servingReport, controlPlaneRecordPath, controlPlaneSummary, readControl
 import { gateRecordPath, gateHoldAttention, gateSummary, readGateRecord } from '../batch-gate.js';
 import { thisWeekReport } from '../project-memory.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
-import { readRemoteShardRuns, remoteShardSummary } from '../merge-writer/remote-shards.js';
+import { outdatedShimAttention, readRemoteShardRuns, remoteShardSummary } from '../merge-writer/remote-shards.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage, waitingReason } from '../model/plain-stage.js';
 import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
@@ -213,7 +213,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     stallAlarm: state?.actions[stallAlarmKey]?.detail ?? null,
     // GY-3095: the pipeline has stopped where a role cannot launch; each line names the role, the refusal, how long it has lasted and the next command.
     // GY-3204: and each application whose versionUrl lags main or fails to answer.
-    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...launchFailures, ...reworked, ...couldNotRunReviews, ...(cursor ? reviewLaunchAttention(open, cursor, now) : []), ...backedOff, ...unspecifiedModelAttention(fleet), ...loggedOutAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...heldGateAttention, ...gateStalled, ...overloadAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
+    attention: [...leaseLosses, ...blockerAttention, ...drained, ...growth, ...trialImageFault, ...trialFloorAttention(), ...stopped, ...launchFailures, ...reworked, ...couldNotRunReviews, ...(cursor ? reviewLaunchAttention(open, cursor, now) : []), ...backedOff, ...unspecifiedModelAttention(fleet), ...loggedOutAttention(fleet), ...applicationAttention(observed), ...stepFailureAttention, ...messageAttention, ...fetchRefused, ...launchBackoff, ...heldGateAttention, ...outdatedShimAttention(readRemoteShardRuns(root)), ...gateStalled, ...overloadAttention, ...(placeholder ? [{ subject: 'e2e.serve', text: `Placeholder serve: ${placeholderServeRefusal}`, next: 'Declare the application\'s serve command as e2e.serve in graphyard.json' }] : [])] as (Partial<StoppedRole> & Pick<StoppedRole, 'subject' | 'text' | 'next'>)[],
     // GY-3199: the control plane's own update record — the Graphyard commit this install runs, its
     // last check and last update, the step of a failed upgrade, and the staleness the daily
     // diagnostics reports (a check over a day old, or a verified commit first seen over a day ago

@@ -521,7 +521,7 @@ test('unit:opencode-launch-pregrants-repository-tree — an opencode worker laun
     assert.equal(grant[`${root}/**`], 'allow', 'the repository tree is granted: a bisect worktree beside the assigned one never prompts');
     assert.equal(grant[`${root}/.graphyard/**`], 'allow', 'the managed and bisect worktrees under .graphyard are granted beside it');
     assert.equal(grant['*'], 'deny', 'everything outside the repository is denied, so no other prompt waits for a person');
-    assert.match(workerPrompt({ cliPath: launcher }, { key: 'GY-68', title: 'Agent environments' }, { principal: 'worker-oc2' }, 1), /external-directory prompt/, 'the launch instruction names the external-directory prompt');
+    assert.match(workerPrompt({ cliPath: launcher, kind: 'opencode' }, { key: 'GY-68', title: 'Agent environments' }, { principal: 'worker-oc2' }, 1), /external-directory prompt/, 'the launch instruction names the external-directory prompt');
     // A registry account's launch contract carries the same derivation.
     const fleet = accountLaunch({ kind: 'opencode', approvals: 'auto', agentArgs: [], environment: {} }, { ...registryAccount('opencode', null), name: 'opencode-a2' }, { repositoryRoot: root });
     assert.equal(JSON.parse(fleet.environment.OPENCODE_PERMISSION).external_directory[`${root}/.graphyard/**`], 'allow');
