@@ -4,7 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { emptyRegistry, fleetView, foldObservation, recordRunOutcome, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
-import { accountStatus, countdown, localTime, roleLaunch, whenText } from '../web/agent-status.js';
+import { accountStatus, countdown, localTime, plainReason, roleLaunch, whenText } from '../web/agent-status.js';
 import { FleetOverview } from '../web/pages/fleet.js';
 
 /**
@@ -139,4 +139,12 @@ test('unit:agents-page-role-launchability — the Agents page states per role wh
   assert.ok(page.includes('data-role-launch="reviewer" data-can-launch="no"'), 'the reviewer line');
   assert.ok(page.includes('Reviewers: none can launch — at its concurrency limit (1 of 1 live)'), 'the reason on the page');
   assert.ok(page.includes('>Reviewers · waiting: at its limit</li>'), 'the role reads in one short row, its full verdict in the title');
+});
+
+test('unit:plain-account-reason — a raw provider failure reads as one short phrase, a short plain reason passes through', () => {
+  assert.equal(plainReason('429 {"code":"rate_limit_exceeded"}'), 'Limit reached');
+  assert.equal(plainReason('HTTP 404 {"error":{"message":"The model claude-x does not exist"}}'), 'Model unavailable');
+  assert.equal(plainReason('401 Unauthorized: {"type":"authentication_error"}'), 'Sign-in needed');
+  assert.equal(plainReason('500 {"error":"internal"}'), 'Launch failed');
+  assert.equal(plainReason('disabled for maintenance'), 'disabled for maintenance');
 });
