@@ -5,6 +5,7 @@ import { createServer } from 'node:http';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
+import { parseRepositoryConfig } from '../src/model-boundary/documentation.js';
 import { liveRelease } from '../src/deploy-watch.js';
 import { shippedCounts } from '../src/model/board.js';
 import type { Work } from '../src/model/work.js';
@@ -43,7 +44,9 @@ test('integration:shipped-means-live — shipped counts only merges the live com
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/version`;
-    await writeFile(join(root, 'graphyard.json'), JSON.stringify({ app: { healthUrl: url } }));
+    const declared = JSON.stringify({ app: { healthUrl: url } });
+    assert.equal(parseRepositoryConfig(declared).app?.healthUrl, url, 'graphyard.json accepts app.healthUrl');
+    await writeFile(join(root, 'graphyard.json'), declared);
     const health = await liveRelease(root, merges[0].sha, main, work, read, { now });
     assert.deepEqual(health, { commit: merges[1].sha, waiting: ['GY-3'] }, 'the health URL wins over the served record');
     assert.deepEqual(keys(shippedCounts(work, health, now)), { shipped: ['GY-1', 'GY-2'], waiting: ['GY-3'] });

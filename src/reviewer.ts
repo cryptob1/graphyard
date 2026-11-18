@@ -51,7 +51,7 @@ import { conflictingVerdictStates } from './model/review-conflict.js';
 import type { ControlPlaneReviewLaunch } from './model/post-merge-review.js';
 import { LauncherUnavailableError } from './master/config.js';
 import { resolveRepositoryPolicy } from './model-boundary/repository-policy.js';
-import type { E2eServe } from './model/repository-policy.js';
+import { type E2eServe, policySections } from './model/repository-policy.js';
 import { servingReport } from './deploy-watch.js';
 import { commandApplication, serveHead } from './merge-writer/serve-head.js';
 import { runEnvironment } from './runner/pi.js';
@@ -560,7 +560,7 @@ export async function headServeDeclaration(root: string, sha: string, run: Child
   let text: string;
   try { text = String(await run('git', ['-C', root, 'show', `${sha}:graphyard.json`])); }
   catch { return null; }
-  try { return resolveRepositoryPolicy(JSON.parse(text)).e2e.serve; } catch { return null; }
+  try { return resolveRepositoryPolicy(policySections(JSON.parse(text))).e2e.serve; } catch { return null; }
 }
 
 /**
