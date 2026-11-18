@@ -6,6 +6,7 @@ import type { Dashboard } from '../pages/dashboard';
 import { trustCounts, type TrustKind } from '../trust';
 import { shippedCounts } from '../groups';
 import type { Work } from '../../src/model';
+import { OpenApp } from './where-it-runs';
 
 /** The commit as the release line shows it: the first 8 characters, the whole SHA in the title. */
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
@@ -161,6 +162,7 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
       <div className="top-bar-live">
         <TrustStrip work={work} observedAt={observedAt} onItems={kind => { setSelected(null); setShippedFilter(kind); setView('shipped'); }}/>
         <ShippedStrip work={work} observedAt={observedAt} live={status?.live}/>
+        <OpenApp status={status}/>
         {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
       </div>
     </div>

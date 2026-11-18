@@ -13,6 +13,7 @@ import type { Dashboard } from './dashboard';
 import { BuildLine } from '../fun';
 import { useGlide } from '../glide';
 import { EmptyState } from '../components/page-layout';
+import { WhereItRuns } from '../components/where-it-runs';
 
 /**
  * The Work page with its motion (GY-3272 AC-4b): on every render, a row that changed group is
@@ -89,6 +90,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
           a case's text lookup finds the visible words first. */}
       <TasteFeed work={work} status={status} token={token} observedAt={now} busy={busy} action={action} setSelected={setSelected}/>
     </>}
+    <WhereItRuns status={status} now={now}/>
     <Replay api={api} onOpen={setSelected}/>
   </>;
 }

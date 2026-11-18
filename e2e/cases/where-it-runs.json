@@ -1,0 +1,12 @@
+{
+  "id": "where-it-runs",
+  "title": "The top bar's Open app button and the Work page's Where it runs card link to the app main declares",
+  "description": "A real browser opens the served dashboard over a repository whose main declares app.url in graphyard.json and whose serve pass serves main's commit. The top bar shows Open app linking to the declared address; the Work page's Where it runs card links to it too and shows the machine, the serving commit, when it was deployed and the dashboard's own link. Over a repository that declares no app.url the card names the one setting to add and no Open app button shows.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "master status lists main's app.url with machine, serving commit and deploy time, refuses loopback, names the missing setting", "run": "node --import tsx tests/helpers/run-tests.ts tests/app-url-declared.test.ts", "timeoutSeconds": 240 },
+    { "kind": "command", "name": "Open app and the Where it runs card, declared and missing", "run": "npm run test:browser -- browser-tests/where-it-runs.spec.ts", "timeoutSeconds": 420 }
+  ]
+}
