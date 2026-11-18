@@ -24,9 +24,5 @@ export const workerFastGates = {
 export const workerFastGatesPresent = (root: string) => workerFastGates.tests.every(gate => existsSync(join(root, gate)));
 /** The one command line the gates run as: the test files through the suite's own harness (run-tests.ts reserves the port window a bare run lacks). */
 export const workerFastGatesCommand = `node --import tsx tests/helpers/run-tests.ts ${workerFastGates.tests.join(' ')}`;
-/** The sync instruction the gates sentence follows: the before-submit discipline the repository's standing instructions state, in the request itself, with the CLI and the item it is for. */
-export const workerSyncSentence = (cliPath: string, key: string) => `Run node ${cliPath} sync ${key} before submitting: it merges the shared base branch the merge writer advances. `;
-/** The one sentence the request adds after the sync instruction: the gates, their one command line, and what to do when one fails. */
-export const workerFastGatesSentence = `Before complete, run the fast gates — \`${workerFastGatesCommand}\` — and fix what they name first, since the merge writer's trial fails on each of them. `;
-/** The whole addition, in order: the sync instruction, then the gates; the complete instruction follows it in the request. */
-export const workerBeforePushSection = (cliPath: string, key: string) => workerSyncSentence(cliPath, key) + workerFastGatesSentence;
+/** The one sentence item 2 of the pre-submit list adds (GY-3489): the gates and their one command line. */
+export const workerFastGatesSentence = `Then the fast gates: \`${workerFastGatesCommand}\`. `;

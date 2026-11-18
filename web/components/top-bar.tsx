@@ -1,25 +1,45 @@
+import type { ReactNode } from 'react';
 import { glossary, type GlossaryTerm } from '../glossary';
 import Term from './term';
 import { viewFor, visibleViews, type View } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
-import { cityCounts } from '../city';
+import { trustCounts, type TrustKind } from '../trust';
+import { shippedCounts } from '../groups';
 import type { Work } from '../../src/model';
 
 /** The commit as the release line shows it: the first 8 characters, the whole SHA in the title. */
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
 
 /**
- * The city-at-night strip (GY-3272): how many agents are on shift, how many merges are in trial,
- * how many shipped this week and how many wait to go live (GY-3452), read off the same snapshot the page below shows. The numbers
- * carry data attributes with exactly what the sentence says, so a reader (and a test) checks the
- * words against the counts the Workers page and the ledger read, in the app's own words: agents working, shipped, going live.
+ * The trust strip (GY-3395): the header's three numbers for the last seven days — the share of
+ * delivered items whose proofs ran the real app, the share sent back for rework, and the items the
+ * batch gate reverted — read off the same snapshot the page below shows (web/trust.ts), each number
+ * linking to the items behind it on the Shipped page. The numbers carry data attributes with
+ * exactly what the sentence says, so a reader (and a test) checks the words against the records
+ * the item pages read, in the app's own words: verified by running, sent back, reverted — the
+ * last with the glossary's "reverts this week" on hover, which names the seven-day window.
  */
-export function CityStrip({ work, observedAt, live }: { work: Work[]; observedAt: number; live?: { commit?: unknown; waiting?: unknown } | null }) {
-  const { onShift, inTrial, shipped, waiting } = cityCounts(work, observedAt, live);
-  return <p className="city-strip" aria-label="Activity" data-on-shift={onShift} data-in-trial={inTrial} data-shipped={shipped} data-waiting={waiting}>
-    <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> agent{onShift === 1 ? '' : 's'} working
-    <span aria-hidden="true"> · </span><span className="mono">{inTrial}</span> in trial
-    <span aria-hidden="true"> · </span><span className="mono">{shipped}</span> shipped · <span className="mono">{waiting}</span> going live
+export function TrustStrip({ work, observedAt, onItems }: { work: Work[]; observedAt: number; onItems: (kind: TrustKind) => void }) {
+  const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
+  const { delivered, verifiedByRunning, sentBack, reverts } = trustCounts(work, now);
+  const number = (kind: TrustKind, items: readonly Work[], label: ReactNode, share = false) => <button type="button" className="text-button" data-trust={kind} onClick={() => onItems(kind)}>
+    <span className="mono">{items.length}{share ? `/${delivered.length}` : ''}</span> {label}
+  </button>;
+  return <p className="trust-strip" aria-label="Trust" data-verified-by-running={verifiedByRunning.length} data-delivered={delivered.length} data-sent-back={sentBack.length} data-reverts={reverts.length}>
+    <span className="beacon" aria-hidden="true"/>{number('verified-by-running', verifiedByRunning, 'verified by running', true)}
+    <span aria-hidden="true"> · </span>{number('sent-back', sentBack, 'sent back', true)}
+    <span aria-hidden="true"> · </span>{number('reverts', reverts, <Term term="reverts this week" focusable={false}>reverted</Term>)}
+  </p>;
+}
+
+/**
+ * Shipped and going live (GY-3452): the week's merges the live commit contains, and those it does
+ * not carry yet — the Work page card's one count, so the two never disagree.
+ */
+export function ShippedStrip({ work, observedAt, live }: { work: Work[]; observedAt: number; live?: { commit?: unknown; waiting?: unknown } | null }) {
+  const { shipped, waiting } = shippedCounts(work, live, Number.isNaN(observedAt) ? Date.now() : observedAt);
+  return <p className="trust-strip shipped-strip" aria-label="Shipped" data-shipped={shipped.length} data-waiting={waiting.length}>
+    <span className="mono">{shipped.length}</span> shipped · <span className="mono">{waiting.length}</span> going live
   </p>;
 }
 
@@ -128,7 +148,7 @@ const meaning = (label: string): GlossaryTerm | null => {
  * whole feature.
  */
 export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }) {
-  const { view, setView, status, selected, work, observedAt, onPalette } = dashboard;
+  const { view, setView, status, selected, setSelected, work, observedAt, onPalette, setShippedFilter } = dashboard;
   const section = viewFor(view).section;
   const pages = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
   const tabs = pages.filter(page => !page.advanced), advanced = pages.filter(page => page.advanced);
@@ -137,7 +157,8 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
     <div className="top-bar-row">
       {status?.repository && <p className="project-name" data-title><img className="project-emblem" src="/favicon.svg" alt=""/>{status.repository}</p>}
       <div className="top-bar-live">
-        <CityStrip work={work} observedAt={observedAt} live={status?.live}/>
+        <TrustStrip work={work} observedAt={observedAt} onItems={kind => { setSelected(null); setShippedFilter(kind); setView('shipped'); }}/>
+        <ShippedStrip work={work} observedAt={observedAt} live={status?.live}/>
         {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
       </div>
     </div>

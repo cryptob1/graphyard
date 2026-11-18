@@ -26,7 +26,7 @@ async function serve(page: Page, work: any[], live: { commit: string; waiting: s
 test('e2e:shipped-counts-agree — the top bar and the Work page card show the same shipped and waiting-to-go-live counts', async ({ page }) => {
   // Four merges this week; the live commit contains two of them, so two wait to go live.
   await serve(page, [merged('GY-1', 300), merged('GY-2', 200), merged('GY-3', 100), merged('GY-4', 50)], { commit: 'c'.repeat(40), waiting: ['GY-3', 'GY-4'] });
-  const strip = page.locator('.city-strip'), card = page.getByLabel('Shipped this week');
+  const strip = page.locator('.shipped-strip'), card = page.getByLabel('Shipped this week');
   await expect(strip).toHaveAttribute('data-shipped', '2');
   await expect(strip).toHaveAttribute('data-waiting', '2');
   await expect(strip).toContainText('2 shipped · 2 going live');

@@ -7,6 +7,7 @@ import { temporaryDirectory } from '../tests/helpers/temp-dirs';
 import { Engine } from '../src/engine';
 import { server } from '../src/server';
 import { settleHostLoops } from '../tests/helpers/team-access-hosts';
+import { fakeTailscale, onPath } from '../tests/helpers/fake-tailscale';
 
 test.use({ actionTimeout: 15_000 });
 
@@ -14,7 +15,7 @@ test.use({ actionTimeout: 15_000 });
 // machine's Tailscale link through the real Setup page and each invite with both links.
 test('e2e:one-click-team-access — two installs share the machine link and copy invitations carrying both locks', async ({ browser, baseURL }) => {
   test.setTimeout(120_000);
-  const machineDir = join(await temporaryDirectory('gy-team-access'), 'machine');
+  const hostDir = await temporaryDirectory('gy-team-access'), machineDir = join(hostDir, 'machine');
   await mkdir(machineDir);
   await writeFile(join(machineDir, 'tailnet.json'), JSON.stringify({ dnsName: 'yard.tail-test.ts.net.', ip: '100.64.0.7', deviceId: 'nFAKE123CNTRL' }));
   const provider = createServer((req, res) => { req.resume(); req.on('end', () => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify([{ inviteUrl: 'https://login.tailscale.com/admin/invite/single-use-browser' }])); }); });
@@ -39,6 +40,9 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
   // while the page polls for the single-use invite its host must answer (setup.tsx polls every second).
   // GY-3411: the loops are settled before the one reload, so the page's read is waited for, not raced:
   // retrying sync-and-reload cut short the page's read on a loaded host, even with GY-3412's 5 s wait.
+  // up served both installs on their own ports; each loop reads that from the tailscale command.
+  const restorePath = onPath(await fakeTailscale(hostDir));
+  await writeFile(join(hostDir, 'serve.json'), JSON.stringify(Object.fromEntries(installs.map(install => [install.port, install.url]))));
   const sync = () => settleHostLoops(installs, { machineDir, tailscaleApi });
   await sync();
   const [a, b] = installs;
@@ -159,6 +163,7 @@ test('e2e:one-click-team-access — two installs share the machine link and copy
     await expect(sectionA).toContainText('A token is saved', settled);
     for (const page of [pageA, pageB]) expect(await page.content()).not.toContain(token);
   } finally {
+    restorePath();
     for (const context of contexts) await context.close();
     for (const install of installs) { await new Promise<void>(resolve => { install.http.close(() => resolve()); install.http.closeAllConnections(); }); await install.store.close(); }
     await new Promise<void>(resolve => provider.close(() => resolve()));

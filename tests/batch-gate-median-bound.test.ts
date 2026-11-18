@@ -50,7 +50,7 @@ test('integration:batch-gate-median-bound — a verified run samples its own tim
     const slow = await gate(record, 200 * minute);
     assert.equal(slow.outcome.outcome, 'timeout');
     assert.equal(slow.outcome.outcome === 'timeout' && slow.outcome.boundMs, 68 * minute, 'each slow unverified attempt meets the same bound');
-    assert.ok(slow.limits[0]! <= 3 * 68 * minute, `the trial gets the bound plus a two-bound backstop, never hours more (${slow.limits[0]} ms)`);
+    assert.equal(slow.limits[0], 68 * minute, 'the trial gets the gate\'s own bound, never hours more (GY-3509)');
   }
   assert.equal(record.verifiedRuns!.length, 5, 'no timeout became a sample');
   assert.equal(gateBoundMs(record), 68 * minute);
@@ -60,5 +60,5 @@ test('integration:batch-gate-median-bound — cold start is bounded: no verified
   const cold = await gate({ ...bootstrapGate('owner/project', verified), catalogMs: 222 * minute }, 46 * minute);
   assert.equal(cold.outcome.outcome, 'timeout');
   assert.equal(cold.outcome.outcome === 'timeout' && cold.outcome.boundMs, gateLimitMs);
-  assert.equal(cold.limits[0], 3 * gateLimitMs, 'the trial gets the 45 minutes plus a backstop of two bounds; the gate\'s own clock stops it');
+  assert.equal(cold.limits[0], gateLimitMs, 'the trial gets the gate\'s 45 minutes, never a multiple (GY-3509)');
 });

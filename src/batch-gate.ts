@@ -361,9 +361,10 @@ async function gateFlight(ports: GatePorts, record: GateRecord): Promise<GateOut
       if (now - saved >= 30_000) { saved = now; void ports.checkpoint?.(); }
     };
     // The check's budget is the gate's own remaining time (AC-7): the gate's clock stops it, through
-    // `stop`, however long its waits run; the trial's own wall clock is only a backstop of two more bounds.
+    // `stop`, however long its waits run. GY-3509: the trial's own clock is that same remaining time,
+    // never a multiple of it, so no runner outlives the 90-minute ceiling.
     const stop = new AbortController();
-    return Promise.race([ports.run(commit, runChecks, runFiles, left + 2 * bound, stop.signal), new Promise<never>((_, reject) => { timer = setInterval(() => { tick(); if (ports.now() > deadline()) { reject(new GateTimeout()); stop.abort(new GateTimeout()); } }, 1000); })])
+    return Promise.race([ports.run(commit, runChecks, runFiles, left, stop.signal), new Promise<never>((_, reject) => { timer = setInterval(() => { tick(); if (ports.now() > deadline()) { reject(new GateTimeout()); stop.abort(new GateTimeout()); } }, 1000); })])
       .then(async failed => {
         tick();
         if (ports.now() > deadline()) throw new GateTimeout();
