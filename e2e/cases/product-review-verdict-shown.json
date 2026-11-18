@@ -15,7 +15,7 @@
       "name": "create the user-facing feature",
       "method": "POST",
       "path": "/api/work",
-      "body": {
+      "body": {"why": "The E2E case files work as a person would.", "simplest": "One item with the fields the case needs.", 
         "title": "E2E case {{case}} run {{run}}",
         "description": "Created by the product-review-verdict-shown E2E case to carry a recorded verdict.",
         "type": "feature",

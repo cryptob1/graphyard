@@ -1,0 +1,15 @@
+{
+  "id": "gates-removed-this-week",
+  "title": "The dashboard header shows gates removed this week beside reverts this week",
+  "description": "Starts the real control plane over a checkout and Postgres: the master records a lesson with `master lesson add --enforceable`, the loop's lessons-to-code pass files its item through the API, a batch-gate revert of another item is on the gate record, and the item's delivery removes the lesson. /api/status's thisWeek then reads one revert and one gate removed, and the rendered dashboard header shows 'Reverts this week: 1 GY-N · Gates removed this week: 1 GY-M' with each item a link. No provider credentials, accounts or network.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "gates removed this week beside reverts this week",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/gates-removed-this-week.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

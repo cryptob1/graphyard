@@ -1,0 +1,16 @@
+{
+  "id": "host-add-port-alias",
+  "title": "host add records a compute-only OpenSSH on a non-22 port by USER@HOST:PORT and by ssh-config alias, and refuses a port that opens a plain shell",
+  "description": "The host is a fixture on 127.0.0.1 whose port 22 is Tailscale SSH (any account gets a plain shell), prepared by running the script `graphyard host prepare` prints, which adds an OpenSSH for gy-compute only on port 2222 with the forced-command graphyard-host-shim. `host add gy-compute@127.0.0.1:2222` and `host add local-compute` (an ssh-config alias for that port) record the host; `host add gy-compute@127.0.0.1:22` is refused because a plain shell opens there.",
+  "tags": ["hosts"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "host add by port and by alias records the compute-only port; the plain-shell port is refused",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/host-prepare-tailscale-ssh.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

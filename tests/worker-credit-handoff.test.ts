@@ -84,7 +84,7 @@ for (const shape of ['uncommitted', 'committed-and-uncommitted', 'clean', 'clean
       await writeFile(join(worktree, 'untracked.txt'), 'new finding\n');
     }
 
-    const filed = await ok(operator, 'POST', 'work', { title: `Keep ${shape} work`, type: 'chore', criteria: [{ id: 'AC-1', text: 'Work is kept', proofs: ['e2e:worker-credit-handoff'] }] }) as Work;
+    const filed = await ok(operator, 'POST', 'work', { why: 'w', simplest: 's', title: `Keep ${shape} work`, type: 'chore', criteria: [{ id: 'AC-1', text: 'Work is kept', proofs: ['e2e:worker-credit-handoff'] }] }) as Work;
     const ready = await ok(operator, 'POST', `work/${filed.id}/ready`, {}) as Work;
 
     const secrets = await temporaryDirectory(`credit-secrets-${shape}`);

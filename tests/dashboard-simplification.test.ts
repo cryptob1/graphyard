@@ -218,25 +218,31 @@ test('integration:dashboard-word-budget — the home page answers what needs you
   assert.match(text(page), /A fault blocks it; the master agent clears it/);
 });
 
-test('integration:item-view-structure — state, why, who acts next and the pull request first; the steps; each criterion once; edits in an admin menu; at most 250 words', () => {
+test('integration:item-view-structure — state, who acts next and why on the plate; the steps; each criterion once; edits in an admin menu; at most 250 words', () => {
   const view = itemView('GY-16');
   const visible = text(view);
   const count = words(view).length;
   assert.ok(count <= 250, `item view renders ${count} words: ${visible}`);
   const at = (needle: string) => { const index = visible.indexOf(words(needle).join(' ')); assert.ok(index >= 0, `shows ${needle}: ${visible}`); return index; };
-  // GY-3321: the why is the page heading's fact, under the title; the pull request is its action, top right.
-  const order = [at('Moving'), at('Testing 2 of 3 proofs passed'), at('PR #43'), at('Who acts next: Prover agent'), at('What is left'), at('The proof integration:login-latency has not passed yet')];
-  assert.deepEqual([...order].sort((a, b) => a - b), order, 'state, why, pull request, who acts next, then what is left');
-  // Only the current step's reasons are listed as what is left; the gates' raw reasons stay under Technical details.
+  // GY-3392: the plate answers who acts next and why, with no pull request wording anywhere; the
+  // gate detail folds under Technical details, so its lines read on the opened fold.
+  const opened = (html: string) => text(html.replace('<details class="more-details"', '<details open class="more-details"'));
+  const order = [at('Moving'), at('Who acts next: Prover agent'), at('Testing 2 of 3 proofs passed')];
+  assert.deepEqual([...order].sort((a, b) => a - b), order, 'state, who acts next, why');
+  assert.doesNotMatch(view, /pull request/i, 'no pull request wording on the page');
+  assert.ok(opened(view).indexOf('What is left') < opened(view).indexOf('The proof integration:login-latency has not passed yet'), 'the folded gate detail keeps its plain lines');
+  // Only the current step's reasons are listed as what is left, inside the collapsed Technical
+  // details (GY-3392); the gates' raw reasons stay there too.
   const review = itemView('GY-15');
-  assert.match(text(review), /Waiting for someone else to approve the latest code/);
+  assert.match(opened(review), /Waiting for someone else to approve the latest code/);
   assert.doesNotMatch(text(review), /Proven to work:/, 'later steps are collapsed');
+  assert.doesNotMatch(text(review), /What is left/, 'the gate detail is one click down');
   for (const raw of ['needs trusted passing evidence', 'Policy v', 'Revision ', 'assignment 1', 'GitHub observation missing']) assert.ok(!text(review).includes(raw) && !visible.includes(raw), `no ${raw} by default`);
-  // Requirements sit below the summary and What is left (GY-161 AC-10, GY-171 AC-1), folded with the description under Details
+  // Requirements sit below the plate (GY-161 AC-10, GY-171 AC-1), folded with the description under Details
   // (GY-2011 AC-3): one line per criterion, its full text folded; each criterion appears once in Requirements (the Tests panel
   // names its proofs' criterion too, GY-2091), with one marker per proof.
   assert.match(view, /<details class="panel item-details-fold" aria-label="Details"><summary>Details<\/summary>[\s\S]*<section class="requirements" aria-label="Requirements">/);
-  const requirements = view.slice(view.indexOf('aria-label="Requirements"'), view.indexOf('aria-label="Pull request"'));
+  const requirements = view.slice(view.indexOf('aria-label="Requirements"'), view.indexOf('aria-label="Activity"'));
   for (const ac of find('GY-16').criteria) assert.equal(text(requirements).split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once in Requirements`);
   assert.equal(view.match(/class="marker-pass"/g)?.length, 2); assert.equal(view.match(/class="marker-pending"/g)?.length, 1);
   const lines = text(view.replace('<details class="panel item-details-fold"', '<details open class="panel item-details-fold"'));

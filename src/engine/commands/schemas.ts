@@ -38,10 +38,14 @@ export const commands = {
     z.object({ priority: z.number().int().min(0).max(3), source: z.literal('dashboard') }).strict(),
   ]),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional(), by: z.literal('loop').optional() }).strict(),
-  requirements: z.object({ owner: createSchema.shape.owner, description: createSchema.shape.description.optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
+  requirements: z.object({ owner: createSchema.shape.owner, description: createSchema.shape.description.optional(), why: createSchema.shape.why, simplest: createSchema.shape.simplest, expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: createSchema.shape.plannedFiles, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   // GY-3298: hold a released item out of dispatch (release clears it), and message its worker.
   hold: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
+  // GY-3393: the owner's taste of a delivered item, from the Work page's Taste feed. A send-back
+  // carries its note; the note becomes a follow-up item's reason and a proposed master lesson.
+  taste: z.object({ verdict: z.enum(['good', 'send-back']), note: z.string().trim().min(1).max(2000).optional() }).strict()
+    .superRefine((data, ctx) => { if (data.verdict === 'send-back' && !data.note) ctx.addIssue({ code: 'custom', message: 'A send-back carries its note: what should change', path: ['note'] }); }),
   message: z.object({ text: z.string().trim().min(1).max(4000) }).strict(),
   rework: z.object({ reason: z.string().trim().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
   claim: z.object({}).strict(),

@@ -8,7 +8,8 @@ import { launchEnvironmentValueLimit } from '../model/registry.js';
 import { defaultChildRun } from '../child-runner.js';
 import { temporaryDirectories, underTestRunner } from '../runtime-environment.js';
 import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
-import { mergeWriterSettingsSchema } from './merge-writer-settings.js';
+import { maxMergeWriterParallel, mergeWriterSettingsSchema } from './merge-writer-settings.js';
+import { trialHotCelsius } from '../merge-writer/trial-load.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 export { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory } from './checkout-git.js';
 
@@ -262,6 +263,11 @@ export function profileAtLimit(role: 'Reviewer' | 'Producer', profile: { name: s
     : `${role} profile ${profile.name} is at its concurrency limit (${sessions.running.length} running, limit ${sessions.limit}: ${sessions.running.join(', ')}); raise concurrency in .graphyard/master.json or add a ${role.toLowerCase()} profile`;
 }
 
+/** GY-3446: a run setting that holds until `until`, then reverts to its default on its own. */
+const temporaryLimit = <T extends z.ZodTypeAny>(value: T) => z.object({ value, until: z.string().datetime({ offset: true }) }).strict();
+/** The value of a temporary limit standing at `now`, or undefined once it expired or was never set. */
+export const standingLimit = (limit: { value: number; until: string } | undefined, now = Date.now()) => limit && Date.parse(limit.until) > now ? limit.value : undefined;
+
 // Durable-loop settings. The daemon adds no credential of its own: a proof or smoke workflow is
 // requested from the provider, which holds the trusted producer secret, and a deployment probe only reads.
 export const masterRunSchema = z.object({
@@ -340,6 +346,12 @@ export const masterRunSchema = z.object({
   worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
   // An account whose usage reached this percentage of any window is skipped at launch: a session started just below a hard limit would stall mid-task.
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
+  // GY-3446: temporary limits the master sets when another project on the host asks this install to
+  // back off (`master config trialCap=2 launchHotCelsius=80 until=TIME`): at most this many merge
+  // trials at once, and launches wait from this CPU average. Each only tightens its default and is
+  // ignored once `until` passes.
+  trialCap: temporaryLimit(z.number().int().min(1).max(maxMergeWriterParallel)).optional(),
+  launchHotCelsius: temporaryLimit(z.number().int().min(40).max(trialHotCelsius)).optional(),
   runtimes: narrowRoleRuntimeSchema.optional(),
   pi: piRuntimeSchema.optional(),
   mergeWriter: mergeWriterSettingsSchema.optional(),
@@ -426,6 +438,21 @@ export function withReviewerDefaults<T extends Pick<MasterConfig, 'reviewers' | 
   const automatic = config.run.reviewerProfile;
   if (!automatic || !config.reviewers.some(profile => profile.name === automatic && profile.concurrency === undefined)) return config;
   return { ...config, reviewers: config.reviewers.map(profile => profile.name === automatic && profile.concurrency === undefined ? { ...profile, concurrency: automaticReviewerConcurrency } : profile) };
+}
+/**
+ * The reviewer profile that answers automatic requests: the configured one, else the only one.
+ * The configured one runs `automaticReviewerConcurrency` sessions when it declares none (GY-1072).
+ */
+export function selectReviewerProfile(input: Pick<MasterConfig, 'reviewers' | 'run'>): { profile: ReviewerProfile | null; reason: string | null } {
+  // Every review posts through the API under a one-time token (GY-1525): it needs a profile, not a reviewer App.
+  const config = withReviewerDefaults(input);
+  if (config.run.reviewerProfile) {
+    const profile = config.reviewers.find(item => item.name === config.run.reviewerProfile) ?? null;
+    return profile ? { profile, reason: null } : { profile: null, reason: `run.reviewerProfile names ${config.run.reviewerProfile}, which is not a configured reviewer profile` };
+  }
+  // GY-3421: the registry chooses the account (an independent provider first); the profile is only
+  // where the launch starts, and the others are its failover, so several profiles never hold a review.
+  return config.reviewers.length ? { profile: config.reviewers[0], reason: null } : { profile: null, reason: 'no reviewer profile is configured; add one with master reviewer add' };
 }
 export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(config: T): T {
   if (!config.producers.some(profile => profile.concurrency === undefined)) return config;

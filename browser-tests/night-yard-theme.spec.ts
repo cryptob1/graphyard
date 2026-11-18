@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { boardFromStatus } from '../src/model/board';
 import { boardStatus, boardWork, NOW } from './ui-board';
+import { serveXterm } from './xterm';
 
 // GY-3272 AC-1: Night Yard is the default look, Daylight is selectable and remembered, both hold
 // WCAG AA for text (the audit below walks every visible text element), and with reduced motion the
@@ -9,6 +10,9 @@ const ledger = (item: any, state: string) => ({ key: item.key, state, head: item
 /** The board fixture with one row whose merge trial failed on its own head: the glitch row. */
 const auditWork = () => boardWork().map(item => item.key === 'GY-15' ? { ...item, mergeLedger: ledger(item, 'refused') } : item);
 const merged = (item: any) => ({ ...item, stage: 'done', lease: undefined, gates: [], delivery: { mergedAt: new Date(NOW).toISOString(), mergeSha: 'a'.repeat(40) } });
+
+/** A page load waits this long: on a loaded trial host the runner's own route handlers answer seconds late (GY-3442). */
+const live = { timeout: 15_000 };
 
 async function serve(page: Page, work: any[]) {
   const state = { work };
@@ -21,10 +25,11 @@ async function serve(page: Page, work: any[]) {
     if (path.includes('/work/')) return route.fulfill({ json: state.work.find(w => path.endsWith(w.id)) ?? {} });
     return route.fulfill({ json: [] });
   });
+  await serveXterm(page); // the Master page's xterm.js, served locally (GY-3357)
   await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
-  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible(live);
   await expect(page.locator('.work-row').first()).toBeVisible();
   return state;
 }
@@ -83,7 +88,6 @@ const expectAA = async (page: Page, where: string) => expect(await audit(page), 
 const background = (page: Page) => page.evaluate(() => { const match = /([\d.]+)[, ]+([\d.]+)[, ]+([\d.]+)/.exec(getComputedStyle(document.body).backgroundColor)!; return [+match[1], +match[2], +match[3]]; });
 const rain = (page: Page) => page.evaluate(() => getComputedStyle(document.body, '::after').animationName);
 const grain = (page: Page) => page.evaluate(() => getComputedStyle(document.body, '::before').backgroundImage);
-const live = { timeout: 15_000 };
 
 test('e2e:night-yard-theme — Night Yard serves by default with rain over grain, Daylight is selectable and remembered, and both themes hold WCAG AA', async ({ page }) => {
   test.setTimeout(90_000);
@@ -101,8 +105,8 @@ test('e2e:night-yard-theme — Night Yard serves by default with rain over grain
   await page.getByLabel('Search commands').fill('Master');
   await page.keyboard.press('Enter');
   await expect(page.getByRole('heading', { name: 'Master', exact: true, level: 1 })).toBeVisible();
-  await page.keyboard.press('g');
-  await page.keyboard.press('w');
+  // Back by the sidebar, not g w: a loaded runner can land the w past the chord's two-second window (GY-3442).
+  await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Work', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
   // The audit covers the page an operator reads most: the Work board, an item page, the palette, the shortcut sheet.
   await expectAA(page, 'the Work page at night');
@@ -136,7 +140,7 @@ test('e2e:night-yard-theme — Night Yard serves by default with rain over grain
   // The choice is this browser's: a reload serves Daylight again, and Night Yard is one button away.
   expect(await page.evaluate(() => localStorage.getItem('graphyard.theme'))).toBe('daylight');
   await page.reload();
-  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible(live);
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'daylight');
   expect(await background(page)).toEqual([243, 244, 239]);
   await page.getByRole('button', { name: 'Switch theme to Night Yard' }).click();

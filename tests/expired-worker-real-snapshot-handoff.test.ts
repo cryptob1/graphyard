@@ -73,7 +73,7 @@ after(async () => { http?.close(); await store?.close(); });
 
 test('integration:expired-worker-real-snapshot-handoff — a supervisor-ended unsubmitted attempt the control plane already reconciled has its committed and uncommitted work preserved on the loop\'s next cycle, the replacement\'s handoff names the saved commit before the worktree cleanup, and the expired epoch cannot continue working', async () => {
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
-  const filed = await ok(operator, 'POST', 'work', {
+  const filed = await ok(operator, 'POST', 'work', { why: 'w', simplest: 's',
     title: 'Keep a reconciled attempt\'s partial work',
     type: 'chore',
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:expired-worker-real-snapshot-handoff', 'e2e:fixture'] }],

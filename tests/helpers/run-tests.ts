@@ -1,13 +1,14 @@
 import { spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, readdirSync, readFileSync, statfsSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, readFileSync, statfsSync, writeFileSync } from 'node:fs';
 import { readdir, rm } from 'node:fs/promises';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, shardFiles } from '../../scripts/ci-tests.mjs';
-import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, testPortSpan, type ReserveOptions } from '../../src/cli/test-isolation.js';
-import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
-import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
+import { hostAccountsVariable } from '../../src/host-accounts.js';
+import { isolatedTestEnvironment, reserveTestPorts, sharedClusterPort, suiteRunEnvironment, testPortSpan, type ReserveOptions } from '../../src/cli/test-isolation.js';
+import { hostMemoryFloor, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
+import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, readStrictCap, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker } from '../../src/tmp-reclaim.js';
 import { stopServersUnder } from '../../src/postgres-stop.js';
 
@@ -18,8 +19,9 @@ import { stopServersUnder } from '../../src/postgres-stop.js';
 //   node --import tsx tests/helpers/run-tests.ts --browser [ARGS...]  the Playwright suite
 //   node --import tsx tests/helpers/run-tests.ts --typecheck          tsc --noEmit (npm run typecheck)
 //
-// Started from a Graphyard session, each of the three first takes a host verification slot
-// (src/master/verification-slots.ts, GY-612), waiting while every slot on the host is held. The
+// Started from a Graphyard session, a whole suite first takes a host verification slot
+// (src/master/verification-slots.ts, GY-612), waiting while every slot on the host is held; a type
+// check and a run of selected files take none (GY-3447). The
 // Node suite then runs at the breadth the host's memory affords (GY-1821): the files in flight
 // stay inside what is available beyond the floor and the deferral margin, less what runs on the
 // other slots declared — a suite alone runs at node's full breadth, and however many suites the
@@ -89,6 +91,16 @@ export const defaultBrowserPort = 4319;
 export function suiteBreadth({ budgetBytes, otherFiles, cpus, perFileBytes = bytesPerSuiteFile }: { budgetBytes: number; otherFiles: number; cpus: number; perFileBytes?: number }): number {
   const affordable = Math.floor(budgetBytes / perFileBytes) - Math.max(0, otherFiles);
   return Math.max(2, Math.min(affordable, Math.max(2, cpus - 1)));
+}
+
+/**
+ * GY-3401: a Graphyard session's run never goes past the session's share of the host's test
+ * parallelism (VITEST_MAX_WORKERS, set at its launch from the cores and the sessions running), so
+ * sessions already running stop fanning one file out per core on a hot host.
+ */
+export function sessionSuiteBreadth(host: number | null, environment: NodeJS.ProcessEnv = process.env): number | null {
+  const budget = Number(environment.VITEST_MAX_WORKERS);
+  return Number.isInteger(budget) && budget >= 1 ? Math.min(host ?? budget, budget) : host;
 }
 
 /** The breadth this run starts at, or null when nothing judges it: a run inside a run, a host whose memory cannot be read (CI keeps node's own default). */
@@ -186,21 +198,32 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     if (options.stdio !== 'pipe') console.log('No test files selected for this run.');
     return { code: 0, base: 0, environment: {}, stdout: '', stderr: '' };
   }
-  // The browser window is the dev server's port and the sentinel above it that holds the window.
-  const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2, last: 65_000, ...options.ports } : { ...nestedFirst(), ...options.ports });
+  // The browser window is the dev server's port with a spare beside it, then one window above both
+  // the run's shared Postgres cluster and the sentinel that holds the window (GY-3356); a Node
+  // run's window is its shared cluster's own.
+  const reservation = await reserveTestPorts(options.browser ? { first: defaultBrowserPort, span: 2 + testPortSpan, last: 65_000, ...options.ports } : { ...nestedFirst(), ...options.ports });
   let postgres: Awaited<ReturnType<typeof import('./postgres.js').startPostgres>> | undefined;
   try {
-    if (!options.browser) {
-      const { startPostgres } = await import('./postgres.js');
-      postgres = await startPostgres(reservation.base);
-    }
+    // One shared warm cluster for the whole run, whichever suite runs (GY-3356).
+    const { startPostgres } = await import('./postgres.js');
+    const clusterPort = sharedClusterPort(reservation.base, options.browser);
+    postgres = await startPostgres(clusterPort);
     // The suite's managed checkouts live inside the tree it runs from (ignored by .graphyard/): a worker's
     // sandbox can write nowhere else, and the default ~/.local/share/graphyard failed every checkout there (GY-498).
     // A run of the suite reads no host memory (GY-612): a host the suite itself loaded low must not
     // flip the behaviour of tests that stub no reading.
     const dataHome = resolve(cwd, '.graphyard/test-data');
     mkdirSync(dataHome, { recursive: true });
-    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), GRAPHYARD_TEST_DATABASE_URL: postgres!.url, [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome, ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
+    // GY-3290: a suite run is one heavy job of the host budget (the slot the runner itself takes
+    // when a session started it). Its tests run outside any budget unless a fixture joins one — a
+    // loop or deploy watch started by a test joins the budget under this run's data directory —
+    // and that budget is wide, so one file's fixtures never starve another's past the per-file
+    // bound. tests/host-heavy-budget.test.ts drives the real limit in its own directories.
+    mkdirSync(join(dataHome, 'heavy-jobs'), { recursive: true });
+    try { writeFileSync(join(dataHome, 'heavy-jobs', 'limit'), '64\n'); } catch { /* the default bound stands */ }
+    const set = { ...suiteRunEnvironment({ browser: options.browser, browserPort: reservation.base, clusterPort, clusterUrl: postgres.url, dataHome, tmpRoot }),
+      // GY-3333: the suite's host-level account records live under the test data home, never the real ~/.gy.
+      [hostAccountsVariable]: join(dataHome, 'host-accounts') };
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
@@ -225,6 +248,15 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   } finally { try { await postgres?.stop(); } finally { reservation.release(); } }
 }
 
+/**
+ * GY-3447: the host heavy-job slot a session's run takes, named, or null. Only a whole suite (no
+ * file, list or shard selecting part of it) is a heavy job; a type check (`npm run build`) and
+ * selected files start at once, under the session's share of the host's test parallelism — except under a
+ * host strict cap (GY-3446), when a selected run takes a slot too.
+ */
+export const heavyRunLabel = (mode: 'test' | 'browser' | 'typecheck', args: string[], strict = false) =>
+  mode === 'typecheck' || args.length && !strict ? null : `${mode === 'browser' ? 'npm run test:browser' : 'npm test'}${args.length ? ` ${args.join(' ')}` : ''}`;
+
 /** `tsc --noEmit` under the caller's environment, marked as holding the slot this process took. */
 export async function typecheck(cwd = process.cwd(), args: string[] = []) {
   const child = spawn(process.execPath, [fileURLToPath(import.meta.resolve('typescript/bin/tsc')), '--noEmit', ...args], { cwd, stdio: 'inherit', env: { ...process.env, [heldVariable]: '1' } });
@@ -236,10 +268,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const browserPaths = process.argv.length > 2 && process.argv.slice(2).every(arg => arg.startsWith('browser-tests'));
   const mode = process.argv[2] === '--browser' || browserPaths ? 'browser' : process.argv[2] === '--typecheck' ? 'typecheck' : 'test';
   const args = process.argv.slice(mode === 'test' || browserPaths ? 2 : 3);
-  const held = await sessionVerificationSlot(mode === 'typecheck' ? 'npm run typecheck' : mode === 'browser' ? 'npm run test:browser' : `npm test${args.length ? ` ${args.join(' ')}` : ''}`);
+  const directory = process.env[slotsDirectoryVariable], label = heavyRunLabel(mode, args, !!directory && !!readStrictCap(directory)), held = label ? await sessionVerificationSlot(label) : null;
   // The breadth the host affords is computed with the slot already held, so a run that starts later
   // sees this one's declaration; it is declared back onto the slot for the runs after it (GY-1821).
-  const breadth = mode === 'test' ? await hostSuiteBreadth() : null;
+  const breadth = mode === 'test' ? sessionSuiteBreadth(await hostSuiteBreadth()) : null;
   if (held && breadth !== null) declareSlotFiles(held, breadth);
   try { process.exitCode = mode === 'typecheck' ? await typecheck(process.cwd(), args) : (await runTests({ browser: mode === 'browser', args, breadth: breadth ?? undefined })).code; }
   finally { held?.release(); }

@@ -21,6 +21,10 @@ or opening third-party accounts, and issuing credentials to people. You apply ev
 other decision at once with your own operator-agent identity: \`graphyard master
 create|release|unblock|requirements|rework|attest|close\`. Never ask a human to run a command an agent identity may run: \`master
 status\` names who resolves each attention item and the next command.
+The owner may give those decisions through any agent. Record their own words with
+\`graphyard answer GY-N --owner-said "WORDS" [--decline] ANSWER\`; the owner can reverse
+that answer on the dashboard. A parked request
+that is none of the three is yours: unblock, release or decide it instead of waiting.
 
 Dispatch only ready work with \`graphyard master dispatch GY-N PROFILE\`. The
 worker must claim the item under its own identity and use the assigned worktree.

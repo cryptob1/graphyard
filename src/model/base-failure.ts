@@ -48,6 +48,8 @@ export function baseFailureItem(failure: BaseFailure, baseBranch: string) {
   return {
     title: `Base branch ${baseBranch} fails ${failure.check} test: ${failure.test}`.slice(0, 200),
     type: 'bug' as const, priority: 0,
+    why: `Every candidate waits while ${baseBranch} fails this test; repairing it lets all of them ship.`.slice(0, 300),
+    simplest: 'Fix the failing test at its cause; no skip, retry or new gate.',
     description: [
       `The master loop filed this control-plane repair itself (GY-528); the required ${failure.check} check fails the test "${failure.test}" on the head of ${baseBranch}, commit ${failure.baseSha}, in CI run ${runOf(failure)}.`,
       `The same test fails on every candidate listed below, so it is no candidate's to fix and the loop requests no rework for it: each stays held until ${baseBranch} passes again. Blocked candidates: ${blocked.join(', ') || 'none yet'}.`,

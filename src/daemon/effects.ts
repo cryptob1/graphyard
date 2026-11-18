@@ -1,3 +1,4 @@
+import type { HostReading } from '../hosts.js';
 import type { Conversation } from '../master/conversation.js';
 import type { RuntimeSession } from '../model/sessions.js';
 import type { SessionInventory } from '../session-inventory.js';
@@ -10,7 +11,7 @@ import type { RegistrySlot } from '../master/registry-slot.js';
 import type { AgentRegistry, CanaryOffer, FleetRuntime } from '../model/registry.js';
 import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
 import type { ProfileAccountHealth } from '../master/environments.js';
-import type { CheckoutTrustRefusal } from '../harness.js';
+import type { CheckoutTrustFleet, CheckoutTrustRefusal } from '../harness.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
 import type { MasterMessage } from './master-stalled-delivery.js';
 import { type DaemonAction, type DaemonState, type LeftoverDisk, type LoopRelease, storeAction } from './state.js';
@@ -101,6 +102,13 @@ export interface DaemonEffects {
    * kept and no launch waits on the CPU.
    */
   cpuPressure?: () => Promise<{ pressure: string | null; stat: string | null; celsius?: number | null } | null>;
+  /** GY-3407: this machine and every added host read once, steal measured from the previous readings. */
+  hostReadings?: (previous: HostReading[]) => Promise<HostReading[]>;
+  /** GY-3438: every live agent session's scope with its cgroup counters, and the session a scope holds where this process knows it. */
+  sessionScopes?: () => import('../session-share.js').SessionScope[];
+  sessionName?: (unit: string) => string | undefined;
+  /** The host's cores the session share divides; the host's own by default. */
+  cores?: () => number;
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   /** Stops what still runs naming a removed worktree (GY-3185), answering what was stopped. */
@@ -133,8 +141,10 @@ export interface DaemonEffects {
    * would refuse — the checkout carries repository Claude configuration, and the account's config
    * records neither it nor an ancestor trusted. The dispatch step holds the roles it names with one
    * standing attention line and launches nothing until it answers empty; absent, nothing is held.
+   * GY-3410: it judges the registry document the dispatch step already read (null when that read
+   * failed), so an unanswering registry costs the step one bounded read, not two in a row.
    */
-  checkoutTrust?: () => Promise<CheckoutTrustRefusal[]>;
+  checkoutTrust?: (registry: CheckoutTrustFleet | null) => Promise<CheckoutTrustRefusal[]>;
   /** A registry runtime.set with its reason: how a passed canary switches its runtime (GY-3103). */
   setRuntime?: (runtime: FleetRuntime, reason: string) => Promise<unknown>;
   /** The install's compose server (GY-2966), which the loop starts when the control plane stays unreachable; null when the install is not a compose install on this host. */
@@ -154,6 +164,8 @@ export interface DaemonEffects {
   release?: (work: Work, reason: string) => Promise<unknown>;
   /** One reviewer and producer dispatch tick over the cycle's snapshot (dispatch/tick.ts). `held`, while set (GY-3348: the host's CPU is saturated), is the one wait line every launch the tick would make records instead. */
   dispatchTick?: (snapshot: { work: Work[]; now: string }, held?: string) => Promise<unknown>;
+  /** GY-3432: the commit the deploy unit serves, for the stall alarm's stale-loop cause; absent or null when none is recorded. */
+  servingCommit?: () => string | null;
   /** The loop's own master session (GY-898): absent, none is launched. */
   masterSession?: MasterSessionEffects;
   /** GY-3345: the messages to this install's Master (`GET master/messages`); each unanswered one from another install wakes the session once. Absent, none is read. */

@@ -1,6 +1,6 @@
 import type { Work } from './work.js';
 import { fleetRoles, rolePolicy, roleRuntimeRefusal } from './registry.js';
-import { exhaustedTwin, exhaustionEvidence, foldObservation } from './account-quota.js';
+import { exhaustionEvidence, foldObservation } from './account-quota.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
 import { workerOrder, planSpreadOrder, fleetOrder, roleUnsupported } from './worker-preference.js';
@@ -92,7 +92,7 @@ export function supersededByRequest(registry: Pick<AgentRegistry, 'sessions'>, r
  * How long after a failed smoke test the account's executor tests it again (GY-515): a provider
  * outage during the one prompt would otherwise keep a sound account out until an operator changed it.
  */
-export const smokeRetestMs = 3_600_000;
+export const smokeRetestMs = 30 * 60_000;
 /** The runtimes whose accounts are smoke-tested before a session is chosen on them: Pi's headless runs, and agy, whose interactive session waits silently at a missing login (GY-3108). */
 export const smokeTestedKinds: readonly string[] = ['pi', 'agy'];
 /**
@@ -114,31 +114,22 @@ const until = (iso: string | null) => iso ? ` until ${iso}` : '';
  * refuses until the retest's fresh result is folded.
  */
 export function accountIneligibility(registry: AgentRegistry, account: FleetAccount, now: number, host?: string | null,
-  options: { expiredSmokeRetestable?: boolean } = {}): string | null {
+  options: { expiredSmokeRetestable?: boolean; hostSessions?: { install: string; at: string }[] } = {}): string | null {
   if (!account.enabled) return `${account.name} is disabled`;
   if (!registry.runtimes.some(runtime => runtime.name === account.runtime)) return `${account.name} runs ${account.runtime}, which is not a registered runtime`;
   if (!registry.models.some(model => model.name === account.model)) return `${account.name} runs ${account.model}, which is not a registered model`;
   if (host && account.credential.host !== host) return `${account.name} is placed on ${account.credential.host}; this executor is ${host}`;
-  if (account.quota.loggedIn === false) return `${account.name} is not logged in${account.quota.session === 'login' ? `: its agent reported "${account.quota.reason}"; held until cleared with master registry account quota ${account.name} available` : ''}`;
+  if (account.quota.loggedIn === false && account.quota.reason?.startsWith(`${account.name} is not ready: `)) return account.quota.reason;
+  if (account.quota.loggedIn === false) return `${account.name} is not logged in${account.quota.reason ? `: ${account.quota.reason}; checked again within 30 minutes` : ''}`;
   const pi = registry.runtimes.some(runtime => runtime.name === account.runtime && smokeTestedKinds.includes(runtime.launch.kind));
   if (account.smoke?.result === 'fail' && !(options.expiredSmokeRetestable && pi && smokeFailureDue(account, now))) return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
-  const plan = deriveAccountPlan(account, registry.accounts);
-  const planAccounts = registry.accounts.filter(other => other.name === account.name || deriveAccountPlan(other, registry.accounts).planId === plan.planId);
-  const held = (other: FleetAccount) => !!exhaustionEvidence(other.quota, now);
-  // An operator hold on the plan wins, and so does a session's exhaustion report until its reset (GY-1581): no probe outranks either. Otherwise the
-  // newest probe on the plan decides, so a stale exhaustion one host reported without a reset is superseded by a later probe elsewhere (GY-1158).
-  // Another account's guessed report holds nothing here, never even as a probe: its host resends it every selection, so it is always the newest. A pure read.
-  const guessed = (other: FleetAccount) => other.quota.session === 'guessed' && other.name !== account.name, reported = (other: FleetAccount) => !!other.quota.session && !guessed(other) && held(other);
-  const probes = planAccounts.filter(other => other.quota.source === 'probe' && other.quota.observedAt && other.quota.state !== 'unknown' && !guessed(other))
-    .sort((a, b) => Date.parse(b.quota.observedAt!) - Date.parse(a.quota.observedAt!));
-  const exhausted = planAccounts.find(other => other.quota.source === 'operator' && held(other)) ?? [account, ...planAccounts].find(reported)
-    ?? (probes.length ? [probes[0]].find(held) : [account, ...planAccounts].find(other => !guessed(other) && held(other)));
-  if (exhausted?.name === account.name) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
-  if (exhausted) return `${account.name} quota is exhausted on plan ${plan.planName} (${exhausted.name} quota is ${exhausted.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${until(exhausted.quota.resetsAt)}${exhausted.quota.reason ? `: ${exhausted.quota.reason}` : ''})`;
-  const twin = exhaustedTwin(registry, account, now);
-  if (twin) return `${account.name} quota is exhausted${until(twin.quota.resetsAt)}: it is the same provider login as ${twin.name}, whose quota is ${twin.quota.source === 'operator' ? 'marked exhausted by operator' : 'exhausted'}${twin.quota.reason ? ` (${twin.quota.reason})` : ''}`;
+  if (exhaustionEvidence(account.quota, now)) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
-  if (account.maxSessions !== null && running >= account.maxSessions) return `${account.name} is at its session limit (${running} of ${account.maxSessions} live)`;
+  // GY-3333: sessions other installs on this host hold on the same login home count toward the
+  // account's own limit — one home serves at most its maxSessions sessions across every install.
+  const foreign = options.hostSessions ?? [], holders = [...new Set(foreign.map(session => session.install))];
+  if (account.maxSessions !== null && running + foreign.length >= account.maxSessions)
+    return `${account.name} is at its session limit (${running + foreign.length} of ${account.maxSessions} live${foreign.length ? `, ${foreign.length} held by ${holders.length === 1 ? `the Graphyard install ${holders[0]}` : `the Graphyard installs ${holders.join(' and ')}`}` : ''})`;
   return null;
 }
 
@@ -199,7 +190,10 @@ export function foldObservations(registry: AgentRegistry, request: Pick<Selectio
     // An executor only vouches for the logins on its own host.
     if (!account || account.credential.host !== request.host) continue;
     if (foldObservation(account, observed.quota, context)) changed = true;
+    if (observed.quota.since && observed.quota.state === 'available' && account.smoke?.result === 'fail') { account.smoke = null; changed = true; }
     if (observed.smoke) { account.smoke = { result: observed.smoke.result, reason: observed.smoke.reason, at: context.at, by: context.actor }; changed = true; }
+    // A passing smoke test answered on the account, so its agent's not-logged-in report no longer holds (GY-3441).
+    if (observed.smoke?.result === 'pass' && account.quota.session === 'login' && account.quota.loggedIn === false) account.quota = { ...account.quota, loggedIn: null, session: undefined, reason: null };
   }
   return changed;
 }
@@ -230,7 +224,7 @@ export const roleLimit = (role: { name: string; accounts: readonly string[]; con
  * registry account the role can run on serves, the choice naming the failover (GY-3092); the role
  * is refused only when no account in the registry can serve it.
  */
-export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude' | 'group' | 'work'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
+export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRequest, 'role' | 'host'> & Partial<Pick<SelectionRequest, 'prefer' | 'exclude' | 'group' | 'work' | 'hostSessions'>>, now: number, diversity: ReviewDiversity | null = null): SessionChoice | SessionRefusal {
   const role = registry.roles.find(entry => entry.name === request.role && fleetRoles.includes(entry.name));
   if (!role) return { account: null, reason: `role ${request.role} is not configured in the agent registry`, skipped: [] };
   if (!role.accounts.length) return { account: null, reason: `role ${request.role} names no account`, skipped: [] };
@@ -256,8 +250,10 @@ export function chooseSession(registry: AgentRegistry, request: Pick<SelectionRe
   const own = diverse ? order : planSpreadOrder(registry, order), trial = [...own.filter(name => expiring.has(name)), ...own.filter(name => !expiring.has(name))];
   for (const [, name] of [...trial, ...fleetOrder(registry, role, request.prefer ?? null)].entries()) {
     const account = registry.accounts.find(entry => entry.name === name);
+    // GY-3333: the live sessions other installs on this host hold on the account count toward its limit.
+    const foreign = request.hostSessions?.filter(entry => entry.account === name) ?? [];
     // An unsupported runtime stored before the refusal existed is passed over with its reason, never launched.
-    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host) ?? roleIneligibility(account, role.name, now) ?? roleRuntimeRefusal(registry, account, role.name) ?? roleUnsupported(registry, role, name) : `${name} is not a registered account`;
+    const refusal = request.exclude?.includes(name) ? `${name} already failed to start a session under this dispatch` : account ? accountIneligibility(registry, account, now, request.host, { hostSessions: foreign }) ?? roleIneligibility(account, role.name, now) ?? roleRuntimeRefusal(registry, account, role.name) ?? roleUnsupported(registry, role, name) : `${name} is not a registered account`;
     const differs = !!diverse && !!account && accountProvider(registry, account) !== diverse.provider;
     if (refusal) {
       skipped.push({ account: name, reason: refusal });

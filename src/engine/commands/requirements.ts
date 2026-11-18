@@ -56,6 +56,9 @@ async function reviseRequirements(engine: Engine, db: PoolClient, actor: Princip
   if (data.owner !== undefined) { await assertHumanOwner(engine, db, data.owner); work.owner = data.owner; }
   work.criteria = revised;
   if (descriptionChanged) work.description = data.description;
+  // GY-3382: the item's two lead sentences are revised here, as its description is.
+  if (data.why !== undefined) work.why = data.why;
+  if (data.simplest !== undefined) work.simplest = data.simplest;
   if (data.plannedFiles !== undefined) work.plannedFiles = data.plannedFiles;
   work.dependencies = data.dependencies; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
   work.scenarioRequirements = pins; work.policyRevision++;

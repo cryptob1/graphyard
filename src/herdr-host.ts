@@ -1,6 +1,7 @@
 // Concern: Herdr on this host, set up by `graphyard up` (GY-1511) — its binary, its server's user unit,
 // an install's own instance, and the synchronous calls setup makes. Kept apart from src/master/herdr.ts,
 // which the loop reaches and which runs children only through the asynchronous runner (GY-125).
+import { controlPlaneWeight } from './session-share.js';
 import { execFile, execFileSync, type ExecFileSyncOptions } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
@@ -76,6 +77,8 @@ Restart=on-failure
 RestartSec=10
 KillSignal=SIGTERM
 TimeoutStopSec=30
+# GY-3438: the master's pane runs here; it outweighs every agent session so it answers under full load.
+CPUWeight=${controlPlaneWeight}
 
 [Install]
 WantedBy=default.target

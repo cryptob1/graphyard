@@ -1,0 +1,15 @@
+{
+  "id": "attest-survives-main-move",
+  "title": "A master attestation on a head still counts after main moves under it",
+  "description": "A fixture control plane: the master attests a manual: proof on a submitted head, another item merges so main moves, and the same head proceeds through acceptance on the new base without a second attestation (GY-3429).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the attested head passes acceptance after main moves",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/manual-attest-survives-base.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

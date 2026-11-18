@@ -107,25 +107,25 @@ test(`${proof} — at normal readings a start proceeds at once, without waiting`
   } finally { await host.close(); }
 });
 
-test(`${proof} — a freed slot goes to the merge trial before the gate, and the gate before worker verification`, async () => {
+test(`${proof} — a freed slot goes to the gate before the merge trial, and the merge trial before worker verification (GY-3444)`, async () => {
   const host = await machine('load-order');
   try {
     const occupant = host.launch({ cap: 1 });
     await host.until(async () => await host.started() === 1, 'the slot is taken');
     const verification = host.launch({ cap: 1, order: trialStartOrder.verification });
     await host.until(() => verification.said().includes('waiting'), 'verification waits');
-    const gate = host.launch({ cap: 1, order: trialStartOrder.gate });
-    await host.until(() => gate.said().includes('waiting'), 'the gate waits');
     const merge = host.launch({ cap: 1, order: trialStartOrder.merge });
     await host.until(() => merge.said().includes('waiting'), 'the merge trial waits');
+    const gate = host.launch({ cap: 1, order: trialStartOrder.gate });
+    await host.until(() => gate.said().includes('waiting'), 'the gate waits');
     await host.end(occupant.child);
-    await host.until(() => merge.said().includes('starting'), 'the merge trial goes first');
+    await host.until(() => gate.said().includes('starting'), 'the gate goes first');
     await new Promise(resolve => setTimeout(resolve, 1500));
-    assert.equal(gate.said().includes('starting') || verification.said().includes('starting'), false);
-    await host.end(merge.child);
-    await host.until(() => gate.said().includes('starting'), 'the gate goes second');
-    assert.equal(verification.said().includes('starting'), false);
+    assert.equal(merge.said().includes('starting') || verification.said().includes('starting'), false);
     await host.end(gate.child);
+    await host.until(() => merge.said().includes('starting'), 'the merge trial goes second');
+    assert.equal(verification.said().includes('starting'), false);
+    await host.end(merge.child);
     await host.until(() => verification.said().includes('starting'), 'worker verification goes last');
   } finally { await host.close(); }
 });

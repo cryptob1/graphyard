@@ -79,14 +79,12 @@ export const quotaObservationSchema = z.object({
   reason: text(500).nullable().default(null),
   /**
    * The provider login behind the account (GY-1573): its runtime kind and a digest of the provider's own
-   * account and organization ids, read from the login home. Two accounts with one identity are one
-   * subscription, spent together; null when the login names none Graphyard can read, absent when a
+   * account and organization ids, read from the login home. Matching identities are diagnostic only; each login is checked separately; null when the login names none Graphyard can read, absent when a
    * probe could not read the login file just now and the identity last read stands.
    */
   identity: z.string().regex(/^[a-z][a-z0-9-]{0,39}:[0-9a-f]{16,64}$/, 'A provider identity is a runtime kind and a hex digest').nullable().optional(),
-  /** A session that ran out mid-work reported this exhaustion (GY-1581); it stands against later probes until its reset.
-   * `named`: the provider named the reset, holding the whole plan; `guessed`: the host assumed one, holding only this account.
-   * `login`: a session's agent said the account is not logged in (GY-3218), with its message as the reason; no probe lifts it. */
+  /** `named`: the provider named a reset; `guessed`: check again in 30 minutes.
+   * `login`: a session reported a missing login; the next live check can release it. */
   session: z.enum(['named', 'guessed', 'login']).optional(),
   /** When the exhaustion reported was observed (GY-3117): one observed at or before an operator's latest quota decision on the account is not applied. */
   since: z.string().datetime().optional(),
@@ -165,6 +163,13 @@ export const selectionRequestSchema = z.object({
   exclude: z.array(entryName).max(50).default([]),
   /** What the executor just observed about the accounts that live on its host. */
   observations: z.array(z.object({ account: entryName, quota: quotaObservationSchema, smoke: smokeObservationSchema.optional() }).strict()).max(200).default([]),
+  /**
+   * GY-3333: the live sessions other Graphyard installs on this host hold on accounts that live
+   * there, read from the host-level records beside each login home. Every install counts them
+   * toward the account's own session limit, so one login home serves at most its `maxSessions`
+   * sessions across every install on the host.
+   */
+  hostSessions: z.array(z.object({ account: entryName, install: text(200), at: z.string().datetime() }).strict()).max(100).default([]),
 }).strict();
 /** What an executor reports of its own host's accounts between selections (GY-1573): a hold a session just saw. */
 export const observationRequestSchema = selectionRequestSchema.pick({ host: true, observations: true }).strict();

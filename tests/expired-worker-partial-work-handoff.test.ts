@@ -72,7 +72,7 @@ after(async () => { http?.close(); await store?.close(); });
 
 test('integration:expired-worker-partial-work-handoff — a worker attempt ended by its lease bound with committed and uncommitted changes has both preserved on its branch and identified in the next worker\'s handoff before the worktree is cleaned, the old lease authority ended and the historical reservation retained', async () => {
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
-  const filed = await ok(operator, 'POST', 'work', {
+  const filed = await ok(operator, 'POST', 'work', { why: 'w', simplest: 's',
     title: 'Preserve a timed-out attempt\'s partial work',
     type: 'chore',
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:expired-worker-partial-work-handoff', 'e2e:fixture'] }],

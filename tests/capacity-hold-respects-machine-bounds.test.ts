@@ -99,7 +99,7 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
   await recordObservedExhaustion(config, 'env-a', {
     at: new Date(now).toISOString(), resetsAt, reason: "You've hit your weekly limit",
     role: 'worker', profile: 'builder', work: 'GY-1708',
-  }, now);
+  }, now, { smoke: async () => ({ ok: false, error: `Usage limit reached; resets at ${resetsAt}` }) });
   const held = await observedExhaustions(config);
   assert.equal(accountHeldForRole(held, 'env-a', now), true, 'GY-1705 hold stands while the reset is ahead');
   assert.equal(accountHeldForRole(held, 'env-b', now), false);
@@ -108,7 +108,7 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
   const selected = await selectAccount(config, 'worker', config.workers[0], { quota: false, now: () => now, cacheMs: 0, work: 'GY-1708' });
   assert.equal(selected.account?.name, 'env-b', 'selection fails over to the next account; the held one is never re-selected');
 
-  const filed = await ok(operator, 'POST', 'work', {
+  const filed = await ok(operator, 'POST', 'work', { why: 'w', simplest: 's',
     title: 'bounds', type: 'chore',
     criteria: [{ id: 'AC-1', text: 'bounds', proofs: ['unit:capacity-hold-respects-machine-bounds', 'e2e:fixture'] }],
   }) as Work;

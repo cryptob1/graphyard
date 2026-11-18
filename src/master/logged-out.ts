@@ -7,25 +7,14 @@ import { httpFleetClient, type FleetClient, type FleetProbe } from '../fleet.js'
 import type { MasterConfig } from './profiles.js';
 import { selectAccount, type LaunchSelection } from './environments.js';
 
-/**
- * Each runtime's not-logged-in message, as its one-shot form prints it before exiting non-zero:
- * Cursor ("Authentication required. Please run 'agent login' first"), Claude Code ("Not logged in ·
- * Please run /login", "Invalid API key · Please run /login"), Codex ("Not logged in", "run codex
- * login"), OpenCode ("opencode auth login") and Pi ("No API key found").
- */
-const loggedOutMessage = /authentication required|not logged in|not authenticated|please run .{0,20}login|(codex|agent|auth) login|no api key found/i;
-/** The line of a failed run's output that says its account is not logged in, or null. Only short output is read: a login refusal is the whole of what the agent printed, never a line inside its work. */
-export function detectLoggedOut(output: string): string | null {
-  if (output.length > 4000) return null;
-  const line = output.split('\n').map(text => text.trim()).find(text => loggedOutMessage.test(text));
-  return line ? line.slice(0, 300) : null;
-}
+export { detectLoggedOut } from './runtime-prompt.js';
 
 type HoldConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>;
 /**
- * Hold `account` in the registry as not logged in, with the agent's message as the reason. No probe
- * lifts the hold, since the probe is what misread the login: `master registry account quota NAME
- * available` clears it, and so does changing the account (`master registry account set`).
+ * Hold `account` in the registry as not logged in, with the agent's message as the reason. A probe
+ * reading the same login does not lift the hold, since the probe is what misread it; a probe reading
+ * another login, a passing smoke test, `master registry account quota NAME available` and changing
+ * the account (`master registry account set`) do (GY-3441).
  */
 export async function recordLoggedOut(config: HoldConfig, account: string, reason: string, registry?: Pick<FleetClient, 'observe'>) {
   const client = registry ?? (config.url ? httpFleetClient({ url: config.url, credentialFile: config.credentialFile }) : null);

@@ -47,10 +47,29 @@ export function readyToRetry(previous: DaemonAction | undefined, cycle: number, 
 export const launchBackoffMs = (failures: number) => Math.min(60_000 * 2 ** Math.max(0, failures - 1), 1_800_000);
 export const anyRuntime = 'any';
 const backoffKey = (runtime: string, item: Pick<Work, 'id'>) => `${runtime}:${item.id}`;
-export function recordLaunchFailure(state: DaemonState, runtime: string | null, item: Pick<Work, 'id'>, reason: string, now: number) {
-  const key = backoffKey(runtime ?? anyRuntime, item), failures = (state.launchBackoff[key]?.failures ?? 0) + 1;
-  state.launchBackoff[key] = { failures, reason: reason.slice(0, 500), until: new Date(now + launchBackoffMs(failures)).toISOString() };
+/**
+ * GY-3413: a failure repeating the item's last reason on any runtime (epochs and other numbers
+ * aside) backs the item off on every runtime as well, so rotating runtimes cannot relaunch it.
+ */
+const sameReason = (a: string, b: string) => a.replace(/\d+/g, '#') === b.replace(/\d+/g, '#');
+/**
+ * GY-3475: a reason over its 500 characters keeps its end as well as its start. A failed child's
+ * line opens with the command it ran and closes with the error itself, so a cut that kept only the
+ * start left master status and the stall alarm quoting a command line with git's error gone.
+ */
+const boundReason = (reason: string) => reason.length <= 500 ? reason : `${reason.slice(0, 120)}…${reason.slice(-379)}`;
+export function recordLaunchFailure(state: DaemonState, runtime: string | null, item: Pick<Work, 'id'>, failure: string, now: number) {
+  const reason = boundReason(failure);
+  const record = (key: string, failures: number) => { state.launchBackoff[key] = { failures, reason, until: new Date(now + launchBackoffMs(failures)).toISOString() }; };
+  const all = backoffKey(anyRuntime, item), repeated = Object.entries(state.launchBackoff).some(([key, entry]) => key.endsWith(`:${item.id}`) && sameReason(entry.reason, reason));
+  const key = backoffKey(runtime ?? anyRuntime, item);
+  record(key, (state.launchBackoff[key]?.failures ?? 0) + 1);
+  if (repeated && key !== all) record(all, (state.launchBackoff[all]?.failures ?? 1) + 1);
 }
+/** GY-3413: the items every runtime backs off after the same launch failure repeated, for master status. */
+export const repeatedLaunchFailures = (state: Pick<DaemonState, 'launchBackoff'>, now: number) => Object.entries(state.launchBackoff)
+  .filter(([key, entry]) => key.startsWith(`${anyRuntime}:`) && entry.failures >= 2 && Date.parse(entry.until) > now)
+  .map(([key, entry]) => ({ id: key.slice(anyRuntime.length + 1), ...entry }));
 export function clearLaunchFailures(state: DaemonState, runtime: string, item: Pick<Work, 'id'>) {
   delete state.launchBackoff[backoffKey(runtime, item)];
   delete state.launchBackoff[backoffKey(anyRuntime, item)];

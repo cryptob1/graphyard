@@ -68,7 +68,7 @@ test('e2e:reporter-identity — a reporter files an item and messages the Master
 
   // It files an item with the CLI and gets its key; the item is unreleased, in backlog and attributed to it.
   const itemFile = join(home, 'item.json');
-  await writeFile(itemFile, JSON.stringify({ title: 'Huck: the trial image lacks Go 1.23', description: 'Filed by the Huck install master.', type: 'chore', criteria }));
+  await writeFile(itemFile, JSON.stringify({ title: 'Huck: the trial image lacks Go 1.23', why: 'Huck ships Go changes again.', simplest: 'Add Go 1.23 to the trial image.', description: 'Filed by the Huck install master.', type: 'chore', criteria }));
   const created = await graphyard('create', itemFile);
   assert.match(created.key, /^GY-\d+$/);
   const filed = await api(`work/${created.key}`);
@@ -127,7 +127,7 @@ test('e2e:reporter-identity — a reporter files an item and messages the Master
   await refused('master', 'registry');
   await refused('master', 'lesson', 'add', 'Reporters write lessons');
   // It reads back only its own items.
-  const other = await api('work', { title: 'The operator\'s own item', type: 'chore', criteria });
+  const other = await api('work', { why: 'w', simplest: 's', title: 'The operator\'s own item', type: 'chore', criteria });
   const unseen: any = await exec(process.execPath, [cli, 'status', other.key], { cwd: home, env }).then(() => null, error => error);
   assert.match(unseen?.stderr ?? '', new RegExp(`Unknown work item ${other.key}`));
   const after = await api(`work/${created.key}`);

@@ -18,6 +18,8 @@ const movingWork = () => boardWork().map(item => {
   return item;
 });
 
+const live = { timeout: 15_000 };
+
 async function serve(page: Page) {
   const state = { work: movingWork() };
   await page.route('**/api/**', async route => {
@@ -32,15 +34,14 @@ async function serve(page: Page) {
   await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
-  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
-  await expect(page.locator('.work-row').first()).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible(live);
+  await expect(page.locator('.work-row').first()).toBeVisible(live);
   return state;
 }
 
 /** One element's (or pseudo-element's) running animation, so a test can say it moves — or that it does not. */
 const animationOf = (page: Page, selector: string, pseudo = '') =>
   page.evaluate(([sel, ps]) => getComputedStyle(document.querySelector(sel)!, ps ? (ps as any) : undefined).animationName, [selector, pseudo]);
-const live = { timeout: 15_000 };
 
 /**
  * The boot's own timers run on the page clock, held still until the test moves it: a loaded
@@ -133,9 +134,16 @@ test('e2e:night-yard-animation — a row in trial carries the streak, the rain f
   expect(await animationOf(page, 'h1')).toBe('gy-flicker-in');
   expect(await animationOf(page, '.work-row')).toBe('gy-flicker-in');
   // The top line types itself out — a clip-path wipes it open a character step at a time — and finishes open.
-  const typed = page.locator('.build-line .typed');
-  expect(await typed.evaluate(el => getComputedStyle(el).animationName)).toBe('gy-type');
-  await expect.poll(() => typed.evaluate(el => getComputedStyle(el).clipPath), { timeout: 4_000 }).toBe('none');
+  // GY-3369: read on the animation's own record, not the wall clock — a loaded trial host renders no
+  // frame for seconds, and a CSS animation's time stands still until one comes, so a timed poll saw it closed.
+  const wipe = await page.locator('.build-line .typed').evaluate(el => {
+    const animation = el.getAnimations().find(a => (a as CSSAnimation).animationName === 'gy-type')!;
+    animation.currentTime = 0;
+    const closed = getComputedStyle(el).clipPath;
+    animation.finish();
+    return { name: getComputedStyle(el).animationName, closed, open: getComputedStyle(el).clipPath };
+  });
+  expect(wipe).toEqual({ name: 'gy-type', closed: 'inset(0px 100% 0px 0px)', open: 'none' });
 });
 
 test('e2e:night-yard-animation — with reduced motion every animation stills and the boot never runs', async ({ page }) => {

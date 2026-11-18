@@ -1,4 +1,4 @@
-import { test, expect, type Browser, type Page } from '@playwright/test';
+import { test, expect, type Browser } from '@playwright/test';
 import { fork } from 'node:child_process';
 import { once } from 'node:events';
 import { readFile, symlink, writeFile } from 'node:fs/promises';
@@ -9,55 +9,9 @@ import { bridgeTerminals } from '../src/master/terminal-bridge';
 import { terminalSessionReader } from '../src/master/terminal-session';
 import type { MasterConfig } from '../src/master/profiles';
 import { serveXterm } from './xterm';
+import { fillsThePage } from './terminal-fill';
 
 const settled = { timeout: 15_000 };
-
-/**
- * How the pane's drawing sits in the terminal container: the host-side herdr stub's master pane is
- * laid out at 70 columns and draws a ruler, every row filled to the pane's width and ending in `|`.
- * `right` is the gap from the last drawn column to the container's right edge, `bottom` from the last
- * drawn row to its bottom edge, each in character cells.
- */
-const fill = (page: Page) => page.evaluate(() => {
-  const host = document.querySelector('.terminal-host')!.getBoundingClientRect();
-  const rows = [...document.querySelectorAll('.xterm-rows > div')].filter(row => /^row \d+ =*\|$/.test((row.textContent ?? '').trimEnd()));
-  const last = rows.at(-1);
-  if (!last) return null;
-  const terminal = (window as any).testTerminal, screen = document.querySelector('.xterm-screen')!.getBoundingClientRect();
-  const cell = { width: screen.width / terminal.cols, height: screen.height / terminal.rows };
-  // The rendered `|` itself, measured off the DOM, not computed from the buffer.
-  const walker = document.createTreeWalker(last, NodeFilter.SHOW_TEXT);
-  let bar: DOMRect | undefined;
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    const at = node.textContent!.lastIndexOf('|');
-    if (at >= 0) { const range = document.createRange(); range.setStart(node, at); range.setEnd(node, at + 1); bar = range.getBoundingClientRect(); }
-  }
-  if (!bar) return null;
-  return {
-    right: (host.right - bar.right) / cell.width,
-    bottom: (host.bottom - last.getBoundingClientRect().bottom) / cell.height,
-    drawnRows: rows.length, rows: terminal.rows,
-    // The Master page document never scrolls (GY-3308).
-    documentScrolls: document.scrollingElement!.scrollHeight > innerHeight + 1 || scrollY !== 0,
-  };
-});
-
-/**
- * The pane's drawing spans the container's width (its last column within one cell of the right edge) and its rows fill
- * the height. A glyph may overhang an edge by sub-pixel rounding (0.05 cell), never by a visible amount.
- */
-async function fillsThePage(page: Page) {
-  // Geometry and no-scroll hold in the same settled reading: a frame mid-repaint (a reconnect's
-  // remount, a resize reflow) has rows no measurement can read, and a one-shot read after the
-  // poll raced one in the merge trial (`documentScrolls` of null), so it waits in the poll too.
-  const fills = (at: Awaited<ReturnType<typeof fill>>) => !!at && !at.documentScrolls && at.right >= -0.05 && at.right <= 1 && at.bottom >= -0.05 && at.bottom <= 1 && at.drawnRows === at.rows;
-  await expect.poll(async () => fills(await fill(page)), settled).toBe(true).catch(async error => {
-    throw new Error(`The terminal does not fill its container without the page scrolling (gaps in cells): ${JSON.stringify(await fill(page))}\n${error}`);
-  });
-  // Polled too: a repaint can leave the ruler's rows unreadable for a moment, and `fill` returning
-  // null then is a redraw in flight, not a verdict on the document.
-  await expect.poll(async () => (await fill(page))?.documentScrolls, settled).toBe(false);
-}
 
 async function fixture() {
   const site = await temporaryDirectory('master-fills');

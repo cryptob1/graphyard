@@ -170,9 +170,9 @@ test('unit:ui-needs-you-and-timers — a human-only decision is listed once, und
   assert.match(markup(createElement(WorkCard, { item: stale(find('GY-15')), now: NOW, onOpen: noop })), /overdue/);
 });
 
-test('unit:ui-item-first-screen — an item page says on its first screen what state it is in, why, which named role acts next and its pull request once, in plain words with no internal jargon; the guide is under 300 words', () => {
+test('unit:ui-item-first-screen — an item page says on its first screen what state it is in, why, which named role acts next, in plain words with no internal jargon and no pull request wording; the guide is under 300 words', () => {
   const roles = ['You', 'Builder agent', 'Reviewer agent', 'Prover agent', 'Automated checks', 'Graphyard (automatic)', 'Graphyard (assigns a builder)', 'Master agent', 'Nobody yet', 'Nobody — it is live', 'Nobody — it has merged'];
-  const banned = [...jargon, 'session kind', 'epoch', 'lease', 'candidate'];
+  const banned = [...jargon, 'session kind', 'epoch', 'lease', 'candidate', 'pull request'];
   for (const item of board()) {
     const screen = firstScreen(itemPage(item.key));
     const words = visibleWords(screen).join(' ');
@@ -185,10 +185,11 @@ test('unit:ui-item-first-screen — an item page says on its first screen what s
     assert.ok(who && roles.includes(who), `${item.key} names a role: ${who}`);
     // Never a worker's code name.
     for (const name of [item.lastAssignment?.displayName, item.lastAssignment?.owner, item.lease?.owner].filter(Boolean)) assert.ok(!words.includes(name!), `${item.key} does not name ${name}`);
-    // The pull request, linked once.
-    const links = (screen.match(/aria-label="PR #\d+, open pull request/g) ?? []).length;
-    assert.equal(links, item.candidate ? 1 : 0, `${item.key} links its pull request once`);
-    assert.equal(words.split(/\s+/).filter((word: string) => /^#\d+$/.test(word)).length, item.candidate ? 1 : 0, `${item.key} shows its PR number once`);
+    // GY-3392: the plate carries no pull request link, number or wording; the change is linked once, under Technical details.
+    assert.equal((screen.match(/aria-label="PR #\d+, open pull request/g) ?? []).length, 0, `${item.key} links no pull request on its plate`);
+    assert.equal(words.split(/\s+/).filter((word: string) => /^#\d+$/.test(word)).length, 0, `${item.key} shows its change number nowhere on the plate`);
+    const linked = (itemPage(item.key).match(/aria-label="The change on GitHub for/g) ?? []).length;
+    assert.equal(linked, item.candidate && item.observation?.source !== 'control-plane' ? 1 : 0, `${item.key} links its change once, folded`);
     // No internal vocabulary in the default copy.
     for (const term of banned) assert.ok(!new RegExp(`\\b${term}`, 'i').test(words), `${item.key}: "${term}" in ${words}`);
   }

@@ -67,7 +67,7 @@ async function fixtureRepo() {
 
 /** One fixture item submitted as a real worker submits it, with its trial recorded as the merge writer records it. */
 async function itemWithTrial(url: string, title: string, proof: string, head: string, baseTip: string, trial: { e2eCase?: string; screenshots?: { case: string; before?: string; after?: string }[] }) {
-  const filed = await call(url, 'test-human-operator', 'work', 'POST', { title, type: 'feature', priority: 3, criteria: [{ id: 'AC-1', text: 'The change is proven', proofs: [proof] }] }, `gy-3267-${filedKey(title)}-create`);
+  const filed = await call(url, 'test-human-operator', 'work', 'POST', { title, why: 'The owner sees what a merge changed.', simplest: 'Screenshots the trial already keeps.', type: 'feature', priority: 3, criteria: [{ id: 'AC-1', text: 'The change is proven', proofs: [proof] }] }, `gy-3267-${filedKey(title)}-create`);
   await call(url, 'test-human-operator', `work/${filed.id}/ready`, 'POST', {}, `gy-3267-${filedKey(title)}-ready`);
   const claimed = await call(url, 'test-worker-operator', `work/${filed.id}/claim`, 'POST', {}, `gy-3267-${filedKey(title)}-claim`);
   await call(url, 'test-worker-operator', `work/${filed.id}/workspace`, 'POST', { epoch: claimed.epoch, host: 'machine-a', path: `/tmp/${filed.key}`, branch: `graphyard/${filed.key.toLowerCase()}-1` }, `gy-3267-${filedKey(title)}-workspace`);
@@ -125,8 +125,9 @@ test('e2e:item-before-after-screenshots — the item page shows a browser case\'
     await expect(shots.locator('figure', { hasText: 'Before' })).toBeVisible();
     await expect(shots.locator('figure', { hasText: 'After' })).toBeVisible();
     const images = shots.locator('img.artifact-preview');
-    await expect(images).toHaveCount(2);
-    const loaded = await images.evaluateAll(entries => (entries as HTMLImageElement[]).map(image => [image.naturalWidth, image.currentSrc] as const));
+    await expect(images).toHaveCount(2, { timeout: 15_000 });
+    // GY-3391: an img element exists before its blob has loaded, when naturalWidth is still 0; each image is decoded first.
+    const loaded = await images.evaluateAll(entries => Promise.all((entries as HTMLImageElement[]).map(async image => { await image.decode(); return [image.naturalWidth, image.currentSrc] as const; })));
     expect(loaded.length).toBe(2);
     expect(loaded.every(([width]) => width > 0)).toBe(true);
     expect(loaded[0]![1]).not.toBe(loaded[1]![1]);
@@ -138,11 +139,13 @@ test('e2e:item-before-after-screenshots — the item page shows a browser case\'
     await expect(page.locator('section[aria-label="Screenshots"]')).toHaveCount(0);
 
     // A later trial of the first item that kept no screenshot replaces its panel: none is shown.
+    // The dashboard reads the retrial on its next 5 s work poll, so the wait spans a poll and its
+    // read (15 s cap); the 5 s default raced the poll and failed on a loaded trial host (GY-3372).
     await recordTrial(plane.url, withShots, heads.shots, baseTip, 'e2e:item-before-after-screenshots', {}, 'retrial');
     await page.getByRole('button', { name: '← Back' }).click();
     await page.locator(`[data-row="${withShots.key}"]`).click();
     await expect(page.locator('article.item-page')).toContainText(withShots.key);
-    await expect(page.locator('section[aria-label="Screenshots"]')).toHaveCount(0);
+    await expect(page.locator('section[aria-label="Screenshots"]')).toHaveCount(0, { timeout: 20_000 });
   } finally {
     await rm(cases, { recursive: true, force: true }).catch(() => {});
     await plane.close();

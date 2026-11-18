@@ -11,6 +11,7 @@ import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { npmCiEnvironment } from '../cli/test-isolation.js';
 import { installArgv, packageManager } from '../package-manager.js';
 import { pinnedNodePath } from '../node-pin.js';
+import { withHeavyJob } from '../master/verification-slots.js';
 import type { WorkerVerificationResult } from '../cli/worker-verification.js';
 import type { Work } from '../model.js';
 
@@ -32,9 +33,16 @@ export async function verificationStep(command: string, args: string[], options:
   }
 }
 
-/** `progress` receives each launcher line (waiting, starting) as it happens, for the worker's `complete` to show (GY-3332). */
-export async function runWorkerVerification(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot(),
-  progress: (line: string) => void = () => {}): Promise<WorkerVerificationResult> {
+/**
+ * `progress` receives each launcher line (waiting, starting) as it happens, for the worker's `complete` to show (GY-3332).
+ * GY-3447: a worker's own verification takes no host heavy-job slot; the trial load cap bounds it. GY-3446: under a host strict cap it does.
+ */
+export const runWorkerVerification = (root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot(),
+  progress: (line: string) => void = () => {}): Promise<WorkerVerificationResult> =>
+  withHeavyJob(`worker verification ${work.key}`, () => verifyOnHost(root, work, input, baseBranch, parent, progress), { onWait: progress, strictOnly: true });
+
+async function verifyOnHost(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent: string,
+  progress: (line: string) => void): Promise<WorkerVerificationResult> {
   await mkdir(parent, { recursive: true });
   const allocation = await mkdtemp(join(parent, workerVerificationPrefix));
   await writeTempOwner(allocation);

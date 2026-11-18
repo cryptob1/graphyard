@@ -1,0 +1,13 @@
+{
+  "id": "candidate-e2e-on-base",
+  "title": "Candidate assertions run against the base application",
+  "description": "An edited existing case invokes new or modified scripts checking returns UI absent on base. The candidate passes, the base fails, later base checks see original proof files, and genuinely passing base cases remain refused.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "candidate proof overlay and strict base refusal",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/bug-proof-fails-on-base.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

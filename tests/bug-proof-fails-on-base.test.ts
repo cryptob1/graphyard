@@ -1,16 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { trialHarness } from '../src/merge-writer/trial-container.js';
 import { tmpdir } from 'node:os';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { mergeOne, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import { masterGuide } from '../src/master/guide.js';
 import { masterConfigSchema } from '../src/master.js';
-import { trialFailurePrefix } from '../src/model/rework-ground.js';
+import { proofPassesOnBasePrefix } from '../src/model/rework-ground.js';
 import type { Work } from '../src/model.js';
+import { runTrial } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-2984, GY-3167: a feature or bug item's proofs run on the base tip in the merge writer's trial; one whose
@@ -53,8 +56,16 @@ async function repository(fixedOnBase: boolean, e2e = false, newProof = false) {
   return { root, base, head };
 }
 
-// The test check runs for real in the trial checkout; npm's install and build are stood in for.
+// These trusted fixtures run real checks and E2E steps locally; container isolation is covered separately.
+// npm's install and build are stood in for.
 const run: ChildRun = async (command, args, options) => {
+  options = { ...options, wrapper: undefined };
+  if (command === 'node' && args.at(-1)?.endsWith('/run.mjs')) {
+    const script = args.at(-1)!;
+    const harness = fileURLToPath(new URL('..', import.meta.url));
+    writeFileSync(script, readFileSync(script, 'utf8').replaceAll(trialHarness, harness));
+    return defaultChildRun(command, ['--import', 'tsx', script], { ...options, cwd: harness });
+  }
   if (command === 'git') return defaultChildRun(command, args, { ...options, env: { ...process.env, ...identity, ...options?.env } });
   if (command !== 'npm') return defaultChildRun(command, args, options);
   if (args[0] === 'run' && args[1] === 'test') {
@@ -79,7 +90,7 @@ test(`${own} — a bug or feature item whose proof passes on the base tip is ref
   for (const type of ['bug', 'feature'] as const) {
     const refused = await merge(fixed, type);
     assert.equal(refused.outcome.outcome, 'refused', `${type}: ${JSON.stringify(refused.outcome)}`);
-    assert.equal((refused.outcome as { reason: string }).reason, `${trialFailurePrefix}: not reproduced: ${proof} passes on the base tip ${fixed.base}`);
+    assert.equal((refused.outcome as { reason: string }).reason, `${proofPassesOnBasePrefix}: ${proof} already passes on the base tip ${fixed.base} without this change, so it shows nothing the change does. Change tests/fix.test.ts so a case fails on the base tip and passes with the change.`);
     assert.ok(refused.events.some(event => event.kind === 'refused'), 'the refusal is recorded, grounding the rework');
   }
 
@@ -103,12 +114,59 @@ test(`${own} — a feature whose proof file is new on the head merges even thoug
 
 test(`${own} — the master guide's e2e rule says a feature's or bug's proofs must include one failing on the base tip, else the trial refuses it as not reproduced, and chores are exempt`, () => {
   const paragraph = masterGuide.split('\n').find(line => line.startsWith('Every item needs an `e2e:NAME` criterion')) ?? '';
-  assert.match(paragraph, /A feature's or bug's proofs must include one that fails on the base tip, or the merge trial refuses it as not reproduced; chores are exempt\./);
+  assert.match(paragraph, /A feature's or bug's proofs must include one that fails on the base tip, or the merge trial refuses it because the proof already passes before the change; chores are exempt\./);
 });
 
 test(`${own} — a bug item whose unit proof and E2E proof both pass on the base tip is refused as not reproduced naming both: the bound case is served from the base too`, { timeout: 300_000 }, async () => {
   const fixed = await repository(true, true);
   const bug = await merge(fixed, 'bug', [proof, e2eProof]);
   assert.equal(bug.outcome.outcome, 'refused', JSON.stringify(bug.outcome));
-  assert.equal((bug.outcome as { reason: string }).reason, `${trialFailurePrefix}: not reproduced: ${proof}, ${e2eProof} pass on the base tip ${fixed.base}`);
+  assert.equal((bug.outcome as { reason: string }).reason, `${proofPassesOnBasePrefix}: ${proof}, ${e2eProof} already pass on the base tip ${fixed.base} without this change, so they show nothing the change does. Change tests/fix.test.ts, e2e/cases/home-shows-fix.json so a case fails on the base tip and passes with the change.`);
+});
+
+// An existing weak case is strengthened on the candidate, just as a UI regression repair is.
+test('integration:candidate-e2e-on-base — edited cases and new or edited assertion scripts run against the unchanged base, then are removed before base checks', { timeout: 300_000 }, async () => {
+  for (const modifiedScript of [false, true]) {
+    const repo = await repository(false, true);
+    const write = (path: string, content: string) => { mkdirSync(dirname(join(repo.root, path)), { recursive: true }); writeFileSync(join(repo.root, path), content); };
+    const script = modifiedScript ? 'tests/returns.mjs' : 'e2e/returns.mjs';
+    const oldCase = { ...homeCase, steps: [{ kind: 'http', method: 'GET', path: '/', status: 200 }] };
+    // Serve the application's actual HTML; a candidate-only source file supplies the new UI.
+    write('serve.js', `const fs = require('node:fs'); require('node:http').createServer((q, r) => { r.writeHead(200, {'Content-Type':'text/html'}); r.end(fs.existsSync('src/returns.html') ? fs.readFileSync('src/returns.html') : '<h1>Home</h1>'); }).listen(${servePort}, '127.0.0.1');`);
+    write('e2e/cases/home-shows-fix.json', JSON.stringify(oldCase));
+    if (modifiedScript) write(script, '// old weaker assertion\n');
+    write('test.js', `const assert = require('node:assert/strict'), fs = require('node:fs');
+      if (!fs.existsSync('src/returns.html')) {
+        assert.deepEqual(JSON.parse(fs.readFileSync('e2e/cases/home-shows-fix.json')), ${JSON.stringify(oldCase)});
+        ${modifiedScript ? `assert.equal(fs.readFileSync('${script}', 'utf8'), '// old weaker assertion\\n');` : `assert.equal(fs.existsSync('${script}'), false);`}
+      }
+      console.log('ok 1 - base checks see original proof files');`);
+    gitIn(repo.root, 'add', '-A'); gitIn(repo.root, 'commit', '-qm', 'base with existing weak case');
+    repo.base = gitIn(repo.root, 'rev-parse', 'HEAD');
+    write('src/returns.html', '<h1>Home</h1><section data-k="returns">Returns</section>');
+    write(script, `import assert from 'node:assert/strict'; const html = await fetch(process.env.TARGET_URL).then(r => r.text()); assert.match(html, /data-k="returns"/, 'returns UI must exist');`);
+    write('e2e/cases/home-shows-fix.json', JSON.stringify({ ...oldCase, steps: [...oldCase.steps, { kind: 'command', run: `node ${script}` }] }));
+    gitIn(repo.root, 'add', '-A'); gitIn(repo.root, 'commit', '-qm', 'candidate strengthens existing case and adds returns UI');
+    repo.head = gitIn(repo.root, 'rev-parse', 'HEAD');
+    gitIn(repo.root, 'checkout', '-q', '--detach', repo.base);
+
+    const base = await runTrial({ root: repo.root, base: await temporaryDirectory('candidate-e2e-base'), mergeSha: repo.base,
+      e2eFrom: repo.head, e2eProofs: [e2eProof], changedFiles: [], timeoutMs: 120_000, environment: { PATH: process.env.PATH! }, run });
+    assert.equal(base.e2e?.[0]?.executed, 1);
+    assert.equal(base.e2e?.[0]?.failed, 1, 'candidate assertion fails against base HTML; added application files are not overlaid');
+    assert.match(base.e2e?.[0]?.output?.join('\n') ?? '', /returns UI must exist/, 'the assertion itself ran on base');
+    assert.deepEqual(base.tests.failed, [], 'later checks see restored case and scripts');
+    assert.equal(base.tests.passed, 1);
+
+    const fixed = await merge(repo, 'bug', [e2eProof]);
+    assert.equal(fixed.outcome.outcome, 'merged', JSON.stringify(fixed.outcome));
+    const trial = fixed.events.find(event => event.kind === 'trial');
+    assert.deepEqual(trial && 'proofs' in trial ? trial.proofs[e2eProof] : null, { executed: 1, failed: 0 });
+
+    // The very same strengthened case must still be refused once the UI already exists on base.
+    repo.base = repo.head;
+    const refused = await merge(repo, 'bug', [e2eProof]);
+    assert.equal(refused.outcome.outcome, 'refused', JSON.stringify(refused.outcome));
+    assert.match((refused.outcome as { reason: string }).reason, /already passes on the base tip/);
+  }
 });

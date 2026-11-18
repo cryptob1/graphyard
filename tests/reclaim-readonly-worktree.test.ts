@@ -49,7 +49,7 @@ before(async () => {
 after(async () => { http?.close(); await store?.close(); });
 
 test('e2e:reclaim-readonly-worktree — the loop removes an ended attempt\'s worktree holding a 0555 tree, retries a failed removal, and leaves an outside symlink target alone', async () => {
-  const filed = await ok(operator, 'work', { title: 'Reclaim a read-only worktree', type: 'chore',
+  const filed = await ok(operator, 'work', { why: 'w', simplest: 's', title: 'Reclaim a read-only worktree', type: 'chore',
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['e2e:reclaim-readonly-worktree'] }] }) as Work;
   await ok(operator, `work/${filed.id}/ready`, {});
 

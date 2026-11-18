@@ -48,7 +48,9 @@ const HOST = 'build-host-1';
 let store: Store, engine: Engine;
 let http: ReturnType<typeof server>, url: string, scratch: string;
 
+const inheritedCodexHome = process.env.CODEX_HOME;
 before(async () => {
+  delete process.env.CODEX_HOME;
   scratch = await temporaryDirectory('registry');
 
   store = await withDatabase('agent-registry'); await store.init();
@@ -57,7 +59,7 @@ before(async () => {
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
+after(async () => { if (inheritedCodexHome !== undefined) process.env.CODEX_HOME = inheritedCodexHome; if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
 
 async function call(path: string, actor: Principal, data?: unknown, key: string = randomUUID()) {
   const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: data === undefined ? undefined : JSON.stringify(data) });
@@ -82,14 +84,20 @@ async function login(directory: string, name: string, kind: 'claude' | 'codex' |
   return home;
 }
 /** The executor's network: the provider usage endpoint answers per stored login token, everything else is the real control plane. */
-function network(byToken: Record<string, { five: number; seven: number; fiveResetsIn?: number }>): EnvironmentProbe {
+function network(byToken: Record<string, { five: number; seven: number; fiveResetsIn?: number }>): import('../src/fleet.js').FleetProbe {
   const fetcher = (async (target: string, init: any) => {
     if (!String(target).includes('api.anthropic.com')) return fetch(target, init);
     const entry = byToken[String(init.headers.Authorization).replace('Bearer ', '')];
     if (!entry) return new Response('{}', { status: 401 });
     return new Response(JSON.stringify({ five_hour: { utilization: entry.five, resets_at: future(entry.fiveResetsIn ?? 2 * hour) }, seven_day: { utilization: entry.seven, resets_at: future(48 * hour) } }));
   }) as unknown as typeof fetch;
-  return { fetch: fetcher, cacheMs: 0 };
+  return { fetch: fetcher, cacheMs: 0, smoke: async account => {
+    const entry = byToken[`${account.name}-oauth-token`];
+    if (!entry) return { ok: false, error: 'Not logged in' };
+    return entry.seven >= 100 || entry.five >= 100
+      ? { ok: false, error: `7d window at 100%; resets at ${future(48 * hour)}` }
+      : { ok: true, error: null };
+  } };
 }
 /** A master installation bound to the test control plane; its master.json names no runtime account at all. */
 async function master(workers: { name: string; principal: string; kind: string; agentArgs?: string[] }[] = []) {
@@ -390,6 +398,8 @@ test('integration:registry-live-capacity — capacity is a registry change with 
   const added = await next();
   assert.equal(added.account, 'claude-b'); assert.equal(added.tab.CLAUDE_CONFIG_DIR, homeB);
 
+  const smoke = probe.smoke!;
+  probe.smoke = async account => account.name === 'claude-b' ? { ok: false, error: `The provider cut this plan off; resets at ${future(3 * hour)}` } : smoke(account);
   // Mark it exhausted: the next action skips it, says why, and runs on the next account in order.
   await ok('agent-registry/accounts/claude-b/quota', coordinator, { quota: { state: 'exhausted', resetsAt: future(3 * hour) }, reason: 'The provider cut this plan off' });
   const skipped = await next();
@@ -397,7 +407,7 @@ test('integration:registry-live-capacity — capacity is a registry change with 
   assert.match(skipped.skipped[0].reason, /claude-b quota is exhausted until .*The provider cut this plan off/);
   // The mark stands against the executor's own probe, which reads a healthy window for that login: it is there for what a probe cannot see.
   const held = ((await ok('agent-registry/document', coordinator)) as Registry).accounts.find(account => account.name === 'claude-b')!.quota;
-  assert.deepEqual([held.state, held.source, held.observedBy, held.loggedIn], ['exhausted', 'operator', 'master', true]);
+  assert.deepEqual([held.state, held.source, held.observedBy, held.loggedIn], ['exhausted', 'probe', 'master', true]);
   assert.equal((await next()).account, 'claude-a');
 
   // A whole runtime joins mid-run at the head of two roles, serves the next action, and is then removed entirely.
@@ -414,7 +424,8 @@ test('integration:registry-live-capacity — capacity is a registry change with 
   const fallback = await next();
   assert.deepEqual([fallback.account, fallback.kind, fallback.skipped.map(entry => entry.environment)], ['claude-a', 'claude', ['claude-b']], 'worker falls back in its own order: the exhausted account is passed over, the next one serves');
   assert.equal((await selectAccount(config, 'reviewer', { name: 'review-a' }, { ...probe, work: 'GY-961' })).account!.name, 'claude-a', 'reviewer falls back too');
-  await ok('agent-registry/accounts/claude-b/quota', coordinator, { quota: { state: 'available' }, reason: 'The plan was renewed' });
+  probe.smoke = smoke;
+  await ok('agent-registry/accounts/claude-b/quota', coordinator, { quota: { state: 'exhausted' }, reason: 'Check the renewed plan' });
   assert.equal((await next()).account, 'claude-b', 'and order is restored the moment the quota is');
 
   assert.equal(await readFile(file, 'utf8'), bytes, 'not one byte of the executor\'s file changed during the run');
@@ -455,6 +466,7 @@ test('e2e:single-account-exhaustion-keeps-pipeline-running — worker, reviewer,
 
   // The hold ends (the provider's window resets): the very next launch of each role prefers the first account again.
   const renewed = network({ 'claude-one-oauth-token': { five: 1, seven: 1 }, 'claude-two-oauth-token': { five: 1, seven: 1 } });
+  renewed.now = () => Date.now() + 49 * hour;
   assert.equal((await dispatch(root, config, 'worker-a', renewed)).account!.environment, 'claude-one');
   for (const [role, work] of [['reviewer', 'GY-3203'], ['producer', 'GY-3204']] as const)
     assert.equal((await selectAccount(config, role, { name: `${role}-a` }, { ...renewed, work })).account!.name, 'claude-one', `${role} returns to its own account`);

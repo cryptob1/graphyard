@@ -1,0 +1,15 @@
+{
+  "id": "gate-reserved-slot",
+  "title": "The batch gate runs under full item load and a drain",
+  "description": "Runs the real loop cycle over a host heavy-job budget of two, both slots held by item merge trials and a heavy-work drain set: the batch gate starts its check at once in its reserved slot and verifies main, and no stall alarm stands (GY-3450).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the batch gate verifies main while item trials fill the budget and a drain is set",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:gate-reserved-slot tests/gate-reserved-slot.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
