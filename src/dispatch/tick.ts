@@ -227,9 +227,11 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     const selected = await effects.selectedAccount?.(role, profile.name).catch(() => null) ?? null;
     const account = selected?.environment ?? null;
     const held = await effects.holdAccount!(account ?? profileAccount(profile.name), { at: new Date(now()).toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role, profile: profile.name, work: item.key });
-    await effects.reportCapacity?.(item, { event: 'exhausted', role, requestId: request.id, profile: profile.name, account, runtime: selected?.kind ?? profile.kind ?? null, reason: notice.reason, resetsAt: notice.resetsAt,
+    if (held?.until && Date.parse(held.until) <= now()) return `${profile.name}: the session exited; its account passed the live check and remains available`;
+    const reason = held?.reason ?? notice.reason, resetsAt = held?.until ?? notice.resetsAt;
+    await effects.reportCapacity?.(item, { event: 'exhausted', role, requestId: request.id, profile: profile.name, account, runtime: selected?.kind ?? profile.kind ?? null, reason, resetsAt,
       partialWork: { state: 'not-applicable', detail: 'the session exited at launch on the provider limit notice: it read nothing and edited nothing' } }).catch(() => { /* the hold stands; a record the control plane refused is not a failed failover */ });
-    return `${profile.name}: ${account ?? `${profile.name}'s own account`} exited at launch on its provider's limit notice (${notice.reason}); held ${notice.resetsAt ? `until it resets ${notice.resetsAt}` : held && 'until' in held && held.until ? `until ${held.until}` : 'for its reset'}`;
+    return `${profile.name}: ${account ?? `${profile.name}'s own account`} exited at launch on its provider's limit notice (${reason}); held ${resetsAt ? `until ${resetsAt}` : 'for its reset'}`;
   };
   const retryable = (request: DispatchRequest) => { const failure = cursor.failures[request.id]; return !failure || failure.attempts < dispatchFailureLimit && Date.parse(failure.nextAt) <= now(); };
   // A request whose automatic sessions all ended unanswered is left to the master, once, naming

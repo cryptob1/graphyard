@@ -264,7 +264,7 @@ test('integration:headless-review — a run that stops on its provider\'s limit 
   const runs: string[][] = [];
   // The runtime exits non-zero with the notice on its output, as `claude -p` does on a spent account.
   const exec: HeadlessExec = async (command, args) => { runs.push([command, ...args]); throw Object.assign(new Error('claude exited with code 1'), { output: `You've hit your session limit · resets ${resetsAt.toISOString()}\n` }); };
-  const launched = await launchReview(root, work, 'reviewer-claude', [], now(), { run, headless: exec, requestId: 'headless-request-7' });
+  const launched = await launchReview(root, work, 'reviewer-claude', [], now(), { run, headless: exec, probe: { smoke: async () => ({ ok: false, error: `You've hit your session limit; resets at ${resetsAt.toISOString()}` }) }, requestId: 'headless-request-7' });
   const record = await settled(launched.review);
   assert.equal(runs.length, 1, 'a spent account is not run again');
   assert.equal(record.state, 'failed');
@@ -273,6 +273,6 @@ test('integration:headless-review — a run that stops on its provider\'s limit 
   assert.ok(held, 'the account is held');
   assert.equal(held.until, resetsAt.toISOString());
   // The next launch skips the held account: with no other account on the profile it is refused before anything runs.
-  await assert.rejects(launchReview(root, await stored(work.id), 'reviewer-claude', [], now(), { run, headless: exec, requestId: 'headless-request-7' }), /No healthy agent account for reviewer profile reviewer-claude/);
+  await assert.rejects(launchReview(root, await stored(work.id), 'reviewer-claude', [], now(), { run, headless: exec, probe: { smoke: async () => ({ ok: false, error: `You've hit your session limit; resets at ${resetsAt.toISOString()}` }) }, requestId: 'headless-request-7' }), /No healthy agent account for reviewer profile reviewer-claude/);
   assert.equal(runs.length, 1);
 });

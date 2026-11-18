@@ -1047,10 +1047,20 @@ async function masterPaneFailover(cycle: Cycle, handle: RuntimeSession, open: Wo
   const bare = handle.agent === null && !exited;
   master.misses = bare ? master.misses + 1 : 0;
   if (!notice && !exited && !(bare && master.misses >= 2)) return;
-  const reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : bare ? 'its pane held a bare shell with no agent on two consecutive cycles, so the session is gone' : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
+  let reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : bare ? 'its pane held a bare shell with no agent on two consecutive cycles, so the session is gone' : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
   const key = cycle.config.forPerson ? `master:failover:${cycle.config.forPerson}` : 'master:failover';
   try {
-    if (notice && master.account && sessions.exhaust) await sessions.exhaust(master.account, notice);
+    if (notice && master.account && sessions.exhaust) {
+      const checked = await sessions.exhaust(master.account, notice);
+      if (checked?.available || checked?.until && Date.parse(checked.until) <= clock) {
+        if (!exited && !(bare && master.misses >= 2)) return;
+        notice = null;
+        reason = 'its session exited; its account passed the live check';
+      } else if (checked?.until) {
+        notice = { ...notice, reason: checked.reason ?? notice.reason, resetsAt: checked.until };
+        reason = `its account failed the live request: ${notice.reason}`;
+      }
+    }
     if (handle.pane_id) await Promise.resolve(effects.closeSession(handle.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
     state.master = { ...master, agentName: null, pane: null, runtime: null, adopted: false, rotations: master.rotations + 1, misses: 0,
       lastEnd: { cause: notice ? 'exhausted' : 'exited', at: new Date(clock).toISOString(), detail: reason.slice(0, 500) },

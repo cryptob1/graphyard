@@ -280,7 +280,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // GY-2949: the master pane's limit notice holds its account exactly as a worker's holds theirs,
       // so the role's next selection — the launch the same cycle makes — passes the spent account by.
       exhaust: async (account, notice) => {
-        await recordObservedExhaustion(current(), account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null });
+        return recordObservedExhaustion(current(), account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null });
       },
       // The registry session the closed or vanished pane ran under is ended, so the role's one slot frees for the next account; the registry's end is idempotent.
       end: (session, reason) => endRegistrySessionById(current(), session, reason),

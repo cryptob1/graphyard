@@ -70,7 +70,7 @@ test('unit:registry-slot-authority — exhaustion reported by one executor is he
   const first = await executor('reporter'), second = await executor('other-host-loop');
   const until = new Date(Date.now() + 3_600_000).toISOString();
   await recordObservedExhaustion(first, 'account-a', { at: new Date().toISOString(), resetsAt: until,
-    reason: 'provider session limit', role: 'worker', profile: 'worker-a', work: 'GY-3' }, Date.now(), { registry: client() });
+    reason: 'provider session limit', role: 'worker', profile: 'worker-a', work: 'GY-3' }, Date.now(), { registry: client(), smoke: async () => ({ ok: false, error: `Usage limit reached; resets at ${until}` }) });
   assert.deepEqual((await readEnvironmentLog(first)).exhausted, {}, 'no local exhaustion authority or outbox');
   for (const config of [second, first]) {
     const selected = await selectAccount(config, 'worker', { name: 'worker', principal: 'worker' }, { registry: client(), quota: false, work: 'GY-4' });
@@ -78,9 +78,9 @@ test('unit:registry-slot-authority — exhaustion reported by one executor is he
     await selected.release!('test session finished');
   }
   assert.equal((await registry.document(actor)).accounts.find(account => account.name === 'account-a')!.quota.state, 'exhausted');
-  const down = { observe: async () => { throw new Error('registry unavailable'); } };
+  const down = { document: client().document, observe: async () => { throw new Error('registry unavailable'); } };
   await assert.rejects(recordObservedExhaustion(first, 'account-b', { at: new Date().toISOString(), resetsAt: until,
-    reason: 'limit', role: 'worker', profile: 'worker', work: 'GY-5' }, Date.now(), { registry: down }), /registry unavailable/);
+    reason: 'limit', role: 'worker', profile: 'worker', work: 'GY-5' }, Date.now(), { registry: down, smoke: async () => ({ ok: true, error: null }) }), /registry unavailable/);
   assert.deepEqual((await readEnvironmentLog(first)).exhausted, {});
 });
 

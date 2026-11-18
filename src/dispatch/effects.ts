@@ -47,7 +47,7 @@ export interface DispatchEffects {
    * `holdAccount` records the exit as the refusal it was.
    */
   selectedAccount?: (role: 'reviewer' | 'producer', profile: string) => Promise<{ environment: string | null; kind: string | null } | null>;
-  holdAccount?: (account: string, observed: Omit<ObservedExhaustion, 'until'>) => Promise<{ until?: string } | void>;
+  holdAccount?: (account: string, observed: Omit<ObservedExhaustion, 'until'>) => Promise<{ until?: string; reason?: string; resetsAt?: string | null } | void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<unknown>;
   /**
    * Review by risk in control-plane mode (GY-1525): launches the one post-merge reviewer session of a

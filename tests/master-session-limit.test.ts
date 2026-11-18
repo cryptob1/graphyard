@@ -71,7 +71,7 @@ function registryFixture() {
 
 interface Fixture {
   closed: string[]; launched: { handover: string }[]; exhausted: { account: string; reason: string; resetsAt: string | null }[]; ended: { session: string; reason: string }[];
-  screen: string | null; launchError: Error | null; persisted: DaemonState | null;
+  passing?: boolean; screen: string | null; launchError: Error | null; persisted: DaemonState | null;
 }
 const fixture = (): Fixture => ({ closed: [], launched: [], exhausted: [], ended: [], screen: null, launchError: null, persisted: null });
 
@@ -94,7 +94,7 @@ async function effectsFor(config: MasterConfig, agents: { name?: string; pane_id
       // The production hold, on the fixture's own environment log beside the fixture credential file.
       exhaust: async (account, notice) => {
         observed.exhausted.push({ account, reason: notice.reason, resetsAt: notice.resetsAt });
-        await recordObservedExhaustion(config, account, { at: iso(clock), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }, clock, { registry: registry.client });
+        return recordObservedExhaustion(config, account, { at: iso(clock), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }, observed.passing ? clock + 10 : clock, { registry: registry.client, smoke: async () => ({ ok: !!observed.passing, error: `${notice.reason}; resets at ${notice.resetsAt}` }) });
       },
       end: async (session, reason) => { observed.ended.push({ session, reason }); await registry.client.end(session, reason); },
     },
@@ -146,6 +146,20 @@ test('unit:master-session-limit-fails-over — a pane with ordinary output is ad
   assert.equal(masterSummary(state.master, clock, { agent_status: 'working' }).state, 'working');
 });
 
+test('unit:master-session-limit-fails-over — a quoted limit leaves a live master running when its own request passes', async () => {
+  const master = await config(), registry = registryFixture(), observed = fixture();
+  observed.screen = limitScreen;
+  observed.passing = true;
+  const agents = [{ name: MASTER, pane_id: 'pM', agent_status: 'working' }];
+  const state = emptyDaemonState(master);
+  state.master = { ...state.master, agentName: MASTER, pane: 'pM', runtime: 'claude', account: 'claude-c', session: 'session-claude-c', startedAt: iso(clock - 3_600_000) };
+  await runCycle(master, state, await effectsFor(master, agents, observed, registry), () => clock);
+  assert.deepEqual(observed.closed, []);
+  assert.deepEqual(observed.launched, []);
+  assert.equal(state.master.agentName, MASTER);
+  assert.equal(state.master.lastEnd, null);
+});
+
 test('unit:master-status-shows-master-session-state — master status reads the session limited until the hold\'s instant while it stands, and absent once the pane is closed and the hold has lapsed', async () => {
   const master = await config(), registry = registryFixture(), observed = fixture();
   observed.screen = limitScreen;
@@ -156,7 +170,7 @@ test('unit:master-status-shows-master-session-state — master status reads the 
   await runCycle(master, state, await effectsFor(master, agents, observed, registry), () => clock);
 
   assert.deepEqual(observed.closed, ['pM'], 'the pane is closed');
-  assert.deepEqual(state.master.lastEnd, { cause: 'exhausted', at: iso(clock), detail: 'its pane showed its provider\'s limit notice: You\'ve hit your session limit · resets 1:30am (America/Los_Angeles)' });
+  assert.deepEqual(state.master.lastEnd, { cause: 'exhausted', at: iso(clock), detail: "its account failed the live request: You've hit your session limit · resets 1:30am (America/Los_Angeles); resets at 2026-10-24T08:30:00.000Z" });
   assert.equal(state.master.agentName, null, 'no session is live');
   const resetsAt = state.master.limitedUntil!;
   assert.ok(resetsAt);
