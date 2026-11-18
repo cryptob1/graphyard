@@ -4,6 +4,8 @@ import { z } from 'zod';
 // ---------------------------------------------------------------------------
 
 export const humanAnswerSchema = z.object({
+  ownerSaid: z.string().trim().min(1).max(4000).optional(),
+  reverses: z.string().optional(),
   request: z.string().uuid(),
   /** `provided`: the thing asked for now exists, so the item resumes. `declined`: it will not, and the item stays parked with the answer as its blocker. A choice sets it. */
   outcome: z.enum(['provided', 'declined']).default('provided'),
