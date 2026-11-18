@@ -261,7 +261,7 @@ test('e2e:batch-gate-own-wait-liveness — a gate on a hot host reports its wait
   await until(() => yard.summary()?.progress === 'build', 'status names the run\'s step');
   assert.equal(yard.summary()!.run, basename(run.directory), 'status names the exact run');
   assert.ok(yard.summary()!.waitedMs >= 10 * minute, 'status counts the slot wait as waited');
-  assert.deepEqual(yard.record().inFlight!.checks, ['build', 'affected'], 'the batch\'s checks');
+  assert.deepEqual(yard.record().inFlight!.checks, ['build', 'e2e:graphyard-feature-map', 'affected'], 'the batch\'s checks: the build, the real-app feature check and the affected tests');
   await until(() => !!yard.record().inFlight?.seenAt, 'the loop\'s sight of the run is on the record');
 
   // The loop restarts under the run: it stops watching, the run goes on, and an hour passes before the next loop.

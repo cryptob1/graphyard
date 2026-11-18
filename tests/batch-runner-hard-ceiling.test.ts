@@ -106,7 +106,7 @@ test('e2e:batch-runner-hard-ceiling — a new batch run through the loop\'s gate
     assert.ok(spec.timeoutMs <= ceilingMs, `the batch spec's timeout is ${spec.timeoutMs} ms`);
     assert.ok(meta.timeoutMs <= ceilingMs, `the run's outer deadline is ${meta.timeoutMs} ms`);
     assert.equal(spec.timeoutMs, gateCeilingMs);
-    assert.deepEqual(yard.record().inFlight!.checks, ['build', 'affected'], 'every required check is retained');
+    assert.deepEqual(yard.record().inFlight!.checks, ['build', 'e2e:graphyard-feature-map', 'affected'], 'every required check is retained, the real-app feature check among them');
     assert.equal(yard.record().inFlight!.run!.directory, directory);
   } finally {
     // The run's verdict, written as the detached runner writes it, so the gate settles whatever the assertions found.
