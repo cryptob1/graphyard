@@ -28,6 +28,6 @@ test('unit:tests/trial-timeout-scales-with-share.test.ts — a trial sharing the
     { timeoutMs: defaultMs },
     { timeoutMs: defaultMs },
   ]);
-  assert.deepEqual(trialShareAllowance(3, 1000), { timeoutMs: 3000, cores: Math.max(2, Math.floor(availableParallelism() / 3)) }, 'an explicit deadline scales by the share too');
+  assert.deepEqual(trialShareAllowance(3, 1000), { timeoutMs: 1000, cores: Math.max(2, Math.floor(availableParallelism() / 3)) }, 'an explicit deadline is a bound: the share never multiplies it (GY-3509)');
   assert.deepEqual(trialShareAllowance(undefined), { timeoutMs: defaultMs });
 });

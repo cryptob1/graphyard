@@ -144,7 +144,7 @@ test('e2e:batch-gate-median-bound — a gate run on the real loop step and detac
   const before = yard.record().verified;
   const flight = (await batchGateStep(yard.loop()))!.gate!;
   const stalled = await yard.watching(0);
-  assert.ok(yard.runs[0]!.timeoutMs! <= 3 * bound, `the detached run's own clock follows the gate's bound (${yard.runs[0]!.timeoutMs} ms), not hours`);
+  assert.ok(yard.runs[0]!.timeoutMs! <= bound, `the detached run's own clock follows the gate's bound (${yard.runs[0]!.timeoutMs} ms), not hours`);
   const checks = yard.record().inFlight!.checks!;
   assert.deepEqual([checks[0], checks.at(-1)], ['build', 'affected'], 'the build and affected tests are cut into the batch');
   yard.advance(bound - minute);
