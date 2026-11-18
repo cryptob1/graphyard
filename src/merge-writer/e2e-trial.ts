@@ -11,7 +11,7 @@ import { confinedSession } from '../e2e/steps.js';
 import { composeProjectName } from '../compose-preview.js';
 import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
-import { type Application } from '../project-applications.js';
+import { previewable, type PreviewableApplication } from '../project-applications.js';
 import { isPlaceholderServe, onboardingCaseId, placeholderServeRefusal } from '../model/onboarding-work.js';
 import { commandApplication, serveHead, ServeCommandError, type CommandApplication, type ServedApplication } from './serve-head.js';
 
@@ -60,14 +60,14 @@ export const serveOutputName = (id: string, sha: string) => `serve-${id}-${sha.s
 interface Served { origin: string; close(): Promise<void>; ended?(): string | null }
 
 /** The checkout's own declarations, read from its graphyard.json and never from the process's: its `e2e.serve` read as a command application (its migration source). */
-export function declaredServe(worktree: string): { serve: CommandApplication | null; applications: Application[]; bindings: Record<string, string>; environments: Record<string, AppEnvironment> } {
+export function declaredServe(worktree: string): { serve: CommandApplication | null; applications: PreviewableApplication[]; bindings: Record<string, string>; environments: Record<string, AppEnvironment> } {
   let serve: CommandApplication | null = null, text: string | null = null;
   try { text = readFileSync(join(worktree, 'graphyard.json'), 'utf8'); } catch { /* no declaration */ }
   const environments = declaredEnvironments(text);
   try { const declared = checkoutRepositoryPolicy(worktree).e2e.serve; serve = declared ? commandApplication(declared) : null; } catch { /* a policy the head broke: no serve, the case run names it */ }
   try {
     const delivery = loadProjectDelivery({}, worktree);
-    if (delivery.previews !== 'off') return { serve, applications: delivery.applications, bindings: delivery.cases, environments };
+    if (delivery.previews !== 'off') return { serve, applications: previewable(delivery.applications), bindings: delivery.cases, environments };
   } catch { /* a delivery the head broke: the case run refuses naming why */ }
   return { serve, applications: [], bindings: {}, environments };
 }

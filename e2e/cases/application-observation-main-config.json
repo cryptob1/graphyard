@@ -1,0 +1,13 @@
+{
+  "id": "application-observation-main-config",
+  "title": "Master status observes applications as main declares them",
+  "description": "A coordinator checkout behind origin/main and a fixture health endpoint: master status reports the live commit of the application main's graphyard.json declares, names the invalid fields of a broken main declaration instead of reporting no applications, and keeps a valid empty declaration empty.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "application observation reads main's configuration",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/application-observation-main-config.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

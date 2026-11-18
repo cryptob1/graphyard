@@ -23,7 +23,11 @@ export const staticApplicationSchema = z.object({ id: applicationId, kind: z.lit
 export const composeApplicationSchema = z.object({ id: applicationId, kind: z.literal('compose'), file: relativePath('A Compose file'), service: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/, 'A Compose service name'), port: z.number().int().min(1).max(65535), versionUrl, versionPath }).strict();
 /** A Node application (GY-3201): its directory, the command that builds it there (null: none) and the command that starts it there, listening on the PORT Graphyard assigns; the repository's install runs at its root first. */
 export const nodeApplicationSchema = z.object({ id: applicationId, kind: z.literal('node'), directory: relativePath('A node application directory'), build: z.string().trim().min(1).max(500).nullable().default(null), start: z.string().trim().min(1).max(500), versionUrl, versionPath }).strict();
-export const applicationSchema = z.discriminatedUnion('kind', [staticApplicationSchema, composeApplicationSchema, nodeApplicationSchema]);
+/** A service deployed elsewhere (a Go service on Railway, say) that Graphyard only observes (GY-3459): its directory and the versionUrl it answers; never previewed. Declared without a kind. */
+export const externalApplicationSchema = z.object({ id: applicationId, kind: z.literal('external'), directory: relativePath('An application directory'), versionUrl: versionUrl.unwrap() }).strict();
+export const applicationSchema = z.preprocess(
+  value => value && typeof value === 'object' && !Array.isArray(value) && !('kind' in value) ? { ...value, kind: 'external' } : value,
+  z.discriminatedUnion('kind', [staticApplicationSchema, composeApplicationSchema, nodeApplicationSchema, externalApplicationSchema]));
 
 /** The fields `delivery` gains for the rapid path; every one optional, so a policy committed before them still parses. */
 export const projectDeliveryShape = {
@@ -73,9 +77,15 @@ export function loadProjectDelivery(env: Record<string, string | undefined> = pr
     if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') return effectiveDelivery(null);
     throw error;
   }
-  const delivery = (JSON.parse(text) as Record<string, any> | null)?.delivery;
+  return parseProjectDelivery(text);
+}
+
+/** The delivery a graphyard.json text declares (the defaults when it declares none); refuses with every invalid field named. */
+export function parseProjectDelivery(text: string, where = 'graphyard.json'): ProjectDelivery {
+  let delivery: Record<string, any> | undefined;
+  try { delivery = (JSON.parse(text) as Record<string, any> | null)?.delivery; } catch (error: any) { throw new Error(`${where} is not JSON: ${error?.message ?? error}`); }
   if (!delivery) return effectiveDelivery(null);
-  return effectiveDelivery(checked(Object.fromEntries(declarationKeys.filter(key => delivery[key] !== undefined).map(key => [key, delivery[key]])), 'graphyard.json delivery'));
+  return effectiveDelivery(checked(Object.fromEntries(declarationKeys.filter(key => delivery[key] !== undefined).map(key => [key, delivery[key]])), `${where} delivery`));
 }
 
 let inForce: ProjectDelivery | null = null;
