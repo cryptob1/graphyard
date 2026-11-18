@@ -168,7 +168,7 @@ test('e2e:gate-releases-heavy-slot — after a gate timeout, a queued merge tria
   // The gate runs first and holds the second slot; its first run's image build hangs past the gate's bound.
   const flight = (await batchGateStep({ ...yard.cycle, state }))!.gate!;
   await until(() => yard.images() === 1, 'the gate builds the trial image');
-  assert.deepEqual(holders(yard.slots).sort(), ['test merge batch-gate', 'npm test (other project)']);
+  assert.deepEqual(holders(yard.slots).sort(), ['npm test (other project)', 'test merge batch-gate']);
   yard.advance(gateLimitMs + 1);
   let settled = false;
   void flight.then(() => { settled = true; });
