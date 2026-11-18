@@ -29,7 +29,7 @@ export const harnessModules = dirname(dirname(fileURLToPath(import.meta.resolve(
 
 // Resolve the invocation's cwd and environment at spawn time, including the E2E
 // session host's stdin. Docker never receives candidate-controlled launch flags.
-const launch = String.raw`
+export const trialLauncher = String.raw`
 import fcntl, glob, json, math, os, select, signal, subprocess, sys, time, uuid
 spec = json.loads(sys.argv[1])
 container_name = 'graphyard-trial-' + uuid.uuid4().hex
@@ -38,12 +38,16 @@ if os.getuid() == 0:
 ${trialAdmission}
 # The slot's fd passes to the guardian, so the slot is held until the container is removed.
 slot = admit() if load else None
-docker = ['docker', '--host', 'unix:///var/run/docker.sock']
+docker = ['docker', '--host', spec.get('docker', 'unix:///var/run/docker.sock')]
+# A remote shard (GY-3412) keeps Docker's default seccomp and system paths and runs under CPU, memory and process limits.
+limits = spec.get('limits')
 args = docker + ['create', '--name', container_name, '-i', '--init',
         '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
-        '--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined', '--network=' + spec['network'],
+        *(['--cpus=' + str(limits['cpus']), '--memory=' + str(limits['memory']), '--pids-limit=' + str(limits['pids'])] if limits else
+          ['--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined']), '--network=' + spec['network'],
         *(['--security-opt=apparmor=' + spec['apparmor']] if spec.get('apparmor') else []),
-        '--ulimit', 'core=0', '--user', str(os.getuid()) + ':' + str(os.getgid()),
+        *(['--cpu-shares=' + str(load['cpuShares'])] if load and load.get('cpuShares') else []),
+        '--ulimit', 'core=0', '--user', spec.get('user') or str(os.getuid()) + ':' + str(os.getgid()),
         '--tmpfs', '/tmp:rw,nosuid,nodev,exec,mode=1777',
         '--tmpfs', '/run:rw,nosuid,nodev,mode=1777', '--workdir', os.getcwd()]
 for source, target, readonly in spec['mounts']:
@@ -101,7 +105,7 @@ finally:
 
 /** The Docker launcher's words: commands run after them in a fresh `graphyard-trial-` container, stopped at `deadline` (epoch ms) when one is given, started once `load` admits it (GY-3189), under the trial AppArmor profile on an AppArmor host (GY-3339). */
 export const trialContainerLaunch = (spec: { image: string; mounts: [string, string, boolean][]; network: string; deadline?: number; load?: TrialLoad }) =>
-  ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify({ ...spec, apparmor: appArmorEnabled() ? trialAppArmorProfile : null })];
+  ['/usr/bin/python3', '-I', '-S', '-c', trialLauncher, JSON.stringify({ ...spec, apparmor: appArmorEnabled() ? trialAppArmorProfile : null })];
 
 /** The first writable directory is the disposable allocation that owns boundary scratch; `deadline` (epoch ms) is when the trial's container stops. */
 export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = trialImage(), network = 'bridge', deadline?: number, load?: TrialLoad): string[] {

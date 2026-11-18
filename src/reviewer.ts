@@ -485,7 +485,7 @@ export async function anchorSessionCheckout(root: string, directory: string, run
  * the common Git directory for the packed-refs lock — plus the host's verification lock directory.
  */
 export async function sessionWritable(root: string, config: MasterConfig, directory: string) {
-  return [...sessionWritablePaths(directory, await sharedGitDirectory(root)), ...sessionSlotsGrant(root, config)];
+  return [...sessionWritablePaths(directory, await sharedGitDirectory(root)), ...sessionSlotsGrant()];
 }
 /**
  * GY-3235: the checkout a reviewer's or producer's session is confined against is
@@ -510,7 +510,7 @@ export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch
   const run = probe === undefined ? (underTestRunner() || insideMasterConfinement() ? null : 'host') : probe;
   const sandbox = launch.kind ? runtimeSandboxes[launch.kind] : undefined;
   if (!run || !sandbox || sandbox.mode(launch.args) === null) return null;
-  const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, writable: writable.filter(path => path.endsWith('/.verification-slots')), ownGitHubCredential, credentialMask }, coordinatorRoot);
+  const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, writable: writable.filter(path => sessionSlotsGrant().includes(path)), ownGitHubCredential, credentialMask }, coordinatorRoot);
   return verifyWorkerSandbox({ ...launch, role, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, directory, writable, run === 'host' ? undefined : run);
 }
 
@@ -1130,7 +1130,7 @@ export async function launchReview(root: string, work: Work, profileName: string
               headlessContext!.kind = run.kind;
               await updateReviewLedger(root, ledger => { const record = ledger.reviews.find(entry => entry.id === id); if (record) { record.headless = run; record.session = registrySessionOf(on.current); } });
             },
-            holdAccount: notice => recordObservedExhaustion(config, on.current.account?.name ?? profileAccount(profile.name), { at: now().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: binding.key }, now().getTime(), {}),
+            holdAccount: notice => recordObservedExhaustion(config, on.current.account?.name ?? profileAccount(profile.name), { at: now().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: binding.key }, now().getTime(), { registry: dependencies.probe?.registry, smoke: dependencies.probe?.smoke }),
             prompt: request(`${await reviewDiff(root, binding.baseSha, binding.sha, dependencies.run)}\n${headlessReviewAnswer(binding.key, product)}`),
             answer: output => postHeadlessReview(root, headlessContext!, output, dependencies.run), root, route: 'review', context: headlessContext }));
         }

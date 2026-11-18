@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defaultChildRun } from '../child-runner.js';
-import { slotsDirectoryVariable } from './verification-slots.js';
+import { heavyDrainDirectory, heavyJobsDirectory, slotsDirectoryVariable } from './verification-slots.js';
 import { herdrTarget } from './herdr.js';
 import { cliMountRoot } from '../install/cli-release.js';
 import { configHome } from '../install/secrets.js';
@@ -384,18 +384,19 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
   // /etc/resolv.conf commonly points into the otherwise hidden /run tree. Bind
   // only that public resolver file back, never systemd's directory or sockets.
   const resolver = existsSync('/etc/resolv.conf') ? realpathSync('/etc/resolv.conf') : null;
-  // GY-3384: the system ssh include directory holds files owned by ids the user namespace cannot
-  // map (root reads as nobody inside), and ssh refuses a config file its owner check rejects —
-  // "Bad owner or permissions on /etc/ssh/ssh_config.d/*.conf" — so every git over SSH failed
-  // inside a confined session. An empty directory in its place leaves ssh its defaults; the
-  // system config itself is never owner-checked, and the session's scratch HOME has no include
-  // to check.
-  const sshIncludes = isDirectoryPath('/etc/ssh/ssh_config.d') ? ['--tmpfs', '/etc/ssh/ssh_config.d'] : [];
+  // GY-3384, GY-3470: system ssh include files are owned by ids the user namespace cannot map
+  // (root reads as nobody inside), and ssh refuses an included file its owner check rejects —
+  // "Bad owner or permissions on /etc/ssh/ssh_config.d/20-omarchy-keepalive.conf" — so every git
+  // over SSH failed inside a confined session. The session's system configuration is therefore an
+  // explicit empty one, which includes nothing: ssh keeps its defaults (known-hosts files and
+  // host-key checking among them) and every option a command passes it, such as a deploy key's
+  // -i and StrictHostKeyChecking=accept-new. The system config itself is never owner-checked.
+  const sshConfig = existsSync('/etc/ssh/ssh_config') ? ['--ro-bind', '/dev/null', '/etc/ssh/ssh_config'] : [];
   // GY-3108: Antigravity (agy) ignores AGY_CONFIG_DIR and reads its login only from
   // `$HOME/.gemini/antigravity-cli`, so the account's login home is bound there.
   const home = variable('HOME', '/tmp/home'), agy = variable('AGY_CONFIG_DIR', '')[2];
   const agyHome = agy && join(home[2], '.gemini', 'antigravity-cli') !== agy ? ['--bind', agy, join(home[2], '.gemini', 'antigravity-cli')] : [];
-  return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...sshIncludes,
+  return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...sshConfig,
     '--tmpfs', '/run', ...(resolver?.startsWith('/run/') ? ['--ro-bind', resolver, resolver] : []), '--bind', scratch, '/tmp', '--bind', scratch, '/var/tmp',
     ...variable('TMPDIR', '/tmp'), ...variable('TMP', '/tmp'), ...variable('TEMP', '/tmp'),
     '--dir', '/tmp/home', ...home, ...agyHome,
@@ -422,6 +423,8 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
  * the runtime command follows it.
  */
 export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask; environment?: NodeJS.ProcessEnv;
+  /** GY-3445: the master session writes the host's heavy-work drain record; every other session reads it. */
+  drainWritable?: boolean;
   /** GY-3237: Herdr socket and config directories the session reaches read-only (the master session's own grant): bound after the masks, kept from the process-launch masks, and allowed socket resolution under Landlock. */
   herdrPaths?: readonly string[] }): readonly string[] {
   const root = canonicalPath(resolve(input.coordinatorRoot)), directory = canonicalPath(resolve(input.sessionDirectory));
@@ -459,6 +462,9 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   if (mask && !existsSync(blank)) writeFileSync(blank, '', { mode: 0 });
   const masks = credentialMaskWords(mask, [root, directory], blank);
   const environment = { ...process.env, ...input.environment };
+  // GY-3445: a session granted the heavy-jobs folder to take slots gets its drain folder back read-only.
+  const drain = input.drainWritable ? [] : writable.filter(path => path === heavyJobsDirectory(environment)).map(heavyDrainDirectory);
+  for (const path of drain) mkdirSync(path, { recursive: true });
   // The Herdr grant covers the sockets under it (GY-3237): a pane-inherited HERDR_SOCKET_PATH
   // would otherwise carry the keyring proxy over the very socket the session must reach.
   const launchTargets = hostProcessLaunchTargets(undefined, environment);
@@ -496,6 +502,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const siblingMasks = siblings.length ? credentialMaskWords({ configHome: '', extraPaths: [], own: [], cli: [], hostPaths: siblings }, [root, directory], blank) : [];
   return [bwrap, ...hostFilesystemWords(scratch, environment, [...writable, ...kept.filter(isDirectoryPath)]), ...masks, ...siblingMasks,
     ...writable.filter(path => !withinCheckout(path, root)).flatMap(path => ['--bind', path, path]),
+    ...drain.flatMap(path => ['--ro-bind', path, path]),
     '--ro-bind', root, root,
     ...commonGitDir.flatMap(path => ['--bind', path, path]),
     ...ownGitState.flatMap(path => ['--ro-bind', path, path]),

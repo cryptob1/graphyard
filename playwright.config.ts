@@ -6,6 +6,8 @@ const port = Number(process.env.GRAPHYARD_BROWSER_PORT ?? 4319);
 const vite = (command: string) => `npx vite ${command} --configLoader runner --outDir ../.graphyard/browser-dist`;
 export default defineConfig({
   testDir: './browser-tests', fullyParallel: true, timeout: 30000,
+  // GY-3436: a Graphyard session's test budget (PLAYWRIGHT_WORKERS, set at its launch) caps its browsers; trials keep the default.
+  ...(Number(process.env.PLAYWRIGHT_WORKERS) >= 1 ? { workers: Number(process.env.PLAYWRIGHT_WORKERS) } : {}),
   // GY-3267: under an e2e command step the trial names E2E_SCREENSHOTS_DIR; each test's last page is captured
   // there, and the newest becomes the case's screenshot on the item page.
   ...(process.env.E2E_SCREENSHOTS_DIR ? { outputDir: process.env.E2E_SCREENSHOTS_DIR } : {}),

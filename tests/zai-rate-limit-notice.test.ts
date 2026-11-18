@@ -56,8 +56,8 @@ test('unit:zai-rate-limit-is-a-limit-notice — Z.AI\'s 429 "Rate limit reached"
   }) as MasterConfig;
   let clock = now;
   const fleet = zaiRegistry('machine-a', ['pi-a', 'pi-b'], () => clock);
-  const probe = (client: FleetClient) => ({ registry: client, quota: false, cacheMs: 0, now: () => clock, work: 'GY-31' });
-  await recordObservedExhaustion(config, 'pi-a', { at: new Date(now).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'worker', profile: 'builder', work: 'GY-31' }, now, { registry: fleet.client });
+  const probe = (client: FleetClient) => ({ registry: client, quota: false, cacheMs: 0, now: () => clock, work: 'GY-31', smoke: async () => ({ ok: true, error: null }) });
+  await recordObservedExhaustion(config, 'pi-a', { at: new Date(now).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'worker', profile: 'builder', work: 'GY-31' }, now, { registry: fleet.client, smoke: async () => ({ ok: false, error: `${signal.reason}; resets at ${signal.resetsAt}` }) });
   const reported = (await fleet.client.document()).accounts.find(account => account.name === 'pi-a')!.quota;
   assert.equal(reported.state, 'exhausted', 'the registry holds the account the notice spent');
   assert.equal(reported.resetsAt, signal.resetsAt, 'held until the signal\'s 15-minute reset');
@@ -66,7 +66,7 @@ test('unit:zai-rate-limit-is-a-limit-notice — Z.AI\'s 429 "Rate limit reached"
   assert.equal(chosen.account?.name, 'pi-b', "the fleet's next selection fails over to the healthy account");
   await chosen.release!('test');
   const solo = zaiRegistry('machine-a', ['pi-a'], () => clock);
-  await recordObservedExhaustion(config, 'pi-a', { at: new Date(now).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'worker', profile: 'builder', work: 'GY-31' }, now, { registry: solo.client });
+  await recordObservedExhaustion(config, 'pi-a', { at: new Date(now).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'worker', profile: 'builder', work: 'GY-31' }, now, { registry: solo.client, smoke: async () => ({ ok: false, error: `${signal.reason}; resets at ${signal.resetsAt}` }) });
   await assert.rejects(selectAccount(config, 'worker', config.workers[0], probe(solo.client)), /No healthy agent account for worker profile builder: .*pi-a/, 'a role with only the held account waits for its reset');
   clock = Date.parse(signal.resetsAt!) + 1;
   assert.equal((await selectAccount(config, 'worker', config.workers[0], probe(solo.client))).account?.name, 'pi-a', 'after the 15-minute reset the account is free again');

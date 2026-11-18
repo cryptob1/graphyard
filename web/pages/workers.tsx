@@ -10,6 +10,7 @@ import LiveRun from '../components/live-run';
 import { shortShas } from '../candidate';
 import { Agent } from '../fun';
 import { EmptyState, PageHeader } from '../components/page-layout';
+import { overloadAlarm, overloaded } from '../../src/model/session-usage';
 
 /**
  * The Workers tab (GY-116, one compact line per agent since GY-3314): every agent session across
@@ -184,7 +185,7 @@ type HostRow = { host: string; local?: boolean; away: boolean; reason?: string; 
 /**
  * GY-3407: the hosts the loop watches — this machine first, then each one added with
  * `graphyard host add USER@HOST` — as the loop read them this cycle. A host that does not answer
- * reads Away and is read again next cycle. Work runs only on this machine for now, which the note says.
+ * reads Away and is read again next cycle. Merge trials send test shards to added hosts (GY-3412), which the note says.
  */
 function Hosts({ hosts }: { hosts: HostRow[] }) {
   if (!hosts.length) return null;
@@ -199,7 +200,29 @@ function Hosts({ hosts }: { hosts: HostRow[] }) {
         <td data-label="Steal">{figure(host.steal, '%')}</td>
         <td data-label="Runs now">{figure(host.runs)}</td></>}
     </tr>)}</tbody>
-  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Added hosts are watched, not given work yet: trials and previews run on this machine.</p> : null}</section>;
+  </table>{hosts.some(host => !host.local) ? <p className="muted" data-hosts-note>Merge trials send test shards to added hosts too; previews run on this machine.</p> : null}</section>;
+}
+
+type SessionUsageRow = { session: string; cpu: number | null; cpuShare: number; memory: number; memoryShare: number; overSince: string | null };
+/**
+ * GY-3438: every live agent session's CPU and memory use beside its fair share — the host's cores
+ * divided by the live sessions, never under two each — as the loop last read its cgroup. A session
+ * using far more than its share of a saturated machine for five minutes raises the overload alarm
+ * above the table, naming it; one session alone on an idle machine may use it all.
+ */
+export function SessionUsage({ sessions, now }: { sessions: SessionUsageRow[]; now: number }) {
+  if (!sessions.length) return null;
+  const gib = (bytes: number) => `${(bytes / 2 ** 30).toFixed(1)} GiB`;
+  return <section className="hosts-section"><h2>Session usage</h2>
+    {overloaded(sessions, now).map(session => <p key={session.session} className="notice danger" role="alert" data-overload={session.session}>Overload: {overloadAlarm(session, now)}</p>)}
+    <table className="sessions-table hosts" aria-label="Session usage" data-session-usage>
+      <thead><tr><th scope="col">Session</th><th scope="col">CPU</th><th scope="col">Memory</th></tr></thead>
+      <tbody>{sessions.map(session => <tr key={session.session} data-session-usage-row={session.session}>
+        <th scope="row" data-label="Session">{session.session}</th>
+        <td data-label="CPU">{session.cpu === null ? '—' : session.cpu.toFixed(1)} cores <span className="muted">share {Number(session.cpuShare.toFixed(1))}</span></td>
+        <td data-label="Memory">{gib(session.memory)} <span className="muted">share {gib(session.memoryShare)}</span></td>
+      </tr>)}</tbody>
+    </table></section>;
 }
 
 function ProjectMemorySection({ memory }: { memory?: any }) {
@@ -267,6 +290,7 @@ export default function WorkersPage({ work, observedAt, setSelected, setView, to
       {cpuFigures ? <span className="host-cpu" data-host-cpu>{cpuFigures}</span> : null}</PageHeader>
     {view.running.length ? table(view.running, 'Agent sessions') : <EmptyState title="No agent session is open.">Agents start here when the loop hands them an item.</EmptyState>}
     <p className="muted workers-note">Building means an agent is writing the change; Rework, that it is making the requested changes; In review, someone else judges it; Proving runs the proofs; the Master runs the loop. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes reads Not seen, never as live.</p>
+    <SessionUsage sessions={(status?.sessions ?? []) as SessionUsageRow[]} now={now}/>
     <Hosts hosts={status?.hosts ?? []}/>
     <ProjectMemorySection memory={status?.projectMemory}/>
     {/* A watched run that ends moves here: the section opens to it, so its panel stays in view. */}

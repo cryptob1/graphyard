@@ -124,7 +124,7 @@ test('unit:worktree-failure-names-git-error — a failing git worktree add repor
       // The real worktree command, run with exactly the streams the launcher asked for.
       return defaultChildRun(command, args.slice(0, 4), { cwd: options?.cwd, env: plane.env, stdout: options?.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options?.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' });
     }).then(() => null, error => error as Error);
-    assert.match(failure!.message, /^Worker launch failed: the worktree for GY-7 epoch 3 could not be created: Git worktree creation failed: .*fatal: '.*GY-7-3' already exists/);
+    assert.match(failure!.message, /^Worker launch failed: the worktree for GY-7 epoch 3 could not be created \(CLI .*bin\/graphyard\.mjs\): Git worktree creation failed: .*fatal: '.*GY-7-3' already exists/);
     assert.deepEqual(released, ['3'], 'the claimed epoch is released');
 
     // The loop records that failure with git's words in it.

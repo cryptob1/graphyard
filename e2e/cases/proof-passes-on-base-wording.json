@@ -1,0 +1,13 @@
+{
+  "id": "proof-passes-on-base-wording",
+  "title": "A proof that already passes on the base tip is refused in plain words",
+  "description": "A feature whose bound case passes on the base tip is refused saying the proof already passes before the change and naming the case file to change; the item page's 'Sent back because' line and the next worker's rework brief carry those words.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "item page and rework brief show the plain refusal",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/proof-passes-on-base-wording.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

@@ -40,7 +40,9 @@
     },
     {
       "kind": "browser",
+      "name": "open the delivered row's item page — its button, not the page header's latest-shipped line that names it first",
       "action": "click",
+      "role": "button",
       "text": "E2E case done-item-gates-clean run {{run}}",
       "exact": false
     },

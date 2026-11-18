@@ -1,0 +1,3 @@
+#!/bin/sh
+# Graphyard host heavy-job wrapper (GY-612, GY-3290): see bin/graphyard-verify.mjs.
+exec node "$(dirname "$0")/../graphyard-verify.mjs" npm "$@"

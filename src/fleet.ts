@@ -1,3 +1,5 @@
+import { detectLoggedOut, runtimeResetTime } from './master/runtime-prompt.js';
+import { foldObservations } from './model/registry-sessions.js';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { access, readdir, realpath, stat } from 'node:fs/promises';
@@ -14,7 +16,8 @@ import { masterConfinementVariable } from './master/confinement.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, roleLimit, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, deriveAccountPlan, fleetRoles, liveSessions, roleLimit, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { hostAccountCheck, recordHostAccountCheck, clearEndedHostAccountSessions, clearHostAccountSession, hostAccountSessions, registerHostAccountSession } from './host-accounts.js';
 export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
 
 /**
@@ -26,7 +29,7 @@ export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
  * actions beyond the probe's own short cache, so a registry change takes effect on the next
  * action with no restart and no file edit. Every role must be defined before it can launch.
  */
-export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run'>>;
+export type FleetConfig = Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId' | 'run' | 'repository'>>;
 export interface FleetProbe extends EnvironmentProbe { work?: string; /** Which runtimes a worker is tried on first (GY-1746). */ prefer?: 'fast' | 'strong'; /** Accounts this dispatch already failed to start a session on. */ exclude?: string[]; principal?: string; /** The proof group a producer launch answers; one live session per group, not per item. */ group?: string; /** Replaces the HTTP client, for executors embedded beside the control plane and for tests. */ registry?: FleetClient;
   /** The runtime sessions Herdr lists on this host right now: a registry session whose runtime session is gone does not count toward its role (GY-190). */
   runtime?: RuntimeInventory;
@@ -38,7 +41,7 @@ export interface RuntimeInventory { agents: { name?: string | null }[]; availabl
 /** The three calls an executor makes. */
 export interface FleetClient {
   document(): Promise<AgentRegistry>;
-  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; prefer?: 'fast' | 'strong'; exclude?: string[]; observations: { account: string; quota: QuotaObservation; smoke?: SmokeObservation }[] }): Promise<FleetSelection>;
+  select(request: { role: FleetRoleName; host: string; work: string | null; group: string | null; principal: string | null; prefer?: 'fast' | 'strong'; exclude?: string[]; observations: { account: string; quota: QuotaObservation; smoke?: SmokeObservation }[]; /** Live sessions other installs on this host hold on its accounts (GY-3333). */ hostSessions?: { account: string; install: string; at: string }[] }): Promise<FleetSelection>;
   /** `outcome` is how a headless run on the session ended: with a result or without one (GY-446). */
   end(session: string, reason: string, outcome?: RunOutcome): Promise<void>;
   /** Report what the executor observed of its own host's accounts without asking for a session, as a hold is seen (GY-1573). */
@@ -110,11 +113,15 @@ export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & 
 export function httpFleetClient(config: Required<Pick<FleetConfig, 'url'>> & Pick<FleetConfig, 'credentialFile'>, fetcher: typeof fetch = fetch, timeoutMs = fleetRequestTimeoutMs): FleetClient {
   const call = (path: string, body?: unknown) => fleetRequest(config, path, { body, fetch: fetcher, timeoutMs });
   return { document: () => call('agent-registry/document'), select: request => call('agent-registry/select', request).catch(error => {
-    // A control plane served before this coordinator rejects the fields it does not know (GY-1746); the selection is asked again in the older form.
-    if (!(request.prefer || request.exclude?.length) || !/answered 400/.test(error instanceof Error ? error.message : '')) throw error;
-    const { prefer: _prefer, exclude: _exclude, ...older } = request;
+    // A control plane served before this coordinator rejects the fields it does not know (GY-1746, GY-3333); the selection is asked again in the older form.
+    if (!(request.prefer || request.exclude?.length || request.hostSessions?.length) || !/answered 400/.test(error instanceof Error ? error.message : '')) throw error;
+    const { prefer: _prefer, exclude: _exclude, hostSessions: _host, ...older } = request;
     return call('agent-registry/select', older);
-  }), end: async (session, reason, outcome) => { await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) }); },
+  }), end: async (session, reason, outcome) => {
+    // GY-3333: a registry session this executor ends frees the host-level record its launch took.
+    clearHostAccountSession(session);
+    await call(`agent-registry/sessions/${session}/end`, { reason, ...(outcome ? { outcome } : {}) });
+  },
     observe: request => call('agent-registry/observe', request) };
 }
 
@@ -152,13 +159,10 @@ const builtinProbe = (runtime: FleetRuntime): EnvironmentKind | null =>
  * read a login and a quota from, the contract's login file for any other runtime, and nothing
  * (unknown, which is launchable) when the account names no home.
  */
-export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: EnvironmentProbe = {}, allAccounts: readonly FleetAccount[] = [account], model = account.model): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
+async function readAccount(account: FleetAccount, runtime: FleetRuntime, probe: EnvironmentProbe = {}, allAccounts: readonly FleetAccount[] = [account], model = account.model): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
   const home = account.credential.home, kind = builtinProbe(runtime);
   const unknown = { quota: { loggedIn: null, state: 'unknown' as const, usage: [], resetsAt: null, reason: null }, health: null };
   if (!home) return unknown;
-  // GY-3414: a confined session (the master's) masks every other account's home with an empty,
-  // unreadable tmpfs, so what it reads there is unknown, never a logout.
-  if (await readdir(home).then(entries => !entries.length && !!process.env[masterConfinementVariable], (error: NodeJS.ErrnoException) => error.code === 'EACCES')) return unknown;
   if (kind) {
     const planInfo = deriveAccountPlan(account, allAccounts);
     // A Pi account is read through the OpenCode probe's files only: `opencode auth list` knows nothing of Pi's login.
@@ -176,17 +180,62 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
   return { health: null, quota: { loggedIn, state: 'unknown', usage: [], resetsAt: null, reason: loggedIn ? null : `${account.name} is not logged in: ${file} does not exist${runtime.launch.login ? `; log in with: ${runtime.launch.login.replaceAll('{home}', home)}` : ''}` } };
 }
 
-/** The smoke test running for each account in this process, keyed by control plane, host, account and registry revision. */
-const smokesInFlight = new Map<string, Promise<SmokeResult>>();
+/** One request per home in flight, shared across roles and registry revisions. */
+const checksInFlight = new Map<string, Promise<QuotaObservation>>();
+export const accountCheckIntervalMs = 30 * 60_000;
+export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => account.enabled &&
+  (account.quota.source === 'operator' || account.quota.state === 'exhausted' || !!account.quota.session && !account.quota.since || account.quota.loggedIn === false || smokeTestedKinds.includes(runtime.launch.kind) && (!account.smoke || smokeFailureDue(account, now)));
 
-/**
- * Whether an account is smoke-tested before a session is chosen on it: an account of a headless
- * runtime (Pi, the narrow roles' runner) or of agy, whose interactive session waits silently at a
- * missing login (GY-3108), with no result since it last changed, or whose last test failed
- * `smokeRetestMs` ago or more (GY-515). Any other interactive runtime's session is its own check.
- */
-export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => smokeTestedKinds.includes(runtime.launch.kind) && account.enabled
-  && (!account.smoke || smokeFailureDue(account, now));
+/** Run a tiny request with precisely this account's launch login; narratives are never evidence. */
+export async function checkAccountLive(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, model: string | null = null): Promise<QuotaObservation> {
+  const home = account.credential.home, key = home ?? `${account.credential.host}/${account.name}`;
+  const pending = checksInFlight.get(key);
+  if (pending) return pending;
+  const running = (async () => {
+    const now = probe.now?.() ?? Date.now();
+    const target: FleetLaunchAccount = { name: account.name, kind: runtime.launch.kind, home, key: account.credential.key,
+      fleet: { runtime: runtime.name, contract: runtime.launch, model: account.model, modelId: model, session: 'smoke', reason: 'live account check' } };
+    let result: SmokeResult;
+    try { result = await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs })))(target); }
+    catch (error) { result = { ok: false, error: String(error) }; }
+    const reason = result.ok ? null : (result.error || 'The live request failed').replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim().slice(0, 500);
+    const reset = reason ? runtimeResetTime(reason, runtime.launch.kind, now) : null;
+    const nextCheck = reset && Date.parse(reset) > now ? reset : new Date(now + accountCheckIntervalMs).toISOString();
+    const quota: QuotaObservation = { loggedIn: result.ok || !detectLoggedOut(reason ?? ''), state: result.ok ? 'available' : 'exhausted', usage: [], since: new Date(now).toISOString(),
+      resetsAt: result.ok ? null : nextCheck, reason, ...(result.ok ? {} : { session: reset && Date.parse(reset) > now ? 'named' as const : 'guessed' as const }) };
+    if (home) recordHostAccountCheck(home, { key: account.credential.key ?? null, at: new Date(now).toISOString(), nextCheck, quota });
+    return quota;
+  })().finally(() => checksInFlight.delete(key));
+  checksInFlight.set(key, running);
+  return running;
+}
+
+export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, allAccounts: readonly FleetAccount[] = [account], model?: string): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
+  const now = probe.now?.() ?? Date.now(), saved = account.credential.home ? hostAccountCheck(account.credential.home) : null;
+  const cached = saved && JSON.stringify(saved.key ?? null) === JSON.stringify(account.credential.key ?? null) ? saved : null;
+  // Preserve the confined master's unreadable-home rule: only the host executor can test these logins.
+  const home = account.credential.home;
+  if (home && await readdir(home).then(entries => !entries.length && !!process.env[masterConfinementVariable], (error: NodeJS.ErrnoException) => error.code === 'EACCES'))
+    return { quota: cached?.quota ?? { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
+
+  if (!home && account.quota.since && (account.quota.state === 'available' ? Date.parse(account.quota.since) + accountCheckIntervalMs > now : account.quota.resetsAt && Date.parse(account.quota.resetsAt) > now)) {
+    const { source: _source, observedAt: _at, observedBy: _by, ...quota } = account.quota;
+    return { quota, health: null };
+  }
+
+  // An operator or session signal after the last request asks for another request immediately.
+  const signalled = (account.quota.source === 'operator' || !!account.quota.session && !account.quota.since)
+    && (!cached || Date.parse(account.quota.observedAt ?? '') > Date.parse(cached.at));
+  if (cached && !signalled && Date.parse(cached.nextCheck) > now) {
+    if (cached.quota.state !== 'available') return { quota: cached.quota, health: null };
+    const reading = await readAccount(account, runtime, probe, allAccounts, model);
+    return { ...reading, quota: { ...cached.quota, usage: reading.quota.usage, identity: reading.quota.identity } };
+  }
+  const reading = await readAccount(account, runtime, { ...probe, ...(account.quota.loggedIn === false ? { cacheMs: 0 } : {}) }, allAccounts, model);
+  if (cached || signalled || needsSmoke(account, runtime, now) || reading.quota.state === 'exhausted')
+    return { ...reading, quota: await checkAccountLive(account, runtime, probe, model) };
+  return reading;
+}
 
 /**
  * The session a launch runs on, chosen by the control plane — or null when the registry does not
@@ -205,65 +254,59 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     return runtime ? { account: account.name, ...await observeAccount(account, runtime, { ...probe, ceilingPercent: ceiling }, registry.accounts, registry.models.find(model => model.name === account.model)?.id ?? undefined) } : null;
   }));
   const observations: { account: string; quota: QuotaObservation; health: EnvironmentHealth | null; smoke?: SmokeObservation }[] = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
-  // An account is smoke-tested before it is first chosen and again after any registry change to it
-  // (the change clears its result), so a login that cannot answer is ineligible with the runtime's
-  // own error before any session launches on it (GY-446).
-  await Promise.all(local.map(async account => {
-    const runtime = registry.runtimes.find(entry => entry.name === account.runtime), model = registry.models.find(entry => entry.name === account.model);
-    const observation = observations.find(entry => entry.account === account.name);
-    if (role === 'reviewer' || !runtime || !model || !needsSmoke(account, runtime, probe.now?.() ?? Date.now()) || observation?.quota.loggedIn === false) return;
-    const target: FleetLaunchAccount = { name: account.name, kind: runtime.launch.kind, home: account.credential.home, key: account.credential.key ?? null,
-      fleet: { runtime: runtime.name, contract: runtime.launch, model: model.name, modelId: model.id, session: 'smoke', reason: 'smoke test', role, revision: registry.revision } };
-    // Concurrent launches that read the registry before the first result is folded share one smoke
-    // test of the account, and report the same result, rather than each prompting it (GY-463).
-    const flight = `${config.url ?? ''}\u0000${host}\u0000${account.name}\u0000${registry.revision}`;
-    let running = smokesInFlight.get(flight);
-    if (!running) {
-      running = (async (): Promise<SmokeResult> => {
-        try { return await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs })))(target); }
-        catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
-      })().finally(() => smokesInFlight.delete(flight));
-      smokesInFlight.set(flight, running);
-    }
-    const result = await running;
-    const smoke: SmokeObservation = { result: result.ok ? 'pass' : 'fail', reason: result.ok ? null : (result.error?.replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim() || 'the smoke test failed without an error').slice(0, 500) };
-    if (observation) observation.smoke = smoke;
-    else observations.push({ account: account.name, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null, smoke });
-  }));
   const now = probe.now?.() ?? Date.now();
-  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, ...probe.prefer ? { prefer: probe.prefer } : {}, ...probe.exclude?.length ? { exclude: probe.exclude } : {}, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(smoke ? { smoke } : {}) })) });
+  // Live sessions on a login home count across every install on this host.
+  const install = config.repository ?? config.url ?? host;
+  // A session the control plane ended on its own side (a sweep, a removed account) frees its record here too.
+  clearEndedHostAccountSessions(install, new Set(liveSessions(registry).map(session => session.id)));
+  const hostSessions: { account: string; install: string; at: string }[] = [];
+  for (const observation of observations) {
+    const home = local.find(account => account.name === observation.account)?.credential.home;
+    if (!home) continue;
+    try {
+      for (const session of await hostAccountSessions(home)) if (session.install !== install) hostSessions.push({ account: observation.account, install: session.install, at: session.at });
+    } catch { /* an unreadable record holds nothing */ }
+  }
+  const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, ...probe.prefer ? { prefer: probe.prefer } : {}, ...probe.exclude?.length ? { exclude: probe.exclude } : {}, hostSessions, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(quota.since && quota.state === 'available' && local.find(entry => entry.name === account)?.smoke?.result !== 'pass' ? { smoke: { result: 'pass' as const, reason: null } } : smoke ? { smoke } : {}) })) });
   const at = new Date(now).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
   if (!chosen.selected || !chosen.account || !chosen.runtime || !chosen.model || !chosen.session)
     throw Object.assign(new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile.name}: ${chosen.reason}`, skipped), roleAtCapacity(chosen.reason) ? { roleAtCapacity: chosen.reason } : {});
+  // GY-3333: this install's session on the account is registered beside the login home for as long
+  // as it lives — every other install on the host counts it — and cleared when the session ends.
+  // The kernel drops it if this process dies first, so a killed launcher leaks nothing.
+  const record = chosen.account.credential.home
+    ? await registerHostAccountSession(chosen.session.id, chosen.account.credential.home, { install, at, role, work: probe.work ?? null, account: chosen.account.name })
+    : null;
   // `release` ends the selected session and says whether the registry was told: a caller that
   // cannot end it keeps its id, the only way to free the role's slot later.
   const policy = chosen.policy ?? rolePolicy(registry.roles.find(entry => entry.name === role));
   const account: FleetLaunchAccount = { name: chosen.account.name, kind: chosen.runtime.launch.kind, home: chosen.account.credential.home, key: chosen.account.credential.key ?? null,
     fleet: { runtime: chosen.runtime.name, contract: chosen.runtime.launch, model: chosen.model.name, modelId: chosen.model.id, session: chosen.session.id, reason: chosen.reason, role, policy, revision: chosen.revision } };
-  return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string, outcome?: RunOutcome) => client.end(chosen.session!.id, reason, outcome).then(() => true, () => false) };
+  return { account, health: observations.find(entry => entry.account === chosen.account!.name)?.health ?? null, skipped, selection: chosen, release: (reason: string, outcome?: RunOutcome) => { record?.clear(); return client.end(chosen.session!.id, reason, outcome).then(() => true, () => false); } };
 }
 
-/**
- * Whether a role can launch from the registry right now, without choosing anything: what the
- * durable loop and `master status` read before they dispatch. Null when the registry does not
- * decide the role. `running` counts the settled document the control plane serves (GY-974): a
- * session whose lease or request has gone is already ended there, so it never holds a slot.
- * A Pi account whose only fault is a smoke failure that has aged past
- * `smokeRetestMs` reads healthy here (GY-515): the launch this admits is what runs the retest,
- * and the choice it asks for still refuses until the fresh result is folded.
- */
+/** Refresh due account checks before judging capacity, including accounts a previous hold
+ * would otherwise prevent from ever reaching selection. No session is created by this read. */
 export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, probe: FleetProbe = {}) {
   let fleet: FleetRead;
   try { fleet = await readFleet(config, role, probe); } catch (error) { return { available: false, reason: error instanceof Error ? error.message : 'The agent registry is unreachable', accounts: [], running: null, failover: null }; }
   if (!fleet.managed) return null;
   const host = config.hostId ?? null, now = probe.now?.() ?? Date.now(), definition = fleet.registry.roles.find(entry => entry.name === role)!;
+  const observations = await Promise.all(fleet.registry.accounts.filter(account => account.enabled && account.credential.host === host).flatMap(account => {
+    const runtime = fleet.registry.runtimes.find(runtime => runtime.name === account.runtime);
+    if (!runtime || !needsSmoke(account, runtime, now) && !(account.credential.home && hostAccountCheck(account.credential.home))) return [];
+    return [(async () => ({ account: account.name, ...await observeAccount(account, runtime, probe, fleet.registry.accounts, fleet.registry.models.find(model => model.name === account.model)?.id ?? undefined) }))()];
+  }));
+  if (observations.length && fleet.client.observe && host) {
+    await fleet.client.observe({ host, observations: observations.map(({ account, quota }) => ({ account, quota })) });
+    foldObservations(fleet.registry, { host, observations }, { actor: host, at: new Date(now).toISOString() });
+  }
+
   const accounts = definition.accounts.map(name => {
     const account = fleet.registry.accounts.find(entry => entry.name === name);
     const reason = account ? accountIneligibility(fleet.registry, account, now, host, { expiredSmokeRetestable: true }) ?? roleRuntimeRefusal(fleet.registry, account, role) : `${name} is not a registered account`;
-    // A twin on a spent login (GY-1573) waits for that login's reset, which is the twin's, not its own last read.
-    const twin = account && reason ? [exhaustedTwin(fleet.registry, account, now)].find(other => other && reason.includes(`same provider login as ${other.name},`)) ?? null : null;
-    return { environment: name, healthy: !reason, reason, quota: twin ? 'exhausted' : account?.quota.state ?? 'unknown', resetsAt: twin ? twin.quota.resetsAt : account?.quota.resetsAt ?? null };
+    return { environment: name, healthy: !reason, reason, quota: account?.quota.state ?? 'unknown', resetsAt: account?.quota.resetsAt ?? null };
   });
   const running = liveSessions(fleet.registry).filter(session => session.role === role).length;
   const full = running >= roleLimit(definition) ? `role ${role} is at its concurrency limit (${running} of ${roleLimit(definition)} live)` : null;

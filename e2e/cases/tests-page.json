@@ -1,7 +1,7 @@
 {
   "id": "tests-page",
   "title": "The Tests page lists the test cases and their history",
-  "description": "GET /api/tests answers every case with its window of recent runs, and the dashboard's Tests page renders after sign-in. A case linked by many items shows the count, the latest three and an 'and N more items' summary.",
+  "description": "GET /api/tests answers every case with its window of recent runs, and the dashboard's Tests page renders after sign-in. In its By item and criterion view a case linked by many items shows the count, the latest three and an 'and N more items' summary.",
   "tags": [
     "dashboard",
     "tests"
@@ -199,8 +199,14 @@
     {
       "kind": "browser",
       "action": "expectText",
-      "text": "its latest trusted result, and its history",
+      "text": "its latest trusted result. A result is recorded only from a trusted run",
       "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "By item and criterion"
     },
     {
       "kind": "browser",

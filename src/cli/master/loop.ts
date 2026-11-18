@@ -6,12 +6,13 @@ import { daemonEffects, retriedSnapshot } from '../../daemon/effects.js';
 import { readDaemonState } from '../../daemon/state.js';
 import { runDaemon } from '../../daemon/run.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
-import { encodeLoopCheckoutTrust, encodeLoopCpu, encodeLoopHosts, loopHostsHeader, encodeLoopPanes, encodeLoopStepFailure, loopAlertsHeader, loopCheckoutTrustHeader, loopCpuHeader, loopFetchRefusalHeader, loopStepFailureHeader, loopSupervisionHeader, loopWorkerGrowthHeader, loopPanesHeader, loopPresenceHeader } from '../../model/loop-presence.js';
+import { encodeLoopCheckoutTrust, encodeLoopCpu, encodeLoopHosts, loopHostsHeader, encodeLoopSessions, loopSessionsHeader, encodeLoopPanes, encodeLoopStepFailure, loopAlertsHeader, loopCheckoutTrustHeader, loopCpuHeader, loopFetchRefusalHeader, loopStallAlarmHeader, loopStepFailureHeader, loopSupervisionHeader, loopWorkerGrowthHeader, loopPanesHeader, loopPresenceHeader } from '../../model/loop-presence.js';
 import { cpuWaiting } from '../../daemon/cpu-pressure.js';
 import { encodeLoopWhere, loopWhereHeader } from '../../model/where-things-run.js';
 import { loopWhereReport } from '../../master/where.js';
 import { checkoutTrustKey, standingStepFailures, workerGrowthKey } from '../../daemon/cycle.js';
 import { fetchRefusalKey } from '../../daemon/cycle-batch-gate.js';
+import { stallAlarmKey } from '../../daemon/stall-alarm.js';
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { unhandled, type MasterSession } from './session.js';
 import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
@@ -23,6 +24,7 @@ import { installIdFor } from '../../install/types.js';
 import { terminalSessionReader } from '../../master/terminal-session.js';
 import { bridgeTerminals } from '../../master/terminal-bridge.js';
 import { alertMinutesOf } from '../../daemon/yard-alerts.js';
+import { joinHostHeavyBudget } from '../../master/verification-slots.js';
 
 /** The Herdr server the loop names on each read (GY-1511): the instance its herdr calls target, its host, whether it last answered, and the master's pane (GY-3211). */
 export const loopHerdrReport = (host: string | null, master: string | null = null) => encodeLoopPanes({ configHome: herdrTarget()?.configHome ?? null, session: herdrTarget()?.session ?? null, host, running: herdrServerSeen(), master });
@@ -43,6 +45,8 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
       if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
       assertProtocol(coordinator);
     }
+    // GY-3290: everything heavy this loop runs or launches shares the host's budget with every other Graphyard project here.
+    joinHostHeavyBudget(master.repository);
     const state = await readDaemonState(root, master);
     // The deploy unit pins new tips while this loop still runs from its own pin; it keeps the one recorded here.
     try { recordRunningPin(installDirectory(installIdFor(master.repository))); } catch { /* no install directory: no pin to keep */ }
@@ -62,7 +66,7 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // GY-3348: and names the host's CPU ('some avg60' and steal percent), for the Workers page's two figures; GY-3416: and its launches-waiting word.
     const where = await loopWhereReport(root, master);
     const stepFailureLine = (failure: Parameters<typeof encodeLoopStepFailure>[0] | undefined) => failure ? encodeLoopStepFailure(failure) : 'off';
-    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', [loopWorkerGrowthHeader]: state.actions[workerGrowthKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[workerGrowthKey]!.detail) : 'off', [loopStepFailureHeader]: stepFailureLine(standingStepFailures(state)[0]), [loopFetchRefusalHeader]: state.actions[fetchRefusalKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[fetchRefusalKey]!.detail) : 'off', ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}), [loopCpuHeader]: state.cpuPressure ? encodeLoopCpu({ avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal, celsius: state.cpuPressure.celsius, testBudget: state.cpuPressure.testBudget, trialCap: state.cpuPressure.trialCap, waiting: cpuWaiting(state) !== null }) : 'off', [loopHostsHeader]: state.hosts.length ? encodeLoopHosts(state.hosts) : 'off' });
+    const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId, state.master.pane), [loopAlertsHeader]: current().run.alertUrl ? String(alertMinutesOf(current().run)) : 'off', [loopCheckoutTrustHeader]: state.actions[checkoutTrustKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[checkoutTrustKey]!.detail) : 'off', [loopWorkerGrowthHeader]: state.actions[workerGrowthKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[workerGrowthKey]!.detail) : 'off', [loopStepFailureHeader]: stepFailureLine(standingStepFailures(state)[0]), [loopFetchRefusalHeader]: state.actions[fetchRefusalKey]?.state === 'failed' ? encodeLoopCheckoutTrust(state.actions[fetchRefusalKey]!.detail) : 'off', [loopStallAlarmHeader]: state.actions[stallAlarmKey] ? encodeLoopCheckoutTrust(state.actions[stallAlarmKey]!.detail) : 'off', ...(where ? { [loopWhereHeader]: encodeLoopWhere(where) } : {}), [loopCpuHeader]: state.cpuPressure ? encodeLoopCpu({ avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal, celsius: state.cpuPressure.celsius, testBudget: state.cpuPressure.testBudget, trialCap: state.cpuPressure.trialCap, waiting: cpuWaiting(state) !== null }) : 'off', [loopHostsHeader]: state.hosts.length ? encodeLoopHosts(state.hosts) : 'off', [loopSessionsHeader]: state.sessions.length ? encodeLoopSessions(state.sessions) : 'off' });
     const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), sessionHistory: async work => (await masterApi(`work/${work.id}`, masterToken)).sessions ?? [], mutate: masterMutation,
       messages: async () => (await masterApi('master/messages', masterToken)).messages ?? [] });
     // GY-1603: a stopped loop's process exits within its unit's stop bound, whatever handle is left open.

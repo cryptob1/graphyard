@@ -70,7 +70,7 @@ function HumanChecksPanel({ item, token }: { item: Work; token: string }) {
   return <section className="panel" aria-label="Real-world checks"><h2>Real-world checks</h2>
     {checks.map(check => <div className="criterion" key={check.id}><strong>{check.proof} {check.answer ? (check.answer.outcome === 'pass' ? 'passed' : 'failed') : 'waiting for a person'} for {check.sha.slice(0, 8)}</strong>
       <p>{check.ask}</p>
-      {check.answer && <p>{check.answer.note} <small className="muted">{check.answer.by}</small></p>}
+      {check.answer && <p>{check.answer.note} <small className="muted">{check.answer.ownerSaid ? `relayed by ${check.answer.by} from the owner: "${check.answer.ownerSaid}"` : check.answer.by}</small></p>}
       {check.answer?.photo && <ProductScreenshot item={item} name={check.answer.photo} token={token}/>}</div>)}
   </section>;
 }

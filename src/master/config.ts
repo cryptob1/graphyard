@@ -18,6 +18,8 @@ import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr } fr
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { migrateHerdr } from '../herdr-migration.js';
 import { controlPlaneAttention } from './attention.js';
+import { defaultMergeWriterParallel } from './merge-writer-settings.js';
+import { trialHotCelsius } from '../merge-writer/trial-load.js';
 
 /** The config names a CLI launcher no launch could run — an absolute path this host does not hold (GY-2995). Every session the config would start is refused before it starts, and the launcher and the loop name the fix as configuration attention instead of relaunching. */
 export class LauncherUnavailableError extends Error {}
@@ -305,26 +307,39 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
  * identity paths, the environment inventory — is onboarding's or the operator's: no CLI path
  * writes it, and the master's harness grants no direct edit of master.json, so re-pointing a credential can never be a routine master action.
  */
-export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'acknowledgementSeconds', 'inactivityMinutes', 'quotaCeilingPercent', 'masterSessionMinutes', 'masterHeartbeatMinutes', 'promoteEveryMinutes', 'deploymentReuseMinutes'] as const;
-const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'quotaCeilingPercent', 'masterSessionMinutes', 'masterHeartbeatMinutes', 'promoteEveryMinutes', 'deploymentReuseMinutes'] as const;
+export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'acknowledgementSeconds', 'inactivityMinutes', 'quotaCeilingPercent', 'masterSessionMinutes', 'masterHeartbeatMinutes', 'promoteEveryMinutes', 'deploymentReuseMinutes', 'trialCap', 'launchHotCelsius'] as const;
+const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'quotaCeilingPercent', 'masterSessionMinutes', 'masterHeartbeatMinutes', 'promoteEveryMinutes', 'deploymentReuseMinutes', 'trialCap', 'launchHotCelsius'] as const;
+/** GY-3446: the temporary limits, each set with `until=TIME`; `hostHeavyJobs` is the host-wide strict cap every install here shares. */
+const temporaryFields = ['trialCap', 'launchHotCelsius', 'hostHeavyJobs'] as const;
+type TemporaryLimit = { value: number; until: string } | null;
 export interface MasterOwnedSettings {
   intervalSeconds?: number | null; dispatchIntervalSeconds?: number | null; proofWorkflow?: string | null; smokeWorkflow?: string | null;
   deploymentUrl?: string | null; deploymentShaField?: string | null; productionEnvironment?: string | null; reviewerProfile?: string | null; producerTimeoutMinutes?: number | null; acknowledgementSeconds?: number | null; inactivityMinutes?: number | null; quotaCeilingPercent?: number | null;
   masterSessionMinutes?: number | null; masterHeartbeatMinutes?: number | null; promoteEveryMinutes?: number | null; deploymentReuseMinutes?: number | null;
+  trialCap?: TemporaryLimit; launchHotCelsius?: TemporaryLimit; hostHeavyJobs?: TemporaryLimit;
   accounts?: { profile: string; accounts: string[] }[];
 }
 
 /** The CLI's `master config FIELD=VALUE…` form: owned run fields, plus `accounts:PROFILE=a,b` (an empty value clears the pinned order). */
-export function masterSettingsFromArgs(args: string[]): MasterOwnedSettings {
+export function masterSettingsFromArgs(args: string[], now = Date.now()): MasterOwnedSettings {
   const settings: MasterOwnedSettings = {}, accounts: NonNullable<MasterOwnedSettings['accounts']> = [];
+  const until = args.find(arg => arg.startsWith('until='))?.slice('until='.length).trim();
   for (const arg of args) {
+    if (arg.startsWith('until=')) continue;
     const assignment = /^(accounts:[a-zA-Z0-9][a-zA-Z0-9._-]*|[a-zA-Z][a-zA-Z0-9]*)=(.*)$/.exec(arg);
     if (!assignment) throw new Error(`master config takes FIELD=VALUE assignments; "${arg}" is not one`);
     const [, field, raw] = assignment, value = raw.trim();
     if (field.startsWith('accounts:')) { accounts.push({ profile: field.slice('accounts:'.length), accounts: value ? value.split(',').map(name => name.trim()).filter(Boolean) : [] }); continue; }
-    if (!(masterOwnedRunFields as readonly string[]).includes(field)) throw new Error(`master config changes only what the master owns (${masterOwnedRunFields.join(', ')} and accounts:PROFILE), never ${field}`);
+    if ((temporaryFields as readonly string[]).includes(field)) {
+      if (value !== '' && value !== 'null' && !/^[0-9]+$/.test(value)) throw new Error(`${field} takes a whole number`);
+      if (value !== '' && value !== 'null' && !(Date.parse(until ?? '') > now)) throw new Error(`${field} is temporary: add until=TIME, a future ISO time such as 2026-11-18T16:00:00Z, when it reverts to its default`);
+      (settings as Record<string, unknown>)[field] = value === '' || value === 'null' ? null : { value: Number(value), until: new Date(Date.parse(until!)).toISOString() };
+      continue;
+    }
+    if (!(masterOwnedRunFields as readonly string[]).includes(field)) throw new Error(`master config changes only what the master owns (${masterOwnedRunFields.join(', ')}, hostHeavyJobs and accounts:PROFILE), never ${field}`);
     (settings as Record<string, unknown>)[field] = value === '' || value === 'null' ? null : /^[0-9]+$/.test(value) ? Number(value) : value;
   }
+  if (until !== undefined && !temporaryFields.some(field => settings[field])) throw new Error('until= sets when trialCap, launchHotCelsius or hostHeavyJobs expire; give one of them');
   return accounts.length ? { ...settings, accounts } : settings;
 }
 
@@ -349,6 +364,10 @@ export async function saveMasterSettings(root: string, changes: MasterOwnedSetti
     } else run[field] = value;
     changed.push(field);
   }
+  // GY-3446: a temporary limit only tightens: at most the merge writer's own trial count, at most the default heat limit (the schema's).
+  const trials = config.run.mergeWriter?.parallel ?? defaultMergeWriterParallel;
+  if (changes.trialCap && changes.trialCap.value > trials) throw new Error(`trialCap only lowers the trial cap: give a whole number from 1 to ${trials}, this install's default`);
+  if (changes.launchHotCelsius && changes.launchHotCelsius.value > trialHotCelsius) throw new Error(`launchHotCelsius only lowers the heat limit: give at most ${trialHotCelsius}, the default`);
   if (changes.reviewerProfile && !config.reviewers.some(profile => profile.name === changes.reviewerProfile)) throw new Error(`No reviewer profile named ${changes.reviewerProfile}; the reviewer profile is the name of a configured reviewer`);
   for (const change of changes.accounts ?? []) {
     const missing = change.accounts.filter(name => !(config.environments ?? []).some(environment => environment.name === name));
@@ -461,7 +480,8 @@ export async function reresolveHerdrWorkspace(root: string, config: Pick<MasterC
   return switched;
 }
 export type WorkspaceSwitch = NonNullable<Awaited<ReturnType<typeof reresolveHerdrWorkspace>>>;
-export interface ConfigReload { config: MasterConfig; changed: string[]; refused: string | null; at: string; workspace?: WorkspaceSwitch | null }
+/** `cliPath`: the CLI master.json now names when it differs from the one the loop is bound to; the loop restarts onto it once it is the serving release (GY-3454). */
+export interface ConfigReload { config: MasterConfig; changed: string[]; refused: string | null; at: string; workspace?: WorkspaceSwitch | null; cliPath?: string }
 export function liveMasterConfig(root: string, initial: MasterConfig, load: (root: string) => Promise<MasterConfig> = loadMasterConfig, clock: () => number = Date.now,
   reresolve: (root: string, config: MasterConfig) => Promise<WorkspaceSwitch | null> = reresolveHerdrWorkspace) {
   // A switch a dispatcher reload made waits here for the cycle's reload, which records it.
@@ -477,12 +497,12 @@ export function liveMasterConfig(root: string, initial: MasterConfig, load: (roo
       if (cycle) pending = null;
       // A refused reload keeps every loaded setting, the Herdr scope included: loading applies the
       // file's workspace, so the scope the loop runs under is put back whenever the reload is refused (GY-1441).
-      const keep = (refused: string): ConfigReload => { applyHerdrConfig(live.current); return { config: live.current, changed: [], at, refused, workspace }; };
+      const keep = (refused: string, cliPath?: string): ConfigReload => { applyHerdrConfig(live.current); return { config: live.current, changed: [], at, refused, workspace, ...(cliPath ? { cliPath } : {}) }; };
       let next: MasterConfig;
       try { next = await load(root); }
       catch (error) { return keep(`.graphyard/master.json could not be reloaded (${error instanceof Error ? error.message : String(error)}); the loop keeps the settings it last loaded`); }
       const { changed, bound } = masterConfigChanges(live.current, next);
-      if (bound.length) return keep(`.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change`);
+      if (bound.length) return keep(`.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change`, bound.includes('cliPath') ? next.cliPath : undefined);
       live.current = next;
       applyHerdrConfig(next);
       return { config: next, changed, refused: null, at, workspace };

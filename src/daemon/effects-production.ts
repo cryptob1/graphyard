@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import { workerVerificationPump, moveBranchToHead } from './worker-verification.js';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -19,7 +19,7 @@ import { runDispatchTick } from '../dispatch/tick.js';
 import { launchBoundMs } from '../master/launch-bound.js';
 import { masterProfile, masterSessionEffects } from '../master/master-session.js';
 import { type MasterConfig } from '../master/profiles.js';
-import { agentToken } from '../master/autonomy.js';
+import { agentToken, intentInput } from '../master/autonomy.js';
 import { listHerdrAgents, closeHerdrPane, observeHerdrAgents } from '../master/herdr.js';
 import { readSessionScreen, preservePartialWork } from '../master/launch.js';
 import { checkoutTrustRefusals } from '../harness.js';
@@ -41,6 +41,7 @@ import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
 import { liveRuns } from '../runner/registry.js';
+import { sessionScopes } from '../session-share.js';
 import { runLogTail } from '../headless-session.js';
 import { transcriptRun } from '../model/sessions.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
@@ -53,6 +54,7 @@ import { upstreamFiler } from './control-plane.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
 import { failedRequiredProofs } from '../cli/worker-verification.js';
 import { trialRunsDirectory } from '../merge-writer/trial-run.js';
+import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { graphyardVolumes, reclaimGraphyardLeftovers, reclaimJobLeftovers, stopOrphanTrialContainers, trialContainerMaxAgeMs } from './disk-headroom.js';
 import { dataDirectory } from '../install/worktree-root.js';
 import { durableTemporaryRoot, trialCheckoutRoots } from '../merge-writer/trial.js';
@@ -221,11 +223,16 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
+    // GY-3432: the commit the deploy unit serves, which the stall alarm compares to the loop's own.
+    servingCommit: () => readDeployRecord(deployRecordPath(root))?.tip ?? null,
     // GY-3348: the host's CPU before every launch, and its hottest sensor (GY-3373); each null where unreadable.
     cpuPressure: async () => {
       const read = (path: string) => readFile(path, 'utf8').then(text => text, () => null);
       return { pressure: await read('/proc/pressure/cpu'), stat: await read('/proc/stat'), celsius: await cpuCelsius() };
     },
+    // GY-3438: each session's scope as its cgroup counts it; a headless run is named by the session it holds.
+    sessionScopes: () => sessionScopes(),
+    sessionName: unit => liveRuns().find(entry => entry.run.directory && `graphyard-run-${basename(entry.run.directory)}.scope` === unit)?.name,
     // GY-3407: the read runs beside the cycle, so a host taking its SSH timeout never slows the loop; the cycle takes the latest finished one.
     hostReadings: async previous => {
       hostsReading ??= readHostReadings(previous, { run }).then(readings => { hostsLatest = readings; }, () => {}).finally(() => { hostsReading = null; });
@@ -252,7 +259,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     growWorkers: (config, allowed) => growWorkerPool(root, config, allowed, id => fleetRequest(config as Parameters<typeof fleetRequest>[0], 'worker-identities', { body: { id } })),
     // GY-3225: the checkout's folder-trust refusals (an untrusted checkout carrying repository
     // Claude configuration), read from the registry document and this host's account configs.
-    checkoutTrust: async () => checkoutTrustRefusals(root, await fleetRequest(current() as Parameters<typeof fleetRequest>[0], 'agent-registry/document'), current().hostId),
+    checkoutTrust: registry => checkoutTrustRefusals(root, registry, current().hostId),
     setRuntime: (runtime, reason) => mutate('agent-registry/runtimes', { runtime, reason }, randomUUID()),
     // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick
     // still running past its step's timeout is not started twice. `held` (GY-3348) waits every launch
@@ -273,7 +280,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // GY-2949: the master pane's limit notice holds its account exactly as a worker's holds theirs,
       // so the role's next selection — the launch the same cycle makes — passes the spent account by.
       exhaust: async (account, notice) => {
-        await recordObservedExhaustion(current(), account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null });
+        return recordObservedExhaustion(current(), account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null });
       },
       // The registry session the closed or vanished pane ran under is ended, so the role's one slot frees for the next account; the registry's end is idempotent.
       end: (session, reason) => endRegistrySessionById(current(), session, reason),
@@ -288,7 +295,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return { ...reads,
         ensureTrialImage: () => ensureTrialImage(),
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
-        ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
+        ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey),
+          attest: (work: Work, proof: string, reason: string, idempotencyKey: string) => asOperatorAgent(`work/${work.id}/evidence`, intentInput('attest', work, { proof, reason }), idempotencyKey) } : {}),
         gate: { root, repository: config.repository, previews: (commit: string) => runServedPreviewCases({ root, commit }) },
       };
     },

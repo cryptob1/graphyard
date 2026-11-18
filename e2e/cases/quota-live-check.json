@@ -1,0 +1,9 @@
+{
+  "id": "quota-live-check",
+  "title": "An account is held only while its own live request fails",
+  "description": "Stub every runtime provider and exercise quoted session output, named resets, 30-minute retries, operator marks, shared host results across two installs, and login recovery.",
+  "tags": ["capacity"],
+  "target": "any",
+  "required": true,
+  "steps": [{ "kind": "command", "name": "live account requests", "run": "node --import tsx tests/helpers/run-tests.ts tests/quota-live-check.test.ts", "timeoutSeconds": 600 }]
+}

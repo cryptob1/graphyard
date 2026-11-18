@@ -128,7 +128,7 @@ export interface MasterSessionEffects {
   pendingCauses?: (work: Work[]) => Promise<MasterCause[]>;
   wake?: (target: string, text: string, continuity?: Continuity | null) => Promise<unknown>;
   /** Holds the session's account until a limit notice's reset (GY-2949), the way a worker's notice holds its account. */
-  exhaust?: (account: string, notice: ExhaustionSignal) => Promise<unknown>;
+  exhaust?: (account: string, notice: ExhaustionSignal) => Promise<{ available?: boolean; until?: string; reason?: string; resetsAt?: string | null } | void>;
   /** Ends the agent-registry session a closed or vanished pane ran under, so the role's next account can be selected (GY-2949). */
   end?: (session: string, reason: string) => Promise<unknown>;
   /** The live master-role registry sessions of this host and person, each ended before a launch whether or not the loop's state names it (GY-3091). */

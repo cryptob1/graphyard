@@ -94,6 +94,7 @@ async function configure(entries: { name: string; kind: string; failure?: string
 import fs from 'node:fs';
 const home = process.env.RUNTIME_HOME;
 const args = process.argv.slice(2);
+if (args.includes('Reply with the single word OK.')) { if (${JSON.stringify(entry.failure ?? '')}) { console.error(${JSON.stringify(entry.failure ?? '')}); process.exit(1); } console.log('OK'); process.exit(0); }
 fs.appendFileSync(home + '/starts', '1');
 fs.writeFileSync(home + '/started.json', JSON.stringify({ args, home, namespace: fs.readlinkSync('/proc/self/ns/mnt'), token: process.env.GRAPHYARD_TOKEN ?? null, credential: fs.existsSync(${JSON.stringify((await loadMasterConfig(root)).credentialFile)}), tty: !!process.stdout.isTTY }));
 if (${JSON.stringify(entry.failure ?? '')}) { console.error(${JSON.stringify(entry.failure ?? '')}); process.exit(1); }
@@ -125,7 +126,7 @@ async function dispatch(work: Work, confined = false) {
     try {
       const queued = await registeredReview(config, [work.key, 'reviewer'], { work: [work] }, mutate, async () => assert.fail('confined caller attempted a launch'));
       assert.equal(queued.queued, true);
-      assert.equal(queued.requestId, request.id);
+      assert.equal((queued as { previous?: string }).previous, request.id, 'master review renews the request');
     } finally { delete process.env.GRAPHYARD_CONFINEMENT; }
   }
   let calls = 0, dispatchCalls = 0;

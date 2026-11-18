@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, writeFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { slotsDirectoryVariable } from './verification-slots.js';
+import { heavyJobsDirectory, slotsDirectoryVariable } from './verification-slots.js';
 import { confinedRuntimeArgs } from '../worker-sandbox.js';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
@@ -195,8 +195,10 @@ export async function masterSessionConfinement(kind: string, root: string, probe
   // `master review GY-N` reach it from inside the confinement.
   // GY-3237: the host's review-ledger lock directory, shared with the loop, which `master review` takes.
   const ledgerLocks = join(dataDirectory(), 'review-ledger');
-  mkdirSync(ledgerLocks, { recursive: true });
-  const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, writable: [managed, ledgerLocks, ...writable], environment, ...(credentialMask ? { credentialMask } : {}), ...(herdrPaths?.length ? { herdrPaths } : {}) });
+  // GY-3445: and the host-wide heavy-jobs folder, whose drain record `master drain` and `master resume` write.
+  const heavyJobs = heavyJobsDirectory();
+  for (const path of [ledgerLocks, heavyJobs]) mkdirSync(path, { recursive: true });
+  const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, writable: [managed, ledgerLocks, heavyJobs, ...writable], drainWritable: true, environment, ...(credentialMask ? { credentialMask } : {}), ...(herdrPaths?.length ? { herdrPaths } : {}) });
   const records = masterRecords(root);
   mkdirSync(records, { recursive: true, mode: 0o700 });
   // Mount options precede the socket-confinement command inside bubblewrap.
