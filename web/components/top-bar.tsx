@@ -38,7 +38,7 @@ export function TrustStrip({ work, observedAt, onItems }: { work: Work[]; observ
  */
 export function ShippedStrip({ work, observedAt, live }: { work: Work[]; observedAt: number; live?: { commit?: unknown; waiting?: unknown } | null }) {
   const { shipped, waiting } = shippedCounts(work, live, Number.isNaN(observedAt) ? Date.now() : observedAt);
-  return <p className="trust-strip shipped-strip" aria-label="Shipped" data-shipped={shipped.length} data-waiting={waiting.length}>
+  return <p className="shipped-strip" aria-label="Shipped" data-shipped={shipped.length} data-waiting={waiting.length}>
     <span className="mono">{shipped.length}</span> shipped · <span className="mono">{waiting.length}</span> going live
   </p>;
 }
