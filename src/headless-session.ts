@@ -152,7 +152,7 @@ export interface HeadlessSession<T> {
   root: string; route: HeadlessRoute; context: Record<string, string>;
   exec: HeadlessExec;
   /** Holds the run's account until the notice's reset, as a pane launch's limit-notice exit does (dispatch/effects.ts `holdAccount`), so the request's next launch takes the next account. */
-  holdAccount?: (notice: ExhaustionSignal) => Promise<{ until?: string } | void>;
+  holdAccount?: (notice: ExhaustionSignal) => Promise<{ until?: string; reason?: string; resetsAt?: string | null } | void>;
   /**
    * The run's agent exited saying its account is not logged in (GY-3218): holds that account under
    * the agent's message and answers with the launch on the role's next eligible account, where the
@@ -251,8 +251,9 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
         if (notice) {
           const hold = await input.holdAccount?.(notice);
           if (!hold?.until || Date.parse(hold.until) > Date.now()) {
-            if (input.moveAccount && !controller.signal.aborted) { launch = await prepareAccount(await input.moveAccount(`the headless run stopped on its provider's limit notice: ${notice.reason}`, 'limit')); attempt = 0; continue; }
-            throw new Error(`the headless run stopped on its provider's limit notice: ${notice.reason}; its account is held until ${notice.resetsAt ?? 'its reset'}`);
+            const reason = hold?.reason ?? notice.reason, resetsAt = hold?.until ?? notice.resetsAt;
+            if (input.moveAccount && !controller.signal.aborted) { launch = await prepareAccount(await input.moveAccount(`the headless run stopped on its provider's limit notice: ${reason}`, 'limit')); attempt = 0; continue; }
+            throw new Error(`the headless run stopped on its provider's limit notice: ${reason}; its account is held until ${resetsAt ?? 'its reset'}`);
           }
         }
         // A failed run whose agent said it is not logged in (GY-3218): its account is held and the request runs on the next.

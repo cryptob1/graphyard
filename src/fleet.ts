@@ -203,7 +203,7 @@ export async function checkAccountLive(account: FleetAccount, runtime: FleetRunt
     const nextCheck = reset && Date.parse(reset) > now ? reset : new Date(now + accountCheckIntervalMs).toISOString();
     const quota: QuotaObservation = { loggedIn: result.ok || !detectLoggedOut(reason ?? ''), state: result.ok ? 'available' : 'exhausted', usage: [], since: new Date(now).toISOString(),
       resetsAt: result.ok ? null : nextCheck, reason, ...(result.ok ? {} : { session: reset && Date.parse(reset) > now ? 'named' as const : 'guessed' as const }) };
-    if (home) recordHostAccountCheck(home, { at: new Date(now).toISOString(), nextCheck, quota });
+    if (home) recordHostAccountCheck(home, { key: account.credential.key ?? null, at: new Date(now).toISOString(), nextCheck, quota });
     return quota;
   })().finally(() => checksInFlight.delete(key));
   checksInFlight.set(key, running);
@@ -211,13 +211,14 @@ export async function checkAccountLive(account: FleetAccount, runtime: FleetRunt
 }
 
 export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, allAccounts: readonly FleetAccount[] = [account], model = account.model): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
-  const now = probe.now?.() ?? Date.now(), cached = account.credential.home ? hostAccountCheck(account.credential.home) : null;
+  const now = probe.now?.() ?? Date.now(), saved = account.credential.home ? hostAccountCheck(account.credential.home) : null;
+  const cached = saved && JSON.stringify(saved.key ?? null) === JSON.stringify(account.credential.key ?? null) ? saved : null;
   // Preserve the confined master's unreadable-home rule: only the host executor can test these logins.
   const home = account.credential.home;
   if (home && await readdir(home).then(entries => !entries.length && !!process.env[masterConfinementVariable], (error: NodeJS.ErrnoException) => error.code === 'EACCES'))
     return { quota: cached?.quota ?? { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
 
-  if (!account.credential.home && account.quota.since && account.quota.state === 'exhausted' && account.quota.resetsAt && Date.parse(account.quota.resetsAt) > now) {
+  if (!home && account.quota.since && (account.quota.state === 'available' ? Date.parse(account.quota.since) + accountCheckIntervalMs > now : account.quota.resetsAt && Date.parse(account.quota.resetsAt) > now)) {
     const { source: _source, observedAt: _at, observedBy: _by, ...quota } = account.quota;
     return { quota, health: null };
   }

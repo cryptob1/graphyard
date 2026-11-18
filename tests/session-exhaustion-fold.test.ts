@@ -50,7 +50,7 @@ test('unit:session-exhaustion-survives-later-probe — a session-reported exhaus
 
   // A probe after the named reset replaces it, and the twin is free.
   const after = Date.parse(resetsAt) + 60_000;
-  assert.equal(fold(registry, [{ account: 'claude-a', quota: { ...probe, state: 'available' } }], after), true);
+  assert.equal(fold(registry, [{ account: 'claude-a', quota: { ...probe, state: 'available', since: new Date(after).toISOString() } }], after), true);
   const read = registry.accounts.find(account => account.name === 'claude-a')!.quota;
   assert.equal(read.state, 'available');
   assert.equal(read.session, undefined, 'the probe holds nothing after the reset');
@@ -83,7 +83,7 @@ test('unit:session-exhaustion-survives-later-probe — on an explicitly shared p
   assert.equal(ineligible(registry, 'claude-b', before), null, 'a shared plan cannot hold an unchecked account');
 
   const after = Date.parse(resetsAt) + 60_000;
-  assert.equal(ineligible(registry, 'claude-a', after), null, 'the mark lapses at its reset even before a probe replaces it');
+  assert.match(ineligible(registry, 'claude-a', after) ?? '', /exhausted/, 'a passing live check must release the hold');
   assert.equal(ineligible(registry, 'claude-b', after), null);
 });
 
@@ -99,7 +99,7 @@ test('unit:session-exhaustion-survives-later-probe — a session report whose re
   fold(registry, [{ account: 'claude-a', quota: probe }], spentAt + 120_000);
   assert.equal(ineligible(registry, 'claude-b', spentAt + 180_000), null, 'the guessed hour holds no other account on the plan');
   assert.match(ineligible(registry, 'claude-a', spentAt + 180_000) ?? '', new RegExp(`^claude-a quota is exhausted until ${guessedUntil}`));
-  assert.equal(ineligible(registry, 'claude-a', spentAt + 3_660_000), null);
+  assert.match(ineligible(registry, 'claude-a', spentAt + 3_660_000) ?? '', /exhausted/, 'the scheduled time alone does not prove recovery');
 });
 
 test('unit:session-exhaustion-survives-later-probe — account set on the same login clears the registry\'s session report, so the first probe after the change replaces it, but the reporting host\'s own hold, re-reported on its next selection, stands until the named reset', () => {
@@ -111,7 +111,7 @@ test('unit:session-exhaustion-survives-later-probe — account set on the same l
   const changed = applyRegistryMutation(registry, 'account.set', { account: input, reason: 'logged the home in to another subscription' }, { actor: 'operator', at: new Date(spentAt + 60_000).toISOString() }).registry;
   assert.equal(changed.accounts.find(entry => entry.name === 'claude-a')!.quota.session, undefined, 'account set clears the session provenance');
   const fresh = 'claude:' + 'd'.repeat(32);
-  assert.equal(fold(changed, [{ account: 'claude-a', quota: { ...probe, state: 'available', identity: fresh } }], spentAt + 120_000), true);
+  assert.equal(fold(changed, [{ account: 'claude-a', quota: { ...probe, state: 'available', identity: fresh, since: new Date(spentAt + 120_000).toISOString() } }], spentAt + 120_000), true);
   const read = changed.accounts.find(entry => entry.name === 'claude-a')!.quota;
   assert.equal(read.state, 'available');
   assert.equal(read.identity, fresh);
@@ -122,7 +122,7 @@ test('unit:session-exhaustion-survives-later-probe — account set on the same l
   assert.equal(fold(changed, [{ account: 'claude-a', quota: heldObservation('claude-a', held, { ...probe, state: 'available', identity: fresh }) }], spentAt + 180_000), true);
   assert.equal(changed.accounts.find(entry => entry.name === 'claude-a')!.quota.session, 'named');
   assert.match(ineligible(changed, 'claude-a', before) ?? '', /exhausted|reset/i);
-  assert.equal(ineligible(changed, 'claude-a', Date.parse(resetsAt) + 60_000), null);
+  assert.match(ineligible(changed, 'claude-a', Date.parse(resetsAt) + 60_000) ?? '', /exhausted/);
 });
 
 test('unit:session-exhaustion-survives-later-probe — a guessed session hold its host resends on every selection never becomes the plan\'s deciding probe: a healthy sibling on another host, probed before each resend, stays eligible across the whole guessed hour', () => {
@@ -140,5 +140,5 @@ test('unit:session-exhaustion-survives-later-probe — a guessed session hold it
     assert.equal(accountIneligibility(registry, registry.accounts.find(account => account.name === 'claude-b')!, at + 2_000, elsewhere), null, `the sibling stays eligible at ${at - spentAt}`);
     assert.match(ineligible(registry, 'claude-a', at + 2_000) ?? '', new RegExp(`^claude-a quota is exhausted until ${guessedUntil}`));
   }
-  assert.equal(ineligible(registry, 'claude-a', spentAt + 3_660_000), null);
+  assert.match(ineligible(registry, 'claude-a', spentAt + 3_660_000) ?? '', /exhausted/, 'the scheduled time alone does not prove recovery');
 });

@@ -108,7 +108,7 @@ export async function hostAccountSessions(home: string): Promise<HostAccountSess
 }
 
 /** The last real request on this login, shared by all installs on the host. */
-export interface HostAccountCheck { at: string; nextCheck: string; quota: import('./model/registry.js').QuotaObservation }
+export interface HostAccountCheck { key?: import('./model/registry.js').AccountKey | null; at: string; nextCheck: string; quota: import('./model/registry.js').QuotaObservation }
 export function hostAccountCheck(home: string): HostAccountCheck | null {
   return ownerOf<HostAccountCheck>(join(accountDirectory(home), 'check.json'));
 }

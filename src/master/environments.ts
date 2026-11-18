@@ -10,7 +10,7 @@ import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
-import { type FleetClient, type FleetLaunchAccount, type FleetProbe, checkAccountLive, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
+import { type FleetClient, type FleetLaunchAccount, type FleetProbe, accountCheckIntervalMs, observeAccount, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { externalCredential, loadStoredMasterConfig } from './config.js';
 import { atomicPrivateText, atomicPrivateWrite, readCredentialFile } from '../private-file.js';
@@ -233,9 +233,10 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
   const account = document?.accounts.find(account => account.name === environment && account.credential.host === config.hostId);
   const runtime = document?.runtimes.find(runtime => runtime.name === account?.runtime);
   if (!account || !runtime) throw new Error(`Cannot check unregistered account ${environment}`);
-  const quota = await checkAccountLive(account, runtime, { smoke: report?.smoke, now: () => now }, document?.models.find(model => model.name === account.model)?.id);
+  const recentPass = account.quota.state === 'available' && account.quota.since && now - Date.parse(account.quota.since) < accountCheckIntervalMs;
+  const { quota } = await observeAccount(recentPass ? account : { ...account, quota: { ...account.quota, state: 'exhausted' } }, runtime, { smoke: report?.smoke, now: () => now, quota: false, opencodeAuth: null, opencodeModels: null }, document!.accounts, document?.models.find(model => model.name === account.model)?.id ?? undefined);
   await registry.observe({ host: config.hostId, observations: [{ account: environment, quota }] });
-  return { ...observed, at: quota.since!, reason: quota.reason ?? 'The live request passed', resetsAt: quota.session === 'guessed' ? null : quota.resetsAt, until: quota.resetsAt ?? new Date(now).toISOString() };
+  return { ...observed, available: quota.state === 'available', at: quota.since!, reason: quota.reason ?? 'The live request passed', resetsAt: quota.session === 'guessed' ? null : quota.resetsAt, until: quota.resetsAt ?? new Date(now).toISOString() };
 }
 /** Current exhaustion is read from the registry, never from the executor's environment log. */
 export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, now = Date.now(), registry?: Pick<FleetClient, 'document'>): Promise<Record<string, ObservedExhaustion>> {

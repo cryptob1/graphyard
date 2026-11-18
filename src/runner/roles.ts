@@ -6,7 +6,7 @@ import { spawn, type SpawnOptions } from 'node:child_process';
 import { lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
+import { defaultPiModel, piRunner, piSmoke, runEnvironment, type SmokeResult } from './pi.js';
 import { headlessConfinementWrapper, launcherCoordinatorRoot } from '../master/launch.js';
 import { bwrapOnPath, type CredentialMask } from '../master/confinement.js';
 import { accountHomeEnvironment } from '../master/runtimes.js';
@@ -112,7 +112,7 @@ export async function smokeRegistryAccount(account: FleetLaunchAccount, options:
   let key: Record<string, string>;
   try { key = accountKeyEnvironment(account); } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
   if (account.kind !== 'pi') {
-    const env = { ...process.env, ...launch.environment, ...key };
+    const env = runEnvironment(process.env, { ...launch.environment, ...key });
     try {
       const args = [...launch.args, ...(account.fleet.contract.modelFlag && account.fleet.modelId ? [account.fleet.contract.modelFlag, account.fleet.modelId] : [])];
       const [command, ...argv] = await headlessArgv({ kind: account.kind, args, contract: account.fleet.contract }, 'Reply with the single word OK.', env);

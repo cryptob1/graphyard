@@ -9,7 +9,7 @@ import { observeAccount, type FleetClient } from '../src/fleet.js';
 import { recordObservedExhaustion } from '../src/master/environments.js';
 import { smokeRegistryAccount } from '../src/runner/roles.js';
 import { hostAccountsVariable } from '../src/host-accounts.js';
-import { proposedRuntimes } from '../src/model/registry.js';
+import { accountIneligibility, proposedRuntimes } from '../src/model/registry.js';
 import { randomUUID } from 'node:crypto';
 
 // Every provider is a local executable: the production smoke launcher still supplies the real
@@ -53,16 +53,22 @@ test('quota-live-check: only each login’s live request holds it, across instal
       await reply(true); await signal();
       assert.equal((await document()).accounts.find(account => account.name === kind)!.quota.state, 'available', `${kind}: a quoted limit cannot hold a passing account`);
       assert.equal((await check()).state, 'available', `${kind}: quoted narrative does not hold`);
-      assert.equal(calls, 1);
+      await signal();
+      assert.equal(calls, 1, 'repeated notices reuse the scheduled live check');
       assert.equal((await check(1)).state, 'available'); assert.equal(calls, 1, 'second install reuses host result');
+      now += 30 * 60_000;
       const reset = new Date(now + 60_000).toISOString();
       await reply(false, `Usage limit reached; resets at ${reset}`); await signal();
       assert.equal((await check()).state, 'exhausted');
       assert.equal((await check(1)).resetsAt, reset);
       await reply(true); now += 59_999; const heldCalls = calls;
       assert.equal((await check()).state, 'exhausted', JSON.stringify({kind, now, reset, heldCalls, calls, doc: (await document()).accounts.find(a => a.name === kind)})); assert.equal(calls, heldCalls);
-      now++; assert.equal((await check()).state, 'available'); assert.equal(calls, heldCalls + 1);
+      now++;
+      const beforeRecheck = await document();
+      assert.ok(accountIneligibility(beforeRecheck, beforeRecheck.accounts.find(account => account.name === kind)!, now, 'host'), 'time alone does not release a failed request');
+      assert.equal((await check()).state, 'available'); assert.equal(calls, heldCalls + 1);
       assert.equal((await check(1)).state, 'available');
+      now += 30 * 60_000;
       await reply(false, 'Usage limit reached'); await signal();
       assert.equal((await check()).resetsAt, new Date(now + 30 * 60_000).toISOString());
       await reply(true); now += 30 * 60_000 - 1; const unknownCalls = calls;
@@ -77,7 +83,7 @@ test('quota-live-check: only each login’s live request holds it, across instal
       assert.equal(released.quota.state, 'available', `${kind}: passing request releases operator mark`);
       await registries[0].observe(operator, { host: 'host', observations: [{ account: kind, quota: released.quota }] }, randomUUID());
       assert.equal((await document()).accounts.find(account => account.name === kind)!.quota.state, 'available');
-      now++;
+      now += 30 * 60_000 + 1;
       await reply(false, 'Not logged in. Please run login'); await signal();
       assert.equal((await check()).loggedIn, false);
       await reply(true); now += 30 * 60_000;

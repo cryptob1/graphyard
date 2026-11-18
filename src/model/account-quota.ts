@@ -5,14 +5,15 @@ import type { AgentRegistry, FleetAccount, ObservedQuota, QuotaObservation } fro
  * What an exhausted reading rests on, named with its reset (GY-3094), or null when it rests on
  * nothing that still holds: an operator's mark, a session's report, a usage window the probe read at
  * its ceiling, or a failed request the host recorded with its reason and reset. A reading of
- * exhausted with none of these, or one whose reset has passed, is unknown: never a reason to pass
- * an account over.
+ * exhausted with none of these is unknown. A failed live request stands until a passing check;
+ * legacy passive readings expire at their stated reset.
  */
-export function exhaustionEvidence(quota: Pick<ObservedQuota, 'state' | 'usage' | 'resetsAt' | 'reason' | 'session' | 'source'>, now: number): string | null {
+export function exhaustionEvidence(quota: Pick<ObservedQuota, 'state' | 'usage' | 'resetsAt' | 'reason' | 'session' | 'source' | 'since'>, now: number): string | null {
   if (quota.state !== 'exhausted') return null;
   const ahead = (iso: string | null) => !iso || Date.parse(iso) > now;
   // A notice that named no reset is held for the bounded window, which is not its reset (GY-3302).
   const resets = !quota.resetsAt ? 'reset unknown' : quota.session === 'guessed' ? `reset unknown, held until ${quota.resetsAt}` : `resets ${quota.resetsAt}`;
+  if (quota.since) return `the live request failed${quota.reason ? `: ${quota.reason}` : ''}; ${resets}`;
   if (quota.source === 'operator') return ahead(quota.resetsAt) ? `marked exhausted by an operator${quota.reason ? `: ${quota.reason}` : ''}; ${quota.resetsAt ? resets : 'awaiting a live check'}` : null;
   if (quota.resetsAt && !ahead(quota.resetsAt)) return null;
   if (quota.session) return `a session reported it spent${quota.reason ? `: ${quota.reason}` : ''}; ${resets}`;
@@ -29,7 +30,7 @@ export function foldObservation(account: FleetAccount, observed: QuotaObservatio
   if (observed.state === 'exhausted' && observed.since && account.quotaDecision && Date.parse(observed.since) <= Date.parse(account.quotaDecision.at)) return false;
   if (!observed.since) {
     const loginHold = held.session === 'login' && held.loggedIn === false && (!observed.identity || observed.identity === held.identity);
-    const quotaHold = held.state === 'exhausted' && (held.source === 'operator' || !!held.session) && (!held.resetsAt || Date.parse(held.resetsAt) > now);
+    const quotaHold = held.state === 'exhausted' && (!!held.since || (held.source === 'operator' || !!held.session) && (!held.resetsAt || Date.parse(held.resetsAt) > now));
     if (loginHold || quotaHold && !observed.session) return false;
   }
   // A provider restates the same reset to the millisecond or not at all; only a reset that really moved is a change.
@@ -39,7 +40,7 @@ export function foldObservation(account: FleetAccount, observed: QuotaObservatio
   const identity = observed.identity === undefined ? held.identity ?? null : observed.identity;
   // A read that failed or returned no windows names no evidence, so it is unknown, never exhausted (GY-3094).
   const state = observed.state === 'exhausted' && !exhaustionEvidence({ ...observed, source: 'probe' }, now) ? 'unknown' as const : observed.state;
-  const changed = held.loggedIn !== observed.loggedIn || held.state !== state || moved || held.source !== 'probe' || identity !== (held.identity ?? null) || held.session !== observed.session;
+  const changed = held.since !== observed.since || held.loggedIn !== observed.loggedIn || held.state !== state || moved || held.source !== 'probe' || identity !== (held.identity ?? null) || held.session !== observed.session;
   account.quota = { ...observed, state, ...state === observed.state ? {} : { resetsAt: null }, identity, observedAt: context.at, observedBy: context.actor, source: 'probe' };
   return changed;
 }
