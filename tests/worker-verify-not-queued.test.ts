@@ -89,7 +89,9 @@ test('integration:worker-verify-not-queued — with both ordinary slots held by 
   const trial = host.launch('trial', 'GY-4'), suite = host.session('suite', ['test']);
   await until(() => waiting.test(trial.stderr()) && waiting.test(suite.stderr()), 'the merge trial and the whole suite wait');
   assert.ok(!host.ran('GY-4') && !host.ran('suite'), 'neither starts while both slots are held');
-  assert.match(suite.stderr(), /held by merge trial (GY-1|batch-gate) \(acme\/(app|site)\)/);
+  for (const holder of ['merge trial GY-1 (acme/app)', 'merge trial GY-2 (acme/app)', 'merge trial batch-gate (acme/site)']) {
+    assert.ok(suite.stderr().includes(holder), `the waiting suite names ${holder}: ${suite.stderr()}`);
+  }
 
   host.go();
   for (const job of [...host.holders, check, trial, suite]) assert.equal(await job.closed, 0, job.stderr());
