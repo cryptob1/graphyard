@@ -32,7 +32,8 @@ const lines = (out: string) => out.split('\n').map(line => line.trim()).filter(B
 /**
  * GY-3336: the cursor key of the standing fetch-refusal line. A remote that refuses the base
  * branch's fetch — a SAML organization that has not authorised the merge writer's SSH key — is the
- * owner's to fix, so the loop raises one attention line quoting the remote's refusal and the fix,
+ * owner's to fix, so the loop raises one attention line quoting the remote's refusal and the fix
+ * (an ssh configuration file ssh itself refuses is named as that host fault instead, GY-3470),
  * and retries the fetch with a growing backoff instead of failing every cycle.
  */
 export const fetchRefusalKey = 'fetch-refusal';
@@ -46,6 +47,9 @@ export function fetchRefusalLine(repository: string, baseBranch: string, error: 
   const quoted = `${typeof failed?.stderr === 'string' ? failed.stderr : ''}\n${message(error)}`.split('\n')
     .map(line => line.trim()).filter(line => line && !genericFetchFailure.test(line));
   const refusal = (quoted[0] ?? message(error).split('\n')[0] ?? 'the fetch failed').slice(0, 300);
+  // GY-3470: ssh refusing one of its own configuration files never reached the remote — a host fault, not the owner's authorization.
+  const sshConfig = /Bad owner or permissions on (\S+)/.exec(refusal);
+  if (sshConfig) return `The fetch of ${baseBranch} for ${repository} never reached the remote: ssh refuses its configuration file ${sshConfig[1]} ("${refusal}"). This is the host's SSH configuration, not the repository's authorization: make that file owned by root or by the loop's user and writable only by its owner, and the loop retries with backoff until then.`.slice(0, actionDetailMax);
   return `The remote refuses the fetch of ${baseBranch} for ${repository}: "${refusal}". The owner must authorise the merge writer's access — for a SAML organization, authorise the SSH key for it on GitHub (Settings → SSH and GPG keys → Configure SSO → Authorize), or reinstall with --push-auth gh so the merge writer fetches over https with the gh login — and the loop retries with backoff until then.`.slice(0, actionDetailMax);
 }
 
