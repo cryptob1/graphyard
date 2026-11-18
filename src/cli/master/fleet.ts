@@ -25,8 +25,8 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   if (id === 'config') {
     // GY-3446: hostHeavyJobs is the host-wide strict cap every Graphyard install here shares, kept beside the heavy-job slots, not in master.json.
     const { hostHeavyJobs, ...settings } = masterSettingsFromArgs(args);
-    const strict = hostHeavyJobs === undefined ? {} : { hostHeavyJobs: setStrictCap(heavyJobsDirectory(), hostHeavyJobs, String(session.coordinator?.actor?.id ?? master.masterAgentName)) };
-    return print({ ...(Object.keys(settings).length || hostHeavyJobs === undefined ? await saveMasterSettings(root, settings) : {}), ...strict });
+    const saved = Object.keys(settings).length || hostHeavyJobs === undefined ? await saveMasterSettings(root, settings) : {};
+    return print({ ...saved, ...(hostHeavyJobs === undefined ? {} : { hostHeavyJobs: setStrictCap(heavyJobsDirectory(), hostHeavyJobs, String(session.coordinator?.actor?.id ?? master.masterAgentName)) }) });
   }
   if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
   if (id === 'workers') return print(await workersCommand(args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
