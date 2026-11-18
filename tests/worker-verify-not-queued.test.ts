@@ -89,7 +89,7 @@ test('integration:worker-verify-not-queued — with both ordinary slots held by 
   const trial = host.launch('trial', 'GY-4'), suite = host.session('suite', ['test']);
   await until(() => waiting.test(trial.stderr()) && waiting.test(suite.stderr()), 'the merge trial and the whole suite wait');
   assert.ok(!host.ran('GY-4') && !host.ran('suite'), 'neither starts while both slots are held');
-  for (const holder of ['merge trial GY-1 (acme/app)', 'merge trial GY-2 (acme/app)', 'merge trial batch-gate (acme/site)']) {
+  for (const holder of ['test merge GY-1 (acme/app)', 'test merge GY-2 (acme/app)', 'test merge batch-gate (acme/site)']) {
     assert.ok(suite.stderr().includes(holder), `the waiting suite names ${holder}: ${suite.stderr()}`);
   }
 
@@ -118,7 +118,7 @@ test('e2e:worker-verify-not-queued — while trials fill the host budget a worke
   try {
     const report = await masterStatusReport(root, master, async () => ({ work: [], now: new Date().toISOString() }), async () => { throw new Error('no git in the fixture'); });
     assert.equal(report.heavyJobs.limit, 2);
-    assert.deepEqual(report.heavyJobs.holders.map(holder => `${holder.label} (${holder.project})`).sort(), ['merge trial GY-1 (acme/app)', 'merge trial GY-2 (acme/app)', 'merge trial batch-gate (acme/site)']);
+    assert.deepEqual(report.heavyJobs.holders.map(holder => `${holder.label} (${holder.project})`).sort(), ['test merge GY-1 (acme/app)', 'test merge GY-2 (acme/app)', 'test merge batch-gate (acme/site)']);
     for (const holder of report.heavyJobs.holders) { assert.ok(holder.pid! > 0); assert.ok(holder.since); }
   } finally { if (previous === undefined) delete process.env[slotsDirectoryVariable]; else process.env[slotsDirectoryVariable] = previous; }
   host.go();

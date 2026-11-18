@@ -1,9 +1,9 @@
-import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import { capabilityTiers, fleetRoles, groupAccountsByPlan, looksLikeSecret, quotaStates, unspecifiedModel, type FleetAccountView, type FleetView, type RolePolicy } from '../../src/model/registry';
 import { formatAge } from '../../src/model/duration';
 import { sealForHost } from '../seal';
 import type { Dashboard } from './dashboard';
-import { accountStatus, chipTones, countdown, launchFailure, localTime, roleLabels, roleLaunch, unconfiguredRoles, type AccountStatus } from '../agent-status';
+import { accountStatus, chipTones, countdown, launchFailure, localTime, monthDay, plainReason, roleLabels, roleLaunch, unconfiguredRoles, type AccountStatus, type RoleLaunch } from '../agent-status';
 import { MoreDetails, PageHeader, PageSection } from '../components/page-layout';
 
 const when = (iso: string | null) => iso ? new Date(iso).toLocaleString() : '—';
@@ -138,23 +138,25 @@ export function UsageBars({ plan }: { plan: FleetPlan | null }) {
 
 /**
  * What the Why cell adds to the row (GY-1325): nothing for an idle account (its Roles cell says what
- * it is ready for) or one spent until a known time (its Back and Usage cells say when and how much),
- * the live work for a working account, and the refusal, smoke failure or ineligible reason otherwise.
+ * it is ready for) or one whose quota is spent until a known time (its Back and Usage cells say when
+ * and how much), the live work for a working account, and otherwise the refusal, smoke failure or
+ * ineligible reason as one short phrase (GY-3482) — `raw` keeps the full text for the cell's title.
  */
-export function whyText(account: FleetAccountView, status: AccountStatus, fleet: Pick<FleetView, 'sessions'>, now: number): string {
-  if (status.chip === 'idle' || (status.chip === 'spent' && status.until)) return '';
+export function whyText(account: FleetAccountView, status: AccountStatus, fleet: Pick<FleetView, 'sessions'>, now: number): { text: string; raw: string } {
+  if (status.chip === 'idle' || (status.chip === 'spent' && status.until && account.quota === 'exhausted')) return { text: '', raw: '' };
   if (status.chip === 'working') {
     const full = account.maxSessions !== null && account.liveSessions.length >= account.maxSessions;
-    return `${account.liveSessions.map(session => `${session.role}${session.work ? ` on ${session.work}` : ''}`).join(', ')}${full ? ` (at its limit of ${account.maxSessions})` : ''}`;
+    const text = `${account.liveSessions.map(session => `${session.role}${session.work ? ` on ${session.work}` : ''}`).join(', ')}${full ? ` (at its limit of ${account.maxSessions})` : ''}`;
+    return { text, raw: '' };
   }
-  // A launch failure's retry time is the Back cell's.
-  if (status.chip === 'launch-failing') return launchFailure(account, fleet, now)?.reason ?? status.reason;
-  return status.reason;
+  const raw = status.chip === 'launch-failing' || status.chip === 'spent' ? launchFailure(account, fleet, now)?.reason ?? status.reason : status.reason;
+  const text = plainReason(raw, status.chip === 'launch-failing' ? 'Launch failed' : 'Unavailable');
+  return { text: text === 'Limit reached' && status.until ? `Limit reached · back ${monthDay(status.until)}` : text, raw: text === raw ? '' : raw };
 }
 
 /** Accounts read working, then idle, then out of work: failing, unavailable, spent, role-less, disabled. */
 const statusOrder: AccountStatus['chip'][] = ['working', 'idle', 'launch-failing', 'unavailable', 'spent', 'not-configured', 'no-role', 'disabled'];
-const spentDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+const spentDay = monthDay;
 interface AccountRow { account: FleetAccountView; status: AccountStatus; plan: FleetPlan | null; shared: boolean }
 interface RowGroup { plan: FleetPlan | null; rows: AccountRow[] }
 
@@ -191,7 +193,7 @@ export function AccountsTable({ fleet, now }: { fleet: FleetView; now: number })
     <tr key={account.name} data-account-row={account.name} data-status={status.chip} data-plan={plan?.name} hidden={hidden}>
       <th scope="row" data-label="Account">{account.name}</th>
       <td data-label="Status"><StatusChip status={status}/></td>
-      <td data-label="Why" className="why">{whyText(account, status, fleet, now) || <span className="muted">—</span>}</td>
+      {(() => { const why = whyText(account, status, fleet, now); return <td data-label="Why" className="why" title={why.raw || undefined}>{why.text || <span className="muted">—</span>}</td>; })()}
       <td data-label="Back">{status.until ? <time dateTime={status.until} title={status.until}>{localTime(status.until)} <small>{countdown(status.until, now)}</small></time> : '—'}</td>
       <td data-label="Usage">{shared ? <span className="muted" title={`shared with ${plan!.name}, shown above`}>plan</span> : <UsageBars plan={plan}/>}</td>
       <td data-label="Roles">{account.roles.map(entry => entry.role).join(', ') || '—'}</td>
@@ -224,20 +226,17 @@ export function AccountsTable({ fleet, now }: { fleet: FleetView; now: number })
   </table></div>;
 }
 
-/**
- * Per role: can it launch now (GY-978 AC-2) — one line of role chips for every role that can, each
- * naming its next account in its title, and one line per role that cannot, with why and the earliest
- * time it can (GY-1325).
- */
+/** One role's row (GY-3482): ready or running on its account, or waiting with why and until when; the full verdict in its title. */
+export function roleLine(launch: RoleLaunch): string {
+  const label = roleLabels[launch.role] ?? launch.role;
+  if (launch.state === 'ready' || launch.state === 'running') return `${label} · ${launch.state} (${launch.account})`;
+  return `${label} · waiting: ${launch.short}${launch.nextAt ? ` until ${monthDay(launch.nextAt)}` : ''}`;
+}
+
+/** Per role, one row (GY-978 AC-2, GY-3482). */
 export function RoleLaunches({ fleet, now }: { fleet: FleetView; now: number }) {
-  const launches = fleet.roles.map(role => roleLaunch(role, fleet, now));
-  const ready = launches.filter(launch => launch.canLaunch), blocked = launches.filter(launch => !launch.canLaunch);
-  return <div className="role-launches">
-    {ready.length > 0 && <p className="role-launch-ready">{ready.map((launch, index) => <Fragment key={launch.role}>{index > 0 && ' · '}
-      <span className="role-chip" data-role-launch={launch.role} data-can-launch="yes" title={`next: ${launch.account} now`}><span aria-hidden="true">{roleLabels[launch.role] ?? launch.role}</span><span className="sr-only">{launch.text}</span></span></Fragment>)}: {blocked.length ? 'can launch' : 'all can launch'}</p>}
-    {blocked.length > 0 && <ul>{blocked.map(launch => <li key={launch.role} data-role-launch={launch.role} data-can-launch="no">
-      {launch.state === 'running' ? <span className="status-chip tone-busy">Running</span> : launch.state === 'not-configured' ? <span className="status-chip tone-off">Not configured</span> : <span className="status-chip tone-bad">Cannot launch</span>} {launch.text}</li>)}</ul>}
-  </div>;
+  return <ul className="role-launches">{fleet.roles.map(role => roleLaunch(role, fleet, now)).map(launch =>
+    <li key={launch.role} data-role-launch={launch.role} data-can-launch={launch.canLaunch ? 'yes' : 'no'} title={launch.text} className={launch.state === 'blocked' ? 'amber' : undefined}>{roleLine(launch)}</li>)}</ul>;
 }
 
 /** The Agents page body, pure over the view so it renders the same in a test as in the browser. `now` pins the clock (tests); the page passes the dashboard's server snapshot clock (GY-952). */
@@ -251,12 +250,12 @@ export function FleetOverview({ fleet, connects = [], now = Date.now(), onChange
     {(() => { const missing = unconfiguredRoles(fleet), master = missing.some(entry => entry.error), optional = missing.filter(entry => !entry.error).map(entry => entry.role);
       return <>{master && <div role="alert" className="notice danger">Not configured: master — the loop launches no master session until the role names an account.</div>}
         {optional.length > 0 && <div className="notice">Not configured: {optional.join(', ')} — {optional.length > 1 ? 'their' : 'its'} sessions launch from local profiles until {optional.length > 1 ? 'they are' : 'it is'}.</div>}</>; })()}
-    {fleet.roles.length > 0 && <PageSection title="Can launch now?" count={`${fleet.roles.filter(role => roleLaunch(role, fleet, now).canLaunch).length} of ${fleet.roles.length}`}><RoleLaunches fleet={fleet} now={now}/></PageSection>}
+    {fleet.roles.length > 0 && <PageSection title="Role summary"><RoleLaunches fleet={fleet} now={now}/></PageSection>}
     <PageSection title="Accounts" count={fleet.accounts.length}>
       {connects.map(connect => <ConnectCard key={connect.id} connect={connect} onCancel={onCancelConnect} onAnswer={onAnswerConnect} onRetry={onRetryConnect} onRemove={onRemoveConnect}/>)}
       {fleet.accounts.length > 0 && <AccountsTable fleet={fleet} now={now}/>}
       {!fleet.accounts.length && !connects.length && <p>No account is connected yet. Connect an account above: pick a provider, paste its key or finish its sign-in — no shell, no configuration files.</p>}
-      {fleet.accounts.length > 0 && <MoreDetails summary="Account details: login, usage windows, probe, capability and credential home">
+      {fleet.accounts.length > 0 && <MoreDetails summary="Account details">
         {fleet.accounts.map(account => <AccountCard key={account.name} account={account} connect={byName.get(account.name)} onChangeRoles={onChangeRoles} now={now}/>)}
       </MoreDetails>}
     </PageSection>
@@ -266,13 +265,13 @@ export function FleetOverview({ fleet, connects = [], now = Date.now(), onChange
       {!running.length && <p>No session launched from the registry is running.</p>}
     </PageSection>
     {/* Each role's launch verdict reads above; its preference order and launch policy are one click away (GY-1325). */}
-    <MoreDetails summary={`Roles (${fleet.roles.length}): preference order and launch policy`}>
+    <MoreDetails summary="Roles">
       <PageSection title="Roles" count={fleet.roles.length}>
         {fleet.roles.map(role => <div className="criterion" key={role.role} data-role={role.role}><strong className={role.blocked ? 'amber' : undefined}>{role.role} · {role.live} of {role.limit ?? role.concurrency} running · next: {role.next ?? 'none'}</strong><p>Preference order: {role.accounts.join(' → ') || 'no account'}</p><p>Launch policy: {policyText(role.policy)}</p>{role.blocked && <p className="amber">{role.blocked}</p>}</div>)}
         {!fleet.roles.length && <p>No role is configured.</p>}
       </PageSection>
     </MoreDetails>
-    <MoreDetails summary={`Runtimes (${fleet.runtimes.length}) and recent selections (${fleet.sessions.length})`}>
+    <MoreDetails summary="Runtimes">
       <PageSection title="Runtimes" count={fleet.runtimes.length}>
         {fleet.runtimes.map(runtime => <div className="criterion" key={runtime.name} data-runtime={runtime.name}><strong>{runtime.name}{runtime.description ? ` · ${runtime.description}` : ''}</strong><p>Launch contract: <code>{[runtime.launch.kind, ...runtime.launch.args].join(' ')}</code> · account home in <code>{runtime.launch.homeVariable ?? 'the default login'}</code> · model flag <code>{runtime.launch.modelFlag ?? 'none'}</code> · tools flag <code>{runtime.launch.toolsFlag ?? 'none'}</code></p>{runtime.launch.login && <p className="muted">Log in with: <code>{runtime.launch.login}</code></p>}</div>)}
         {!fleet.runtimes.length && <p>No runtime is registered.</p>}
@@ -406,12 +405,10 @@ export default function FleetPage({ api, status, observedAt, onOpenSetup }: Pick
     document.getElementById('role-editor')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
   const launchable = fleet ? fleet.roles.filter(role => roleLaunch(role, fleet, now).canLaunch).length : 0;
-  const accounts = fleet ? `${fleet.accounts.length} ${fleet.accounts.length === 1 ? 'account' : 'accounts'} connected` : '';
-  return <><PageHeader title="Agents" fact={!fleet ? (loadError ? 'The agents could not be read.' : 'Reading the agents…') : fleet.roles.length ? `${launchable} of ${fleet.roles.length} roles can launch now · ${accounts}.` : `${accounts}; no role is configured yet.`}
+  const accounts = fleet ? `${fleet.accounts.length} ${fleet.accounts.length === 1 ? 'account' : 'accounts'}` : '';
+  return <><PageHeader title="Agents" fact={!fleet ? (loadError ? 'The agents could not be read.' : 'Reading the agents…') : fleet.roles.length ? `${launchable} of ${fleet.roles.length} roles ready · ${accounts}` : `${accounts}; no role is configured yet.`}
       actions={<>{onOpenSetup && <button type="button" className="text-button" data-open-setup onClick={onOpenSetup}>Open the first-run Setup checklist</button>}
-        {fleet && canEdit && !wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</>}>
-      Each role launches its first eligible account. Changes apply on the next launch.
-    </PageHeader>
+        {fleet && canEdit && !wizard.open && <button className="connect-button" data-connect-account onClick={() => setWizard({ ...closedWizard, open: true, host: hosts[0]?.host ?? null })}>Connect an account</button>}</>}/>
     {loadError && <div role="alert" className="notice danger">{loadError} <button onClick={() => void load()}>Retry loading the agents</button></div>}
     {!fleet && !loadError && <p role="status">Loading the agents…</p>}
     {fleet && canEdit && wizard.open && <PageSection title="Connect an account">

@@ -24,6 +24,21 @@ export const localTime = (iso: string) => new Date(iso).toLocaleString(undefined
 export const countdown = (iso: string, now: number) => { const left = Date.parse(iso) - now; return left <= 0 ? 'now' : `in ${formatDuration(left / 60_000)}`; };
 /** A time with its countdown: "Oct 3, 08:27 AM (in 2d 23h)". */
 export const whenText = (iso: string, now: number) => `${localTime(iso)} (${countdown(iso, now)})`;
+/** A day alone, e.g. "Oct 3". */
+export const monthDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+/** A provider limit in a raw failure: an HTTP 429, a rate or usage limit, a spent quota. */
+export const limitPattern = /\b429\b|rate.?limit|usage.?limit|quota|too many requests|resource.?exhausted/i;
+/**
+ * A raw failure (a provider error body, an HTTP code) as one short phrase an owner reads (GY-3482);
+ * the raw text belongs in the element's title. A short plain reason passes through unchanged.
+ */
+export function plainReason(raw: string, fallback = 'Launch failed'): string {
+  if (limitPattern.test(raw)) return 'Limit reached';
+  if (/model/i.test(raw) && /not.?found|unavailable|does not exist|not supported|\b404\b|no access/i.test(raw)) return 'Model unavailable';
+  if (/\b40[13]\b|unauthori[sz]ed|authenticat|log ?in|sign.?in|credential|api key|expired token|token expired/i.test(raw)) return 'Sign-in needed';
+  return /[{}]|\bHTTP\b|\b[45]\d\d\b/.test(raw) || raw.length > 80 ? fallback : raw;
+}
 
 /** How long a failed launch keeps its account marked as launch failing. */
 export const launchFailureWindowMs = 60 * 60_000;
@@ -76,6 +91,8 @@ export function accountStatus(account: FleetAccountView, fleet: Pick<FleetView, 
   const unconfigured = [account.smoke?.result === 'fail' ? account.smoke.reason : null, account.ineligible].find(reason => reason && missingCredential.test(reason));
   if (unconfigured) return status('not-configured', `no credential yet (${unconfigured}); connect one to use it`);
   const failing = launchFailure(account, fleet, now);
+  // A smoke test the provider refused for a limit: the account is spent until it is retried.
+  if (failing && account.smoke?.result === 'fail' && limitPattern.test(account.smoke.reason ?? '')) return status('spent', `limit reached${failing.until ? ` until ${whenText(failing.until, now)}` : ''}`, failing.until);
   if (failing) return status('launch-failing', `${failing.reason}${failing.until ? `; retried ${whenText(failing.until, now)}` : ''}`, failing.until);
   const live = account.liveSessions;
   const full = account.maxSessions !== null && live.length >= account.maxSessions;
@@ -94,6 +111,8 @@ export interface RoleLaunch {
   account: string | null;
   /** The earliest time an account of the role frees up by itself, when none can launch now and one will. */
   nextAt: string | null;
+  /** Why it waits, in two or three words, when it neither runs nor can launch. */
+  short: string;
   text: string;
 }
 
@@ -104,18 +123,19 @@ export interface RoleLaunch {
  */
 export function roleLaunch(role: FleetRoleView, fleet: Pick<FleetView, 'accounts' | 'sessions'>, now: number): RoleLaunch {
   const label = roleLabels[role.role] ?? role.role;
-  const result = (canLaunch: boolean, text: string, account: string | null = null, nextAt: string | null = null, state: RoleLaunch['state'] = canLaunch ? 'ready' : 'blocked'): RoleLaunch => ({ role: role.role, canLaunch, state, account, nextAt, text: `${label}: ${text}` });
+  const result = (canLaunch: boolean, text: string, account: string | null = null, nextAt: string | null = null, state: RoleLaunch['state'] = canLaunch ? 'ready' : 'blocked', short = ''): RoleLaunch => ({ role: role.role, canLaunch, state, account, nextAt, short, text: `${label}: ${text}` });
   const master = role.role === 'master' && role.live >= role.concurrency ? fleet.sessions.find(session => session.role === 'master' && !session.endedAt) : undefined;
   if (master) return result(false, `Running since ${localTime(master.selectedAt)}`, master.account, null, 'running');
-  if (role.concurrency === 0) return result(false, 'none can launch — paused (concurrency 0); next: when its concurrency is raised');
-  if (!role.accounts.length) return result(false, 'Not configured — the role names no account yet', null, null, 'not-configured');
+  if (role.concurrency === 0) return result(false, 'none can launch — paused (concurrency 0); next: when its concurrency is raised', null, null, 'blocked', 'paused');
+  if (!role.accounts.length) return result(false, 'Not configured — the role names no account yet', null, null, 'not-configured', 'not configured');
   const accounts = role.accounts.map(name => ({ name, view: fleet.accounts.find(account => account.name === name) ?? null }));
   // The account the registry's own choice would take: the first eligible one the role does not hold out.
   const ready = accounts.find(({ view }) => view && view.eligible && !view.held.some(entry => entry.role === role.role));
-  if (role.live >= (role.limit ?? role.concurrency)) return result(false, `none can launch — at its concurrency limit (${role.live} of ${role.limit ?? role.concurrency} live); next: ${ready ? `${ready.name} ` : ''}when one of its sessions ends`, null, null);
+  if (role.live >= (role.limit ?? role.concurrency)) return result(false, `none can launch — at its concurrency limit (${role.live} of ${role.limit ?? role.concurrency} live); next: ${ready ? `${ready.name} ` : ''}when one of its sessions ends`, null, null, 'blocked', 'at its limit');
   if (ready) return result(true, `can launch now — next: ${ready.name} now${launchFailure(ready.view!, fleet, now) ? ' (its last launch failed)' : ''}`, ready.name);
   // Every account is out: group them by what keeps them out, and find the earliest one back by itself.
   const groups = new Map<string, string[]>();
+  let spent = 0;
   let next: { name: string; at: string } | null = null;
   for (const { name, view } of accounts) {
     const status = view ? accountStatus(view, fleet, now) : null;
@@ -125,11 +145,12 @@ export function roleLaunch(role: FleetRoleView, fleet: Pick<FleetView, 'accounts
       : status!.chip === 'working' ? 'at its session limit'
       : status!.chip === 'idle' ? `held from ${role.role}` : status!.chip === 'disabled' ? 'disabled' : status!.reason;
     groups.set(why, [...(groups.get(why) ?? []), name]);
+    if (status?.chip === 'spent') spent++;
     const back = status?.until ?? view?.held.map(entry => heldUntil(entry.reason)).find(Boolean) ?? null;
     if (back && Date.parse(back) > now && (!next || Date.parse(back) < Date.parse(next.at))) next = { name, at: back };
   }
   const reasons = [...groups].map(([why, names]) => `${names.join(', ')} ${why}`).join('; ');
-  return result(false, `none can launch — ${reasons}; next: ${next ? `${next.name} ${whenText(next.at, now)}` : 'no account frees up by itself — enable, fix or connect one'}`, null, next?.at ?? null);
+  return result(false, `none can launch — ${reasons}; next: ${next ? `${next.name} ${whenText(next.at, now)}` : 'no account frees up by itself — enable, fix or connect one'}`, null, next?.at ?? null, 'blocked', spent === accounts.length ? 'limit reached' : 'no account free');
 }
 
 /** Roles missing from the registry: only a missing master is an error; any other role still launches from local profiles. */

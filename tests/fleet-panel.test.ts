@@ -188,23 +188,18 @@ test('unit:fleet-why-no-duplication — an idle account\'s and a spent account\'
   assert.equal(whyCell(accountRow(page, 'busy')), 'worker on GY-1236, reviewer on GY-1315');
 });
 
-test('unit:fleet-launch-summary-compact — every role that can launch is one chip on one line naming its next account in its title, and only a role that cannot launch gets a line, with why and when', () => {
+test('unit:fleet-launch-summary-compact — every role is one short row: ready or running on its account, never "Cannot launch", the full verdict in its title', () => {
   const names = ['launch-a', 'launch-b'];
   const roles = (['worker', 'reviewer', 'producer', 'master'] as const).map(name => ({ name, accounts: names, concurrency: name === 'master' ? 1 : 2 }));
-  // The master holding its own slot: one line, read as running, not as an error (GY-3181).
+  // The master holding its own slot reads as running, not as an error (GY-3181).
   const blocked = render(declutterFleet(names, roles, [], [['master', 'launch-a', 'GY-1325']]));
-  assert.equal(blocked.split('data-can-launch="no"').length - 1, 1, 'exactly one reason line');
   assert.ok(!blocked.includes('Cannot launch'));
-  assert.match(blocked, /<li data-role-launch="master" data-can-launch="no"><span class="status-chip tone-busy">Running<\/span> Master: Running since .*<\/li>/);
-  assert.equal(blocked.split('class="role-chip"').length - 1, 3, 'the other three are chips');
-  assert.ok(blocked.includes('<span class="role-chip" data-role-launch="worker" data-can-launch="yes" title="next: launch-a now"><span aria-hidden="true">Workers</span><span class="sr-only">Workers: can launch now — next: launch-a now</span></span>'), 'a chip names its next account in its title');
-  assert.ok(blocked.includes('</span></span>: can launch</p>'));
-  // No blocked role: one line of chips, and no "Cannot launch" anywhere.
+  assert.match(blocked, /<li data-role-launch="master" data-can-launch="no" title="Master: Running since [^"]*">Master · running \(launch-a\)<\/li>/);
+  assert.ok(blocked.includes('<li data-role-launch="worker" data-can-launch="yes" title="Workers: can launch now — next: launch-a now">Workers · ready (launch-a)</li>'), 'a ready role names its next account');
+  assert.equal(blocked.split('data-role-launch=').length - 1, 4, 'one row per role');
   const clear = render(declutterFleet(names, roles));
   assert.ok(!clear.includes('Cannot launch'), 'no Cannot launch text');
   assert.equal(clear.split('data-can-launch="no"').length - 1, 0);
-  assert.equal(clear.split('class="role-launch-ready"').length - 1, 1, 'one line');
-  assert.ok(clear.includes('Producers: can launch now — next: launch-a now</span></span> · ') && clear.includes('</span></span>: all can launch</p>'), 'every role a chip on the one line');
 });
 
 test('unit:fleet-spent-collapsed — accounts read working, then idle, then spent or ineligible, and six spent accounts back on the same day render as one collapsed summary row naming all six', () => {

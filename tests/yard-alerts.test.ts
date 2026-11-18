@@ -217,9 +217,9 @@ test('unit:stalled-yard-alerts-operator — with no run.alertUrl the step is ine
   registry.observe({ principal: 'loop', intervalSeconds: 20, alerts: loopAlerts('off') }, new Date(start));
   assert.equal(registry.live(new Date(start))?.alerts, false, 'the control plane keeps the loop\'s alerts naming beside its presence');
   const offLine = renderToStaticMarkup(createElement(AlertsLine, { status: { setup: { alerts: false } } }));
-  assert.ok(offLine.includes('Alerts are off') && offLine.includes('run.alertUrl') && offLine.includes('.graphyard/master.json') && offLine.includes('ntfy'), 'the dashboard says alerts are off and names the webhook URL setting');
+  assert.ok(offLine.includes('Stall alerts: off') && offLine.includes('<details') && offLine.includes('run.alertUrl') && offLine.includes('.graphyard/master.json') && offLine.includes('ntfy'), 'the dashboard says alerts are off and names the webhook URL setting');
   const onLine = renderToStaticMarkup(createElement(AlertsLine, { status: { setup: { alerts: 20 } } }));
-  assert.ok(onLine.includes('Alerts are on') && onLine.includes('20 minutes') && onLine.includes('hourly'), 'the dashboard says alerts are on with the stall window and hourly repeat');
+  assert.ok(onLine.includes('Stall alerts: on (after 20 min)') && onLine.includes('hourly'), 'the dashboard says alerts are on with the stall window and hourly repeat');
   assert.ok(renderToStaticMarkup(createElement(AlertsLine, { status: {} })).includes('running master loop'), 'unknown names the running loop it needs');
 });
 
