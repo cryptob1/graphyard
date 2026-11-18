@@ -12,15 +12,14 @@ const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(
  * The city-at-night strip (GY-3272): how many agents are on shift, how many merges are in trial,
  * how many shipped this week and how many wait to go live (GY-3452), read off the same snapshot the page below shows. The numbers
  * carry data attributes with exactly what the sentence says, so a reader (and a test) checks the
- * words against the counts the Workers page and the ledger read, in the app's own words: agents working, shipped this week, waiting to go live.
+ * words against the counts the Workers page and the ledger read, in the app's own words: agents working, shipped, going live.
  */
 export function CityStrip({ work, observedAt, live }: { work: Work[]; observedAt: number; live?: { commit?: unknown; waiting?: unknown } | null }) {
   const { onShift, inTrial, shipped, waiting } = cityCounts(work, observedAt, live);
   return <p className="city-strip" aria-label="Activity" data-on-shift={onShift} data-in-trial={inTrial} data-shipped={shipped} data-waiting={waiting}>
     <span className="beacon" aria-hidden="true"/><span className="mono">{onShift}</span> agent{onShift === 1 ? '' : 's'} working
     <span aria-hidden="true"> · </span><span className="mono">{inTrial}</span> in trial
-    <span aria-hidden="true"> · </span><span className="mono">{shipped}</span> shipped this week
-    <span aria-hidden="true"> · </span><span className="mono">{waiting}</span> waiting to go live
+    <span aria-hidden="true"> · </span><span className="mono">{shipped}</span> shipped · <span className="mono">{waiting}</span> going live
   </p>;
 }
 

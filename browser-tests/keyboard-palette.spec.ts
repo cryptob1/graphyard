@@ -138,7 +138,7 @@ test('e2e:keyboard-palette — the top bar strip counts the shift, the trials, w
   await expect(strip).toHaveAttribute('data-waiting', '2');
   await expect(strip).toContainText('2 agents working');
   await expect(strip).toContainText('1 in trial');
-  await expect(strip).toContainText('2 waiting to go live');
+  await expect(strip).toContainText('0 shipped · 2 going live');
   // The same numbers the Workers page reads off the same board.
   await page.getByRole('navigation', { name: 'Primary' }).getByRole('button', { name: 'Workers', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Workers', exact: true, level: 1 })).toBeVisible();

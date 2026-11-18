@@ -1,7 +1,7 @@
 {
   "id": "shipped-counts-agree",
   "title": "The top bar and the Work page agree on what shipped and what waits to go live",
-  "description": "A real browser on the built dashboard, with four merges this week and a live commit that contains two of them: the top bar and the Work page's card both say 2 shipped this week and 2 waiting to go live.",
+  "description": "A real browser on the built dashboard, with four merges this week and a live commit that contains two of them: the top bar and the Work page's card both count 2 shipped and 2 going live.",
   "tags": ["dashboard"],
   "target": "any",
   "required": false,

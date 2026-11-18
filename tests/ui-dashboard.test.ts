@@ -8,7 +8,7 @@ import type { Work } from '../src/model.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
 // @ts-expect-error Dependency-free fixture script.
 import { fixtureApi, visibleWords } from '../scripts/dashboard-fixture.mjs';
-import { boardFromStatus, classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
+import { boardFromStatus, classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, nextActor, shippedCounts, timedGroups, type OpenGroup } from '../web/groups.js';
 import { prSteps, stateIds } from '../src/model/pr-steps.js';
 import { noRelease } from '../src/model/release.js';
 import { jargon } from '../src/model/plain-status.js';
@@ -117,20 +117,17 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   assert.equal(releasing.open, open, 'a merge waiting on its release adds no open item');
   const releasingPage = home(dashboard({ work: work.map(item => item.key === 'GY-18' ? awaiting : item) }));
   for (const group of groups) assert.ok(!rowsOf(releasingPage, group).includes('GY-18'), `${group}: no row for the merged item`);
-  // "Shipped this week" counts what the release was seen serving this week; a merge from this
-  // morning still waiting on the post-deployment check its policy asks for is not in the footer —
-  // the release line says what production does not carry yet.
-  const shippedLine = (html: string) => Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(html)?.[1]);
-  const servedThisWeek = (items: Work[]) => items.filter(item => groupOf(item, NOW) === 'shipped' && releasedAt(item) !== null && NOW - releasedAt(item)! <= 7 * 24 * hour).map(item => item.key);
-  assert.equal(shippedLine(page), servedThisWeek(work).length);
-  const mergedToday = { ...awaiting, observation: { ...merged.observation!, mergedAt: new Date(NOW - hour).toISOString() } } as Work;
+  // Shipped means live (GY-3452): the footer counts the week's merges the live commit contains,
+  // and the rest as going live; with no live commit named, none is claimed shipped.
+  const footer = (html: string) => /data-shipped="(\d+)"[^>]*>\d+ shipped this week<\/strong>, <span data-waiting="(\d+)"/.exec(html)!.slice(1).map(Number);
+  const mergedToday = { ...awaiting, observation: { ...merged.observation!, mergedAt: new Date(NOW - hour).toISOString() }, delivery: { ...awaiting.delivery!, mergedAt: new Date(NOW - hour).toISOString() } } as Work;
   const pending = work.map(item => item.key === 'GY-18' ? mergedToday : item);
-  const pendingPage = home(dashboard({ work: pending }));
-  assert.ok(!servedThisWeek(pending).includes('GY-18'));
-  assert.equal(shippedLine(pendingPage), servedThisWeek(pending).length);
-  assert.ok(!rowsOf(pendingPage, 'moving').includes('GY-18'), 'the pending merge has no row; it is Done');
-  // The footer names it only as the latest merge (GY-168), never as shipped.
-  assert.match(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /Latest: <button type="button" class="text-button" data-latest="GY-18">[\s\S]*?<\/button> · Done · \d/);
+  const weekMerges = shippedCounts(pending, null, NOW).waiting.length;
+  assert.ok(weekMerges >= 1);
+  assert.deepEqual(footer(home(dashboard({ work: pending }))), [0, weekMerges]);
+  const liveCommit = { commit: 'c'.repeat(40), waiting: ['GY-18'] };
+  assert.deepEqual(footer(home(dashboard({ work: pending, status: { ...dashboard().status, live: liveCommit } }))), [weekMerges - 1, 1]);
+  assert.ok(!rowsOf(home(dashboard({ work: pending })), 'moving').includes('GY-18'), 'the pending merge has no row; it is Done');
   // An item nothing is moving is Blocked on the Work page, and its own page carries the same badge.
   const stalled = work.map(item => item.key === 'GY-15' ? { ...item, nextAction: null, lease: null } as Work : item);
   assert.ok(classify(stalled, NOW).byGroup.blocked.some(item => item.key === 'GY-15'));
