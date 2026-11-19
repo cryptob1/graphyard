@@ -259,16 +259,25 @@ export function catalogFits(record: Pick<GateRecord, 'catalogMs' | 'gateRuns'>, 
   return measured !== null && measured <= catalogBudgetMs;
 }
 
-/** The E2E cases the batch's items bind; a reverted item's own cases left main with it. */
-function boundCaseIds(record: Pick<GateRecord, 'merges'>, landings: readonly ServeLanding[]): string[] {
+/** The E2E cases the batch's items bind, with the item that bound each; a reverted item's own cases left main with it. */
+function boundCases(record: Pick<GateRecord, 'merges'>, landings: readonly ServeLanding[]): { id: string; item: string }[] {
   const reverted = new Set(record.merges.filter(merge => merge.reverted).map(merge => merge.sha));
-  return landings.filter(landing => !reverted.has(landing.sha)).flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))) ?? []);
+  return landings.filter(landing => !reverted.has(landing.sha)).flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => ({ id: proof.slice(4), item: landing.item!.key }))) ?? []);
 }
+const boundCaseIds = (record: Pick<GateRecord, 'merges'>, landings: readonly ServeLanding[]) => boundCases(record, landings).map(bound => bound.id);
 
-/** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. */
-export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
-  const cases = [...new Set([...(whole ? await ports.catalog(tip) : boundCaseIds(record, landings)), ...await ports.core(tip)])];
-  return ['build', ...[...new Set(cases)].map(id => `e2e:${id}`), 'affected'];
+/** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. GY-3547: a bound case a later item deleted from the tip's catalog is dropped, with one note. */
+export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges' | 'notes'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
+  const catalog = await ports.catalog(tip);
+  let bound: string[] = [];
+  if (!whole) {
+    for (const { id, item } of boundCases(record, landings)) {
+      if (catalog.includes(id)) bound.push(id);
+      else record.notes = [...record.notes ?? [], `${id}: ${item} bound this case; it is gone from the catalog, so the gate skips it`.slice(0, 200)].slice(-filingNotesWindow);
+    }
+  }
+  const cases = [...new Set([...(whole ? catalog : bound), ...await ports.core(tip)])];
+  return ['build', ...cases.map(id => `e2e:${id}`), 'affected'];
 }
 
 /** The reason an outcome carries: the failing check a revert names, its own reason, or null on a plain pass. */

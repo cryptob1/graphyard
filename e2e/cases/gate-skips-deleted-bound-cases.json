@@ -1,0 +1,15 @@
+{
+  "id": "gate-skips-deleted-bound-cases",
+  "title": "A batch whose earlier item's e2e case a later item deleted still verifies",
+  "description": "A seeded batch where an earlier item bound an e2e case that a later item deleted from the catalog reaches verified, with one gate note naming the dropped case and the item that bound it.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the gate drops the deleted bound case and verifies the batch",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/gate-skips-deleted-bound-cases.test.ts tests/main-batch-gate.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
