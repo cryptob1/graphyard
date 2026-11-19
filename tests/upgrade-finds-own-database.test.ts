@@ -44,7 +44,7 @@ const withoutDatabaseUrl = async <T>(body: () => Promise<T>) => {
   try { return await body(); } finally { if (saved !== undefined) process.env.DATABASE_URL = saved; }
 };
 
-const inputsFor = (overrides: Partial<UpgradeInputs>): UpgradeInputs => ({ cliRoot: '/opt/graphyard', repoRoot: '/work/app', current: { version: '2026.10.16', revision: 'a'.repeat(40), released: true },
+const inputsFor = (overrides: Partial<UpgradeInputs>): UpgradeInputs => ({ cliRoot: new URL('..', import.meta.url).pathname, repoRoot: '/work/app', current: { version: '2026.10.16', revision: 'a'.repeat(40), released: true },
   target: { version: '2026.10.17', revision: 'b'.repeat(40), schema: 4 }, databaseSchema: 4, install: localRecord, url: 'http://127.0.0.1:4999', backupFile: '/unused', cliChanges: [], databaseUrl: null, ...overrides });
 
 test('integration:upgrade-finds-own-database — with no DATABASE_URL, upgrade backs up the recorded install\'s own database without printing its credential, and stops as before when none is recorded', async () => {
