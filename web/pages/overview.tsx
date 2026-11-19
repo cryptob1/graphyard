@@ -14,6 +14,7 @@ import { BuildLine } from '../fun';
 import { useGlide } from '../glide';
 import { EmptyState } from '../components/page-layout';
 import { WhereItRuns } from '../components/where-it-runs';
+import { pipelineSentence, type PipelineTime } from '../../src/pipeline-speed';
 
 /**
  * The Work page with its motion (GY-3272 AC-4b): on every render, a row that changed group is
@@ -23,6 +24,15 @@ import { WhereItRuns } from '../components/where-it-runs';
 export function WorkPage(dashboard: Dashboard) {
   useGlide();
   return OverviewPage(dashboard);
+}
+
+/** GY-3527: how long an item takes from release to merge, in one sentence; a warning names the item to open. */
+function SpeedLine({ time, now, open }: { time?: PipelineTime | null; now: number; open: (id: string) => void }) {
+  if (!time) return null;
+  const line = pipelineSentence(time, now);
+  return <p className="page-fact speed-line" data-speed-line={line.warning ? 'warning' : 'calm'}>
+    {line.text}{line.open && <> <button type="button" className="text-button" onClick={() => open(line.open!)}>Open →</button></>}
+  </p>;
 }
 
 /**
@@ -62,7 +72,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   </section>;
   const admin = status?.actor?.role === 'admin';
   return <>
-    <div className="page-heading"><div><h1>Work</h1><p className="page-fact">{board ? summarySentence(counts) : 'Reading the board…'}</p><BuildLine/></div>
+    <div className="page-heading"><div><h1>Work</h1><p className="page-fact">{board ? summarySentence(counts) : 'Reading the board…'}</p><SpeedLine time={status?.pipelineTime} now={now} open={setSelected}/><BuildLine/></div>
       <div className="page-actions"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration update(s) failed: {status.jobs[0].error}</div>}
