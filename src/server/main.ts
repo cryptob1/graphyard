@@ -117,6 +117,9 @@ export async function main(options: MainOptions = {}) {
   }, 2000);
   http.listen(options.port ?? Number(process.env.PORT ?? 4310), options.host ?? process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${(http.address() as AddressInfo).port}`));
   await once(http, 'listening');
+  // GY-3486: the serve socket tailscaled proxies the tailnet to; up serves it once it exists, else the TCP port as before.
+  const socketPath = process.env.GRAPHYARD_SERVE_SOCKET;
+  const served = socketPath ? await http.serveSocket(socketPath).catch(error => { console.error(`The serve socket ${socketPath} could not be opened (${error instanceof Error ? error.message : 'unknown'}); the tailnet reaches the TCP port`); return null; }) : null;
   void runStartup();
 
   const close = async () => {
@@ -124,6 +127,7 @@ export async function main(options: MainOptions = {}) {
     services.readiness = false;
     reconciliation.stop(); stopPlaneBeat(); watching?.stop(); watching = null; await observing?.stop(); observing = null;
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
+    served?.close();
     await new Promise<void>(resolve => http.close(() => resolve()));
     await store.close();
   };
