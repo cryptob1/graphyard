@@ -282,6 +282,8 @@ export interface FleetAccountView {
   liveSessions: { id: string; role: FleetRoleName; work: string | null; host: string; since: string }[];
   /** `exhausted` only with evidence that still holds, named in `evidence` with its reset; an exhausted reading without it is `unknown` (GY-3094). */
   quota: ObservedQuota['state']; evidence: string | null; loggedIn: boolean | null; usage: (Omit<ObservedQuota['usage'][number], 'readAt'> & { /** `last read <time>`: a window kept past a failed usage read (GY-3494). */ lastRead?: string })[]; resetsAt: string | null; observedAt: string | null; quotaSource: ObservedQuota['source'];
+  /** GY-3516: a live check another login answered, which the account's own key contradicts; null when none. */
+  fault?: string | null;
   /** Why an unknown account shows no usage, in the probe's words: `this key reports no allowance` (GY-3495). */
   usageNote?: string | null;
   /** The hold's `resetsAt` is the bounded unknown-reset window, not a reset the provider named (GY-3302). */
@@ -329,7 +331,7 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
       roles: registry.roles.filter(role => role.accounts.includes(account.name)).map(role => ({ role: role.name, preference: role.accounts.indexOf(account.name) + 1, of: role.accounts.length })),
       liveSessions: live.filter(session => session.account === account.name).map(session => ({ id: session.id, role: session.role, work: session.work, host: session.host, since: session.selectedAt })),
       quota: evidence ? 'exhausted' : account.quota.state === 'exhausted' ? 'unknown' : account.quota.state, evidence, loggedIn: account.quota.loggedIn, usage: account.quota.usage.map(({ readAt, ...usage }) => readAt ? { ...usage, lastRead: `last read ${utcClock(readAt)}` } : usage), resetsAt: account.quota.resetsAt, observedAt: account.quota.observedAt, quotaSource: account.quota.source, resetUnknown: account.quota.session === 'guessed',
-      usageNote: !evidence && account.quota.state !== 'available' && !account.quota.usage.length ? account.quota.reason : null,
+      usageNote: !evidence && account.quota.state !== 'available' && !account.quota.usage.length ? account.quota.reason : null, fault: account.quota.fault ?? null,
       eligible: !ineligible, ineligible, smoke: account.smoke ?? null,
       held: fleetRoles.flatMap(role => { const reason = roleIneligibility(account, role, now); return reason ? [{ role, reason }] : []; }) };
   });

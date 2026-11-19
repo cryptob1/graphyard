@@ -22,7 +22,7 @@ import { describeObservedExhaustion, providerIdentity } from './account-identity
 import { getCachedPlanUsage, setCachedPlanUsage } from '../provider-usage.js';
 export { describeObservedExhaustion, providerIdentity } from './account-identity.js';
 // The per-provider login and quota probes live in ./environment-quota.ts, reached through each runtime's adapter.
-import type { PlanReading } from './environment-quota.js';
+import { planCacheId, type PlanReading } from './environment-quota.js';
 import { accountHomeEnvironment, runtimeAdapter, type AccountReading } from './runtimes.js';
 
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */
@@ -87,6 +87,8 @@ export interface EnvironmentHealth {
   healthy: boolean; reason: string | null; note: string | null; login: string | null;
   /** The provider login behind the home (GY-1573): accounts that share one share one quota. Null when the login names none; absent when its file could not be read just now. */
   identity?: string | null;
+  /** GY-3516: the fingerprint of the key the probe read the quota with; never the key. */
+  key?: string;
 }
 export interface EnvironmentProbe {
   fetch?: typeof fetch; now?: () => number; ceilingPercent?: number; timeoutMs?: number; cacheMs?: number;
@@ -115,15 +117,16 @@ export async function checkAgentEnvironment(environment: ProbedEnvironment, prob
 
   const account: AccountReading = adapter?.usage ? await adapter.usage(environment, probe, { plan: planId, now }) : { loggedIn: false, usage: [], note: `Graphyard reads no login of the ${environment.kind} runtime` };
 
-  if (account.loggedIn && planId && !account.shared) {
+  const cacheId = planId && planCacheId(planId, account.key);
+  if (account.loggedIn && cacheId && !account.shared) {
     // A reading taken from the plan cache is not re-stamped, so the cache still expires. A provider
     // call that answered caches its own plan reading; only an account without one stamps its windows.
     const reading: PlanReading | null = account.plan ?? (account.usage.length > 0
       ? { reported: true, status: 'reported', windows: account.usage, resetsAt: account.usage.map(u => u.resetsAt).filter(Boolean).sort().at(-1) ?? null, reason: account.note, reached: account.reached }
       : null);
-    if (reading) setCachedPlanUsage(planId, reading, now);
+    if (reading) setCachedPlanUsage(cacheId, reading, now);
     else {
-      const cachedPlan: PlanReading | null = getCachedPlanUsage(planId, now, probe.cacheMs ?? 30_000);
+      const cachedPlan: PlanReading | null = getCachedPlanUsage(cacheId, now, probe.cacheMs ?? 30_000);
       if (cachedPlan && cachedPlan.reported && cachedPlan.windows.length > 0) {
         account.usage = cachedPlan.windows;
         if (cachedPlan.reason) account.note = cachedPlan.reason;
@@ -140,7 +143,7 @@ export async function checkAgentEnvironment(environment: ProbedEnvironment, prob
     : exhausted ? `${environment.name} quota is exhausted (${(spent.length ? spent : account.usage).map(usage => `${usage.window} window at ${usage.percent}%${usage.resetsAt ? ` until ${usage.resetsAt}` : ''}`).join(', ')}; ceiling ${ceiling}%)` : null;
   const health: EnvironmentHealth = { name: environment.name, kind: environment.kind, home: environment.home, variable: environmentVariable[environment.kind], checkedAt: new Date(now).toISOString(),
     loggedIn: account.loggedIn, quota, usage: account.usage, healthy: !reason, reason, note: account.note, login: account.loggedIn ? null : loginCommand(environment),
-    identity: account.loggedIn ? await providerIdentity(environment.kind, environment.home) : null };
+    identity: account.loggedIn ? await providerIdentity(environment.kind, environment.home) : null, ...account.key ? { key: account.key } : {} };
   healthCache.set(cacheKey, { at: now, health });
   return health;
 }

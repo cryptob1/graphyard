@@ -64,7 +64,7 @@ export function foldObservation(account: FleetAccount, observed: QuotaObservatio
   const identity = observed.identity === undefined ? held.identity ?? null : observed.identity;
   // A read that failed or returned no windows names no evidence, so it is unknown, never exhausted (GY-3094).
   const state = observed.state === 'exhausted' && !exhaustionEvidence({ ...observed, source: 'probe' }, now) ? 'unknown' as const : observed.state;
-  const changed = held.since !== observed.since || held.loggedIn !== observed.loggedIn || held.state !== state || moved || held.source !== 'probe' || identity !== (held.identity ?? null) || held.session !== observed.session;
+  const changed = held.since !== observed.since || held.loggedIn !== observed.loggedIn || held.state !== state || moved || held.source !== 'probe' || identity !== (held.identity ?? null) || held.session !== observed.session || held.key !== observed.key || (held.fault ?? null) !== (observed.fault ?? null);
   account.quota = { ...observed, state, ...state === observed.state ? {} : { resetsAt: null }, identity, observedAt: context.at, observedBy: context.actor, source: 'probe' };
   return changed;
 }
