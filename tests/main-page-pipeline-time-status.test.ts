@@ -31,7 +31,7 @@ const api = async (path: string, body?: unknown) => {
 };
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 
-test('e2e:main-page-pipeline-time — /api/status reports release-to-merge minutes, the last merge and the oldest open item from the ledger', async () => {
+test('e2e:main-page-pipeline-time — /api/status reports merges in 24 hours, release-to-merge minutes, the last merge and the oldest open item from the ledger', async () => {
   const created = [];
   for (const n of [1, 2, 3, 4]) {
     const item = await api('work', { title: `Change ${n}`, why: 'Speed is visible.', simplest: 'One line.', type: 'feature', criteria: [{ id: 'AC-1', text: 'It works', proofs: ['e2e:fixture'] }] });
@@ -48,7 +48,7 @@ test('e2e:main-page-pipeline-time — /api/status reports release-to-merge minut
   await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{stage}','"review"') WHERE id=$1`, [created[3].id]);
 
   const { pipelineTime } = await api('status');
-  assert.deepEqual({ median: pipelineTime.median, p90: pipelineTime.p90, samples: pipelineTime.samples }, { median: 60, p90: 90, samples: 3 });
+  assert.deepEqual({ merged24h: pipelineTime.merged24h, median: pipelineTime.median, p90: pipelineTime.p90, samples: pipelineTime.samples }, { merged24h: 3, median: 60, p90: 90, samples: 3 });
   assert.equal(Math.round((Date.now() - Date.parse(pipelineTime.lastMergeAt)) / 60_000), 10);
   assert.deepEqual({ ...pipelineTime.oldest, releasedAt: undefined }, { id: created[3].id, key: created[3].key, title: 'Change 4', stage: 'review', releasedAt: undefined });
 });

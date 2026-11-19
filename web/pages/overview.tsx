@@ -26,13 +26,16 @@ export function WorkPage(dashboard: Dashboard) {
   return OverviewPage(dashboard);
 }
 
-/** GY-3527: how long an item takes from release to merge, in one sentence; a warning names the item to open. */
-function SpeedLine({ time, now, open }: { time?: PipelineTime | null; now: number; open: (id: string) => void }) {
+/** GY-3527: the page's headline, merges an hour over the last 24 hours, and under it one line on how long an item takes; a warning names the item to open. */
+function Speed({ time, now, open }: { time?: PipelineTime | null; now: number; open: (id: string) => void }) {
   if (!time) return null;
   const line = pipelineSentence(time, now);
-  return <p className="page-fact speed-line" data-speed-line={line.warning ? 'warning' : 'calm'}>
-    {line.text}{line.open && <> <button type="button" className="text-button" onClick={() => open(line.open!)}>Open →</button></>}
-  </p>;
+  return <div className="speed">
+    <p className="speed-figure" data-speed-figure>{line.figure}</p>
+    <p className="speed-line" data-speed-line={line.warning ? 'warning' : 'calm'}>
+      {line.text}{line.open && <> <button type="button" className="text-button" onClick={() => open(line.open!)}>Open →</button></>}
+    </p>
+  </div>;
 }
 
 /**
@@ -72,7 +75,8 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   </section>;
   const admin = status?.actor?.role === 'admin';
   return <>
-    <div className="page-heading"><div><h1>Work</h1><p className="page-fact">{board ? summarySentence(counts) : 'Reading the board…'}</p><SpeedLine time={status?.pipelineTime} now={now} open={setSelected}/><BuildLine/></div>
+    <Speed time={status?.pipelineTime} now={now} open={setSelected}/>
+    <div className="page-heading"><div><h1>Work</h1><p className="page-fact">{board ? summarySentence(counts) : 'Reading the board…'}</p><BuildLine/></div>
       <div className="page-actions"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration update(s) failed: {status.jobs[0].error}</div>}

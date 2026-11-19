@@ -82,11 +82,11 @@ export const statusRoutes = defineRoutes('status', [
       const live = actor.role === 'operator-agent' ? null : await liveRelease(servingRoot, serving.commit ?? (watched?.observedAt && !watched.error ? watched.serving : null), serving.main, visibleWork, read);
       // GY-3434: where the app runs — main's app.url, the machine the loop names as its own, the served commit and deploy time.
       const app = await appRelease(read, serving, loopRegistry(engine).live(observedAt)?.hosts?.find(host => host.local)?.host ?? hostname());
-      // GY-3527: release-to-merge time over the last 10 merges and the open item released longest ago, for the Work page's speed line.
+      // GY-3527: merges in the last 24 hours, release-to-merge time over the last 10 merges and the open item released longest ago, for the Work page's speed line.
       const timed = pipelineItems(visibleWork);
       const released = new Map<string, number>((await engine.store.pool.query("SELECT work_id, min(created_at) AS at FROM events WHERE kind='ready' AND work_id = ANY($1::uuid[]) GROUP BY work_id", [timed.map(item => item.id)])).rows.map(row => [row.work_id, (row.at as Date).getTime()]));
       return { workerVerifications: pendingWorkerVerifications(services, actor, visibleWork), actor, humanOnly, app, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving, live, pipelineTime: pipelineTime(timed, released),
+        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', starvedJobs, jobs, deploy, serving, live, pipelineTime: pipelineTime(timed, released, observedAt.getTime()),
         // GY-3399: the week's batch-gate reverts beside the week's gates removed, each naming its items, for the header.
         thisWeek: servingRoot && actor.role !== 'operator-agent' ? await thisWeekReport(servingRoot, observedAt.getTime()) : null,
         // GY-3483: the checks running now, for the header — merge trials the merge writer has in flight

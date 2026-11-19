@@ -190,12 +190,12 @@ export function deliverySpeed(merged: MergedItem[], open: Pick<Work, 'key' | 'st
 }
 
 /**
- * GY-3527: the Work page's speed line, served on /api/status. Median and slowest-tenth minutes
+ * GY-3527: the Work page's speed figure and line, served on /api/status. Merges in the last 24 hours; median and slowest-tenth minutes
  * from release (the item's first `ready` event) to merge over the last 10 merges, the last merge
  * time, and the open released item released longest ago. `released` maps item id to release time.
  */
 export interface PipelineTime {
-  median: number | null; p90: number | null; samples: number; lastMergeAt: string | null;
+  merged24h: number; median: number | null; p90: number | null; samples: number; lastMergeAt: string | null;
   oldest: { id: string; key: string; title: string; stage: string; releasedAt: string } | null;
 }
 const mergeTime = (item: Pick<Work, 'delivery' | 'observation'>) => item.delivery?.mergedAt ?? item.observation?.mergedAt ?? null;
@@ -203,12 +203,13 @@ type Timed = Pick<Work, 'id' | 'key' | 'title' | 'stage' | 'delivery' | 'observa
 const lastMerges = <T extends Timed>(work: T[]) => work.filter(item => item.stage === 'done' && mergeTime(item)).sort((a, b) => Date.parse(mergeTime(b)!) - Date.parse(mergeTime(a)!)).slice(0, 10);
 /** The items whose release times the speed line reads: the last 10 merges and every released open item. */
 export const pipelineItems = <T extends Timed>(work: T[]) => [...lastMerges(work), ...work.filter(item => !['backlog', 'done'].includes(item.stage))];
-export function pipelineTime(work: Timed[], released: Map<string, number>): PipelineTime {
+export function pipelineTime(work: Timed[], released: Map<string, number>, now = Date.now()): PipelineTime {
   const merged = lastMerges(work);
   const times = merged.flatMap(item => released.has(item.id) ? [Date.parse(mergeTime(item)!) - released.get(item.id)!] : []).filter(ms => ms >= 0);
   const time = spread(times);
   const open = work.filter(item => !['backlog', 'done'].includes(item.stage) && released.has(item.id)).sort((a, b) => released.get(a.id)! - released.get(b.id)!)[0];
-  return { median: time?.median ?? null, p90: time?.p90 ?? null, samples: times.length, lastMergeAt: merged[0] ? mergeTime(merged[0]) : null,
+  const merged24h = work.filter(item => item.stage === 'done' && now - Date.parse(mergeTime(item) ?? '') <= 24 * 3_600_000).length;
+  return { merged24h, median: time?.median ?? null, p90: time?.p90 ?? null, samples: times.length, lastMergeAt: merged[0] ? mergeTime(merged[0]) : null,
     oldest: open ? { id: open.id, key: open.key, title: open.title, stage: open.stage, releasedAt: new Date(released.get(open.id)!).toISOString() } : null };
 }
 
@@ -220,20 +221,21 @@ export function plainDuration(minutes: number) {
 const stageWords: Record<string, string> = { ready: 'waiting for a worker', build: 'being built', review: 'in review', test: 'in its merge trial', acceptance: 'waiting on proof', merge: 'merging' };
 
 /**
- * The Work page's one sentence: a calm line with the median, the slowest tenth and the last merge;
+ * The Work page's headline figure, merges an hour over the last 24 hours with the count, and its one sentence: a calm line with the median, the slowest tenth and the last merge;
  * or a warning naming the oldest item in the pipeline, its stage and the one next action, when the
  * last merge is over three times the median old or that item has run past the slowest tenth.
  */
-export function pipelineSentence(time: PipelineTime, now: number): { warning: boolean; text: string; open?: string } {
-  if (time.median === null || time.p90 === null || !time.lastMergeAt) return { warning: false, text: 'No merges to time yet.' };
+export function pipelineSentence(time: PipelineTime, now: number): { figure: string; warning: boolean; text: string; open?: string } {
+  const figure = `${(time.merged24h / 24).toFixed(1)} merges an hour (${time.merged24h} in the last 24 hours)`;
+  if (time.median === null || time.p90 === null || !time.lastMergeAt) return { figure, warning: false, text: 'No merges to time yet.' };
   const sinceMerge = (now - Date.parse(time.lastMergeAt)) / 60_000;
   const oldest = time.oldest, age = oldest ? (now - Date.parse(oldest.releasedAt)) / 60_000 : 0;
   const next = oldest ? ` Next: open ${oldest.key} and clear what holds it.` : '';
   if (sinceMerge > 3 * time.median) {
     const named = oldest ? ` Oldest: ${oldest.key} ${oldest.title}, ${stageWords[oldest.stage] ?? oldest.stage}.${next}` : ' Nothing is in the pipeline. Next: release an item.';
-    return { warning: true, text: `No merge for ${plainDuration(sinceMerge)}, over three times the usual ${plainDuration(time.median)}.${named}`, ...(oldest ? { open: oldest.id } : {}) };
+    return { figure, warning: true, text: `No merge for ${plainDuration(sinceMerge)}, over three times the usual ${plainDuration(time.median)}.${named}`, ...(oldest ? { open: oldest.id } : {}) };
   }
-  if (oldest && age > time.p90) return { warning: true, open: oldest.id,
+  if (oldest && age > time.p90) return { figure, warning: true, open: oldest.id,
     text: `${oldest.key} ${oldest.title} has been in the pipeline ${plainDuration(age)}, longer than the slowest tenth (${plainDuration(time.p90)}); it is ${stageWords[oldest.stage] ?? oldest.stage}.${next}` };
-  return { warning: false, text: `An item takes ${plainDuration(time.median)} from release to merge (slowest tenth ${plainDuration(time.p90)}). Last merge ${plainDuration(sinceMerge)} ago.` };
+  return { figure, warning: false, text: `Last merge ${plainDuration(sinceMerge)} ago. An item takes ${plainDuration(time.median)} from release to merge (slowest tenth ${plainDuration(time.p90)}).` };
 }
