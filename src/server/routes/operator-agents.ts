@@ -1,6 +1,6 @@
 import { demand } from '../../model.js';
 import { CoordinatorRecovery } from '../../coordinator-recovery.js';
-import { defineRoutes, parseJson, type Services } from '../routes.js';
+import { defineRoutes, parseJson } from '../routes.js';
 import { humanSignIn, mintReporterIdentity, mintWorkerIdentity } from '../auth.js';
 
 /** Scoped operator automation identities: listing, setup, and credential lifecycle. */
@@ -43,9 +43,6 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
   } },
   // The operator's own sign-in link (GY-738): only their configured admin credential asks for one.
   { method: 'POST', path: '/api/sign-in-links', handle: async ({ actor, services }) => humanSignIn(services).issue(actor, services.principals.some(entry => entry.actor.id === actor.id && entry.actor.role === 'admin')) },
-  // GY-3215: the operator revokes a teammate; inviting one is team-access.ts's (GY-3294), which adds the machine's Tailscale link.
-  { method: 'POST', path: /^\/api\/invites\/([^/]+)\/revoke$/, handle: async ({ actor, services }, [name]) => humanSignIn(services).revoke(actor, configuredIds(services), decodeURIComponent(name)) },
+  // GY-3215: inviting and revoking a teammate are team-access.ts's (GY-3294, GY-3486), with the machine's Tailscale roster.
 ]);
 
-/** Every configured principal id; the issuer must be one of them, and no invite may take one's name. */
-const configuredIds = (services: Services) => services.principals.map(entry => entry.actor.id);

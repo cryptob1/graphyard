@@ -81,6 +81,22 @@ async function mintedReporter(services: Services, token: string): Promise<Princi
   return rows[0] ? { id: rows[0].id, role: 'reporter' } : null;
 }
 
+/**
+ * GY-3486: the teammate tailscaled names on the serve socket (server/index.ts): the invite row for
+ * that Tailscale login is the whole sign-in. Their first visit in this process is put on the history.
+ */
+export async function tailscaleTeammate(services: Services, login: string): Promise<Principal> {
+  const { rows } = await services.engine.store.pool.query<{ team: TeamRole }>('SELECT team FROM team_members WHERE name=$1', [login]);
+  demand(rows[0], `You are not invited to this install. Ask the owner to invite ${login}.`, 403);
+  const seen = visited.get(services) ?? visited.set(services, new Set()).get(services)!;
+  if (!seen.has(login)) {
+    seen.add(login);
+    await services.engine.store.pool.query("INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,'team.signed-in',$2)", [login, JSON.stringify({ via: 'tailscale', team: rows[0].team })]);
+  }
+  return { id: login, role: 'reader', team: rows[0].team, displayName: login, sessionKind: 'human' };
+}
+const visited = new WeakMap<Services, Set<string>>();
+
 /** Whoever reads the dashboard on this machine without signing in: a reader, so every action and human-only decision still needs a signed-in session. */
 export const localViewer: Principal = { id: 'local-viewer', role: 'reader', displayName: 'Local viewer' };
 const loopbackHost = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::(\d+))?$/i;
@@ -241,11 +257,23 @@ export class HumanSignIn {
   /** GY-3215: revoking a teammate removes them, their unopened links and every session they hold, at once. */
   async revoke(issuer: Principal, configured: string[], name: string) {
     operatorOnly(issuer, configured.includes(issuer.id));
+    const { removed, sessionsEnded } = await this.remove(name);
+    demand(removed, `${name} is not an invited teammate`, 404);
+    return { revoked: name, sessionsEnded };
+  }
+
+  /** GY-3486: the machine's roster admits a teammate on this install by their Tailscale login (team-access.ts). */
+  async admit(name: string, team: string, by: string) {
+    await this.store.pool.query(`INSERT INTO team_members (name, team, invited_by, invited_at) VALUES ($1, $2, $3, $4)
+      ON CONFLICT (name) DO UPDATE SET team=EXCLUDED.team, invited_by=EXCLUDED.invited_by, invited_at=EXCLUDED.invited_at`, [name, team, by, new Date(this.clock())]);
+  }
+
+  /** Remove a teammate, their unopened links and every session they hold. */
+  async remove(name: string) {
     for (const [key, entry] of this.links) if (entry.principal.team && entry.principal.id === name) this.links.delete(key);
     const { rowCount } = await this.store.pool.query('DELETE FROM team_members WHERE name=$1', [name]);
-    demand(!!rowCount, `${name} is not an invited teammate`, 404);
     const sessions = await this.store.pool.query(`DELETE FROM human_sign_in_sessions WHERE actor->>'id'=$1 AND actor ? 'team'`, [name]);
-    return { revoked: name, sessionsEnded: sessions.rowCount ?? 0 };
+    return { removed: !!rowCount, sessionsEnded: sessions.rowCount ?? 0 };
   }
 
   private link(principal: Principal, ttl = signInLinkTtlMs) {

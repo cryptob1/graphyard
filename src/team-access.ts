@@ -26,8 +26,20 @@ export const tailscaleTokenFile = (dir: string) => join(dir, 'tailscale-api.toke
 
 /** The share link the owner pasted, with the day it was made (the owner says; a URL does not prove its age) and so when Tailscale expires it. */
 export interface ShareLink { url: string; createdOn: string; expiresAt: string }
-/** What the machine directory records: this host's tailnet node and the owner's saved share link. */
-export interface MachineTailnet { dnsName?: string | null; ip?: string | null; deviceId?: string | null; shareLink?: ShareLink | null }
+/**
+ * GY-3486: the machine's teammates, one row per Tailscale login with the installs it may open, and
+ * the installs on this machine by the address the tailnet opens them at, which each install's loop records.
+ */
+export interface MachineTeam { installs: Record<string, { name: string }>; members: Record<string, { role: string; installs: string[] }> }
+export type TeamChange = { op: string; login: string; role: string; installs: string[] } | { op: string; login: string; remove: true };
+export function applyTeamChange(team: MachineTeam, change: TeamChange): MachineTeam {
+  const members = { ...team.members };
+  if ('remove' in change) delete members[change.login];
+  else members[change.login] = { role: change.role, installs: [...new Set([...members[change.login]?.installs ?? [], ...change.installs])] };
+  return { ...team, members };
+}
+/** What the machine directory records: this host's tailnet node, the owner's saved share link and the teammates. */
+export interface MachineTailnet { dnsName?: string | null; ip?: string | null; deviceId?: string | null; shareLink?: ShareLink | null; team?: MachineTeam | null }
 
 export async function readMachine(dir: string): Promise<MachineTailnet> {
   try { return JSON.parse(await readFile(machineFile(dir), 'utf8')) ?? {}; } catch { return {}; }
@@ -110,14 +122,26 @@ export function invitationMessage(input: { name: string; role: string; url: stri
   ].join('\n');
 }
 
+/** GY-3486: the one message Invite copies: Tailscale's share and each install's address; the person's Tailscale login is their sign-in. */
+export function teamInvitation(input: { logins: string[]; role: string; installs: string[]; share: { url: string; kind: 'reusable' | 'single-use' | 'multi-use' } }) {
+  const kind = { reusable: 'reusable share link', 'single-use': 'single-use invite, made for you', 'multi-use': 'invite made for the people named here' }[input.share.kind];
+  return [
+    `Hi ${input.logins.join(', ')}, you are invited to Graphyard as ${input.role}.`,
+    `1. Accept this Tailscale share of the machine: ${input.share.url} (${kind}).`,
+    `2. Open ${input.installs.length > 1 ? 'these installs' : 'this install'} on a device signed in to Tailscale as yourself:`,
+    ...input.installs.map(url => `   ${url}`),
+    'Tailscale signs you in; there is no other link or password.',
+  ].join('\n');
+}
+
 /**
  * The optional API path: one single-use device invite for this machine, made by the host with the owner's token.
  * Throws a plain reason, never the token, when Tailscale refuses or answers without an invite URL.
  */
-export async function createDeviceInvite(input: { api: string; token: string; deviceId: string; fetch?: typeof fetch }) {
+export async function createDeviceInvite(input: { api: string; token: string; deviceId: string; multiUse?: boolean; fetch?: typeof fetch }) {
   const response = await (input.fetch ?? fetch)(`${input.api.replace(/\/$/, '')}/api/v2/device/${encodeURIComponent(input.deviceId)}/device-invites`, {
     method: 'POST', headers: { Authorization: `Bearer ${input.token}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify([{ multiUse: false, allowExitNode: false }]), signal: AbortSignal.timeout(30_000),
+    body: JSON.stringify([{ multiUse: !!input.multiUse, allowExitNode: false }]), signal: AbortSignal.timeout(30_000),
   }).catch((error: Error) => { throw new Error(`Tailscale could not be reached (${error.message})`); });
   const body = await response.json().catch(() => null) as { inviteUrl?: string }[] | { message?: string } | null;
   if (!response.ok) throw new Error(`Tailscale refused the device invite (${response.status}${body && !Array.isArray(body) && body.message ? `: ${String(body.message).slice(0, 200)}` : ''})`);
