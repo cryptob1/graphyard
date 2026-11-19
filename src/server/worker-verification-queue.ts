@@ -11,6 +11,8 @@ import type { WorkerCheckResult } from '../merge-writer/worker-check.js';
 
 export interface WorkerVerificationJob {
   id: string; host: string; branch: string; work: Work; input: WorkerVerificationInput; baseBranch: string;
+  /** GY-3506: when the host must have answered, a minute before this request times out, so its own words reach the worker. */
+  deadline: number;
 }
 interface Pending {
   job: WorkerVerificationJob; executor?: string; requestedAt: number;
@@ -24,13 +26,13 @@ function queue(services: Services) {
   if (!pending) { pending = new Map(); queues.set(services, pending); }
   return pending;
 }
-export async function dispatchWorkerVerification<Result extends WorkerVerificationResult | WorkerCheckResult = WorkerVerificationResult>(services: Services, job: Omit<WorkerVerificationJob, 'id'>): Promise<Result> {
-  const pending = queue(services), id = randomUUID();
+export async function dispatchWorkerVerification<Result extends WorkerVerificationResult | WorkerCheckResult = WorkerVerificationResult>(services: Services, job: Omit<WorkerVerificationJob, 'id' | 'deadline'>): Promise<Result> {
+  const pending = queue(services), id = randomUUID(), requestedAt = Date.now();
   let timer: NodeJS.Timeout;
   try {
     return await new Promise<Result>((resolve, reject) => {
       timer = setTimeout(() => reject(new Refusal('Host worker verification timed out', 504)), workerVerificationTimeoutMs);
-      pending.set(id, { job: { ...job, id }, requestedAt: Date.now(), lines: [], resolve: resolve as Pending['resolve'], reject });
+      pending.set(id, { job: { ...job, id, deadline: requestedAt + workerVerificationTimeoutMs - 60_000 }, requestedAt, lines: [], resolve: resolve as Pending['resolve'], reject });
     });
   } finally { clearTimeout(timer!); pending.delete(id); }
 }
