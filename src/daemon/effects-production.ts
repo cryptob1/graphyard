@@ -30,7 +30,7 @@ import { stopOrphansOfRemovedWorktrees } from '../session-processes.js';
 import { recordObservedExhaustion } from '../master/environments.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory, recordedMasterMemory } from '../project-memory.js';
-import { mergeCandidateHold, mergeOpeningHold } from '../merge-writer/executor.js';
+import { mergeCandidateHold, mergeOpeningHold, openFlakyItem } from '../merge-writer/executor.js';
 import { mergeRecordKey, mergeWriterReads } from './cycle-merge-writer.js';
 import { runServedPreviewCases } from '../merge-writer/served-previews.js';
 import { readServeRecord, serveRecordPath } from '../serve-app.js';
@@ -294,6 +294,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), hold: async work => { const snapshot = await deps.snapshot(); return mergeCandidateHold(snapshot.work.find(item => item.id === work.id), work, snapshot.work); }, holdOpening: async work => mergeOpeningHold((await deps.snapshot()).work.find(item => item.id === work.id), work), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) });
       return { ...reads,
         ensureTrialImage: () => ensureTrialImage(),
+        // GY-3545: a merge trial's failure of a test with an open flaky-check item is noted on that item as the coordinator.
+        flaky: async (check: string) => openFlakyItem((await deps.snapshot()).work, check),
+        note: (item: Pick<Work, 'id' | 'key'>, text: string, key: string) => mutate(`work/${item.id}/request`, { type: 'note', reason: text }, key),
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey),
           attest: (work: Work, proof: string, reason: string, idempotencyKey: string) => asOperatorAgent(`work/${work.id}/evidence`, intentInput('attest', work, { proof, reason }), idempotencyKey) } : {}),
