@@ -757,7 +757,7 @@ async function releaseBacklog(cycle: Cycle, allowed: number) {
   for (const item of candidates) {
     // A yard repair (GY-3102) is released past the pipeline cap.
     if (slots <= 0 && !item.yardRepair) continue;
-    // An item sharing an exclusive resource (a file path included) with one in flight or released waits until that one lands.
+    // An item sharing an exclusive resource with one in flight or released waits until that one lands.
     if (resourceConflicts(item, snapshot.work, clock).length || snapshot.work.some(other => other.id !== item.id && other.stage !== 'done' && other.ready && sharedResources(item, other).length)) continue;
     const key = `release:${item.id}:${item.revision}`, inPipeline = snapshot.work.filter(entry => entry.stage !== 'done' && (entry.ready || inFlight(entry, clock))).length;
     try {

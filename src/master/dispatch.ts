@@ -155,7 +155,7 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (observing) throw new Error(`Dispatch waits for the loop's observation: ${observing.waitingFor}`);
   if (loopObservationProofs(work)) throw new Error('Dispatch refused: the loop records this item\'s reading itself and no code worker can finish it');
   // Observed-file overlap holds nothing: the merge queue and a sync round integrate whichever of
-  // two overlapping items lands second. A file an item declares is an exclusive resource, held above.
+  // two overlapping items lands second. Planned files are advisory; only exclusive resources hold, above.
 }
 
 export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, options: DispatchOptions = {}) {
