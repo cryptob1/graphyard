@@ -30,8 +30,8 @@ export async function priorityServer() {
   };
   await ok('operator-agents', { id: 'master', displayName: 'Master', capabilities: [], scope: { repositories: ['owner/project'], workItems: ['*'] }, token: tokens.master, reason: 'Test master' });
   const teammate = async (role: string) => {
-    const { code } = await ok('invites', { name: role, role });
-    return (await ok('sign-in', { code })).token as string;
+    const { link } = await ok('invites', { name: role, role });
+    return (await ok('sign-in', { code: new URL(link).hash.replace('#sign-in=', '') })).token as string;
   };
   return { store, engine, url, tokens, call, ok, teammate,
     close: async () => { http.closeAllConnections(); await new Promise<void>(resolve => http.close(() => resolve())); await store.close(); } };

@@ -17,6 +17,7 @@ import { Next, type Route, type RouteContext, type RouteModule, type Services } 
 import { leaseCommandRequest } from './routes/work.js';
 import { launchTokenActor } from './review-verdict.js';
 import { signinClaimFromEnv } from './routes/signin.js';
+import { endTerminals } from './terminal.js';
 
 /**
  * Resolve the bearer token to a principal: a configured credential first, then a human session a
@@ -204,9 +205,12 @@ export const laneProducerScope: RouteModule = { name: 'lane-producer-scope', rou
  * sign-ins until an existing session expires or signs out.
  */
 export const signInLinkTtlMs = 10 * 60_000;
-/** GY-3294: a teammate's invite link stays redeemable for 24 hours (the operator's own sign-in link for 10 minutes). */
-export const inviteLinkTtlMs = 24 * 3_600_000;
 export const signInSessionTtlMs = 90 * 86_400_000;
+/** GY-3514: a teammate's session ends after this long unused; every request renews it. */
+export const teammateSessionTtlMs = 30 * 60_000;
+const sessionTtl = (actor: Principal) => actor.team ? teammateSessionTtlMs : signInSessionTtlMs;
+/** GY-3514: the one line a teammate's spent or stale invite link answers with. */
+export const inviteRefused = 'This invite link was already used or has expired. Ask the owner for a new one.';
 export const maxSignInLinks = 16;
 export const maxSignInSessions = 32;
 /**
@@ -233,14 +237,17 @@ export class HumanSignIn {
 
   /**
    * GY-3215: the operator invites a teammate. NAME is recorded as a human principal with its team role
-   * (inviting it again changes the role and issues a fresh link), and the link opens that teammate's own
-   * session: role reader, so it reads everything; a maintainer also files work.
+   * (inviting it again changes the role), and the link opens that teammate's own session: role reader,
+   * so it reads everything; a maintainer also files work and types into the master. GY-3514: the link
+   * is kept in the database, opens once, and stays valid for the TTL the owner picked.
    */
-  async invite(issuer: Principal, configured: string[], name: string, team: string) {
+  async invite(issuer: Principal, configured: string[], name: string, team: string, ttl: number) {
     this.checkInvite(issuer, configured, name, team);
+    const now = this.clock(), code = randomBytes(32).toString('base64url'), expiresAt = new Date(now + ttl);
     await this.store.pool.query(`INSERT INTO team_members (name, team, invited_by, invited_at) VALUES ($1, $2, $3, $4)
-      ON CONFLICT (name) DO UPDATE SET team=EXCLUDED.team, invited_by=EXCLUDED.invited_by, invited_at=EXCLUDED.invited_at`, [name, team, issuer.id, new Date(this.clock())]);
-    return { ...this.link({ id: name, role: 'reader', team: team as TeamRole, displayName: name }, inviteLinkTtlMs), role: team };
+      ON CONFLICT (name) DO UPDATE SET team=EXCLUDED.team, invited_by=EXCLUDED.invited_by, invited_at=EXCLUDED.invited_at`, [name, team, issuer.id, new Date(now)]);
+    await this.store.pool.query('INSERT INTO team_invites (code_hash, name, expires_at) VALUES ($1, $2, $3)', [digest(code), name, expiresAt]);
+    return { code, principal: name, expiresAt: expiresAt.toISOString() };
   }
 
   /** The checks an invite passes before anything is made for it (GY-3294: before a Tailscale device invite too). */
@@ -268,15 +275,17 @@ export class HumanSignIn {
       ON CONFLICT (name) DO UPDATE SET team=EXCLUDED.team, invited_by=EXCLUDED.invited_by, invited_at=EXCLUDED.invited_at`, [name, team, by, new Date(this.clock())]);
   }
 
-  /** Remove a teammate, their unopened links and every session they hold. */
+  /** Remove a teammate, their unopened links and every session they hold, closing their open master pane at once. */
   async remove(name: string) {
-    for (const [key, entry] of this.links) if (entry.principal.team && entry.principal.id === name) this.links.delete(key);
+    await this.store.pool.query('DELETE FROM team_invites WHERE name=$1', [name]);
     const { rowCount } = await this.store.pool.query('DELETE FROM team_members WHERE name=$1', [name]);
     const sessions = await this.store.pool.query(`DELETE FROM human_sign_in_sessions WHERE actor->>'id'=$1 AND actor ? 'team'`, [name]);
+    endTerminals(name);
     return { removed: !!rowCount, sessionsEnded: sessions.rowCount ?? 0 };
   }
 
-  private link(principal: Principal, ttl = signInLinkTtlMs) {
+  private link(principal: Principal) {
+    const ttl = signInLinkTtlMs;
     const now = this.prune(), code = randomBytes(32).toString('base64url');
     bounded(this.links, maxSignInLinks - 1);
     this.links.set(digest(code), { principal, expiresAt: now + ttl });
@@ -287,27 +296,35 @@ export class HumanSignIn {
   async redeem(code: string) {
     const now = this.prune(), key = digest(code), link = this.links.get(key);
     this.links.delete(key);
-    demand(link && link.expiresAt > now, 'This sign-in link has expired or was already used; ask for a new one', 401);
+    const principal = link && link.expiresAt > now ? link.principal : await this.teammateInvite(key, now);
     const token = `gyh_${randomBytes(32).toString('base64url')}`;
-    const actor: Principal = { ...link!.principal, sessionKind: 'human' };
+    const actor: Principal = { ...principal, sessionKind: 'human' }, expiresAt = new Date(now + sessionTtl(actor));
     await this.store.transaction(async db => {
       // Serialize pruning and insertion across server instances to keep the global size bound.
       await db.query('LOCK TABLE human_sign_in_sessions IN EXCLUSIVE MODE');
       await db.query('DELETE FROM human_sign_in_sessions WHERE expires_at <= $1', [new Date(now)]);
       const { rows } = await db.query('SELECT count(*)::int AS count FROM human_sign_in_sessions');
       demand(rows[0].count < maxSignInSessions, 'The 32-session sign-in limit is reached; sign out an existing session or wait for one to expire, then request a new sign-in link', 409);
-      await db.query('INSERT INTO human_sign_in_sessions (token_hash, actor, expires_at) VALUES ($1, $2, $3)', [digest(token), actor, new Date(now + signInSessionTtlMs)]);
+      await db.query('INSERT INTO human_sign_in_sessions (token_hash, actor, expires_at) VALUES ($1, $2, $3)', [digest(token), actor, expiresAt]);
     }, { coordinationLock: false });
-    return { token, actor, expiresAt: new Date(now + signInSessionTtlMs).toISOString() };
+    return { token, actor, expiresAt: expiresAt.toISOString() };
   }
 
-  /** The principal a session token stands for, or null once it has expired or was never issued. Use renews it: its expiry is its last use plus the session lifetime. */
+  /** GY-3514: a teammate's invite opens once: the row is spent by the open that takes it, and a revoked teammate's link opens nothing. */
+  private async teammateInvite(key: string, now: number): Promise<Principal> {
+    const { rows } = await this.store.pool.query<{ name: string; team: TeamRole }>(`DELETE FROM team_invites i USING team_members m
+      WHERE i.code_hash=$1 AND m.name=i.name AND i.expires_at > $2 RETURNING m.name, m.team`, [key, new Date(now)]);
+    demand(rows[0], inviteRefused, 401);
+    return { id: rows[0].name, role: 'reader', team: rows[0].team, displayName: rows[0].name };
+  }
+
+  /** The principal a session token stands for, or null once it has expired or was never issued. Use renews it: its expiry is its last use plus the session lifetime (a teammate's is short, GY-3514). */
   async authenticate(token: string): Promise<Principal | null> {
     if (!token.startsWith('gyh_')) return null;
-    const now = this.clock(), key = digest(token), expiresAt = new Date(now + signInSessionTtlMs);
+    const now = this.clock(), key = digest(token);
     const { rows } = await this.store.pool.query(
-      'UPDATE human_sign_in_sessions SET expires_at=GREATEST(expires_at, $3) WHERE token_hash=$1 AND expires_at > $2 RETURNING actor',
-      [key, new Date(now), expiresAt]);
+      `UPDATE human_sign_in_sessions SET expires_at=GREATEST(expires_at, CASE WHEN actor ? 'team' THEN $4::timestamptz ELSE $3::timestamptz END) WHERE token_hash=$1 AND expires_at > $2 RETURNING actor`,
+      [key, new Date(now), new Date(now + signInSessionTtlMs), new Date(now + teammateSessionTtlMs)]);
     return rows[0]?.actor ?? null;
   }
 

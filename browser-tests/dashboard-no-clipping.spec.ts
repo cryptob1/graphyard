@@ -29,7 +29,6 @@ async function seed(url: string) {
       body: JSON.stringify({ title: `A long enough title for row ${n} that it has to wrap onto a second line on a narrow window`, why: 'The operator reads the whole row.', simplest: 'One row per item.', type: 'feature', criteria: [{ id: 'AC-1', text: 'It works', proofs: ['e2e:fixture'] }] }) })).json() as { id: string };
     if (n > 1) await fetch(`${url}/api/work/${item.id}/ready`, { method: 'POST', headers: { ...operator, 'Idempotency-Key': `no-clipping-ready-${n}` }, body: JSON.stringify({ reason: 'Seeded' }) });
   }
-  await fetch(`${url}/api/team-access/share-link`, { method: 'POST', headers: operator, body: JSON.stringify({ url: 'https://login.tailscale.com/admin/invite/no-clipping-share' }) });
 }
 
 /** What the open page shows about clipping, read after a sideways wheel scroll. */
