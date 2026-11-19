@@ -1,4 +1,5 @@
 import { glossary, type GlossaryTerm } from '../glossary';
+import Invite from './invite';
 import Term from './term';
 import { viewFor, visibleViews, type View } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
@@ -144,6 +145,7 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
         <ActivityStrip work={work} observedAt={observedAt} status={status}/>
         <ShippedStrip work={work} observedAt={observedAt} live={status?.live}/>
         <OpenApp status={status}/>
+        <Invite api={dashboard.api} status={status}/>
         {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
       </div>
     </div>

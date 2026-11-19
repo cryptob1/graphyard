@@ -138,7 +138,7 @@ test('e2e:one-step-invite — Invite from the top bar admits a Tailscale login t
     // Two logins in one invite: one multi-use Tailscale device invite serves both.
     await dialog.getByLabel('Tailscale logins', { exact: true }).fill('cy@example.com, di@example.com');
     const again = setInterval(() => { void sync().catch(() => {}); }, 1_000);
-    try { await dialog.getByRole('button', { name: 'Invite', exact: true }).click(); await expect(dialog.getByLabel('Invitation message', { exact: true })).toContainText('one-step-2', settled); }
+    try { await dialog.getByRole('button', { name: 'Invite', exact: true }).click(); await expect(dialog.getByLabel('Invitation message', { exact: true })).toHaveValue(/one-step-2/, settled); }
     finally { clearInterval(again); }
     expect(deviceInvites[1]).toEqual([{ multiUse: true, allowExitNode: false }]);
 
