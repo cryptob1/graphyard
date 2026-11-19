@@ -19,7 +19,7 @@ Each repository gets its own install: run `graphyard up --repo OWNER/NAME` once 
 
 ## Sharing the machine over Tailscale
 
-Install Tailscale on the server, sign in, rerun `graphyard up`: every install is served on the tailnet with `tailscale serve --bg --http=PORT` — never `tailscale funnel`; nothing is public. To let a person in, open Machines in the Tailscale admin console, choose this machine, pick Share, and paste the link on any install's Setup page; every install on the machine then shows it. Tailscale expires an unused share link 30 days after it was made; Setup warns in the last seven days. Setup can also hold a Tailscale API credential and make one single-use device invite per person instead.
+Install Tailscale on the server, sign in, rerun `graphyard up`: every install is served on the tailnet with `tailscale serve --bg --http=PORT` — never `tailscale funnel`; nothing is public. To let a person in, press **Invite** in the top bar. The first time it asks once for a Tailscale API key, which the browser seals to this machine; each invite then makes the Tailscale device invite itself (multi-use when it names several people). Until then a machine share link saved earlier (Tailscale admin console: Machines, this machine, Share) is used; Tailscale expires an unused one 30 days after it was made.
 
 ## One Herdr, holding only the Master sessions
 
@@ -31,7 +31,7 @@ The first install serves at `127.0.0.1:4310`, each next one takes the first free
 
 ## Signing in and inviting people
 
-Each install has its own sign-in; one signs you in to no other. Sign in with the one-time link `up` prints, or `graphyard login` for a fresh one. **Invite someone** on Setup makes one message with both links: the machine share, then a single-use sign-in for that install that expires within 24 hours. A viewer reads everything; a maintainer also files work (`graphyard invite NAME --role viewer|maintainer` prints the sign-in alone). Invite a person on each install they need.
+Each install has its own sign-in; one signs you in to no other. Sign in with the one-time link `up` prints, or `graphyard login` for a fresh one. Invite someone with **Invite**: name their Tailscale logins, a role, and the installs on this machine (all ticked). One message carries the Tailscale share and each install's address; their Tailscale login is their sign-in there, with no other link. The dialog lists every teammate, each with Revoke. A viewer reads everything; a maintainer also files work. `graphyard invite NAME --role viewer|maintainer` still prints a single-use sign-in link that expires within 24 hours, for one install.
 
 ## The missing desktop keyring
 

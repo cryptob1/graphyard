@@ -127,10 +127,14 @@ export function composeBundle(ctx: AdapterContext, values: EnvValue[]): BundleFi
     ...keys.map(key => `"./${key.bundle}:${key.container}:ro"`),
     ...(ctx.repoCheckout ? [`"${ctx.repoCheckout}:/repo"`] : []),
     ...(ctx.repoGitDir ? [`"${ctx.repoGitDir}:${ctx.repoGitDir}"`] : []),
+    // GY-3486: the serve socket tailscaled proxies the tailnet to (up.ts), the one place Tailscale's identity header is trusted.
+    `"./serve:/run/graphyard"`,
   ];
   const files: BundleFile[] = [
     { path: `${ctx.workdir}/db.env`, mode: 0o600, content: `POSTGRES_USER=graphyard\nPOSTGRES_DB=graphyard\nPOSTGRES_PASSWORD=${ctx.databasePassword}\n` },
     { path: `${ctx.workdir}/server.env`, mode: 0o600, content: `${environment.join('\n')}\n` },
+    // Made by the installer before Docker would make it root's, so the server (uid 1000) can create its serve socket there.
+    { path: `${ctx.workdir}/serve/.keep`, mode: 0o600, content: '' },
     { path: `${ctx.workdir}/compose.yaml`, mode: 0o644, content: `name: graphyard-${ctx.installId}
 services:
   db:
@@ -151,7 +155,9 @@ services:
     env_file: [server.env]
     environment:
       GRAPHYARD_LOCAL_VIEW_PORT: "${ctx.port}"
-${serverVolumes.length ? `    volumes: [${serverVolumes.join(', ')}]\n` : ''}    depends_on:
+      GRAPHYARD_SERVE_SOCKET: /run/graphyard/serve.sock
+    volumes: [${serverVolumes.join(', ')}]
+    depends_on:
       db: { condition: service_healthy }
     ports: ["127.0.0.1:${ctx.port}:${SERVER_PORT}"]
 volumes:
