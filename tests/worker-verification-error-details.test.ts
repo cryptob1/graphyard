@@ -4,8 +4,11 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { runWorkerVerification, verificationStep } from '../src/merge-writer/worker-verification.js';
+import { runWorkerVerification, verificationStep, workerVerificationTimeoutMs } from '../src/merge-writer/worker-verification.js';
 import { failedRequiredProofs } from '../src/cli/worker-verification.js';
+// Without the change this export is missing, so the file fails at once on the base instead of starting a
+// verification there that, like GY-3462's, would hang until the outer verification's own deadline.
+import { proofRunTimeoutMs } from '../src/cli/verify.js';
 import type { Work } from '../src/model.js';
 
 // GY-3506: GY-3462's verification failed as a bare `Command failed: node … verify.mjs`. Its proof
@@ -60,6 +63,7 @@ test('integration:stuck — never ends', async () => { await new Promise(() => {
 }
 
 test('e2e:worker-verification-error-details — a proof that hangs against the base no longer kills the confined verification; one that hangs on HEAD still fails it', { timeout: 420_000 }, async () => {
+  assert.ok(proofRunTimeoutMs < workerVerificationTimeoutMs, 'one proof run cannot outlast the whole verification');
   const { repository, allocations, head } = await hangingOnBase();
   const work = { key: 'GY-1', criteria: [{ id: 'AC-1', proofs: ['integration:feature'] }] } as Work;
   // A short verification bound stands in for the 55-minute one: before the fix verify.mjs ran past it and failed opaquely.
