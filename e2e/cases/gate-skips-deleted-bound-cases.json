@@ -8,7 +8,7 @@
     {
       "kind": "command",
       "name": "the gate drops the deleted bound case and verifies the batch",
-      "run": "node --import tsx tests/helpers/run-tests.ts tests/gate-skips-deleted-bound-cases.test.ts tests/main-batch-gate.test.ts",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:gate-skips-deleted-bound-cases tests/main-batch-gate.test.ts",
       "timeoutSeconds": 600
     }
   ]

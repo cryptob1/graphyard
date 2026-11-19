@@ -12,6 +12,15 @@ test('unit:gate-skips-deleted-bound-cases — a bound case absent from the tip c
   const ports = { catalog: async () => ['kept', 'smoke'], core: async () => ['smoke'] };
   const landings = [landing('1'.repeat(40), 'GY-1', 'e2e:gone'), landing('2'.repeat(40), 'GY-2', 'e2e:kept')];
   assert.deepEqual(await gateChecks(ports, record, 'tip', landings, false), ['build', 'e2e:kept', 'e2e:smoke', 'affected']);
+  await gateChecks(ports, record, 'tip', landings, false);
+  assert.equal(record.notes!.length, 1);
+  assert.match(record.notes![0]!, /gone.*GY-1/);
+});
+
+test('unit:gate-skips-deleted-bound-cases — the whole catalog also records the dropped binding', async () => {
+  const record = { merges: [], notes: [] } as unknown as Pick<GateRecord, 'merges' | 'notes'>;
+  const ports = { catalog: async () => ['kept', 'smoke'], core: async () => ['smoke'] };
+  await gateChecks(ports, record, 'tip', [landing('1'.repeat(40), 'GY-1', 'e2e:gone')], true);
   assert.equal(record.notes!.length, 1);
   assert.match(record.notes![0]!, /gone.*GY-1/);
 });

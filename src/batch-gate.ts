@@ -269,11 +269,12 @@ const boundCaseIds = (record: Pick<GateRecord, 'merges'>, landings: readonly Ser
 /** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. GY-3547: a bound case a later item deleted from the tip's catalog is dropped, with one note. */
 export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges' | 'notes'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
   const catalog = await ports.catalog(tip);
-  let bound: string[] = [];
-  if (!whole) {
-    for (const { id, item } of boundCases(record, landings)) {
-      if (catalog.includes(id)) bound.push(id);
-      else record.notes = [...record.notes ?? [], `${id}: ${item} bound this case; it is gone from the catalog, so the gate skips it`.slice(0, 200)].slice(-filingNotesWindow);
+  const bound: string[] = [];
+  for (const { id, item } of boundCases(record, landings)) {
+    if (catalog.includes(id)) bound.push(id);
+    else {
+      const note = `${id}: ${item} bound this case; it is gone from the catalog, so the gate skips it`.slice(0, 200);
+      record.notes = [...new Set([...record.notes ?? [], note])].slice(-filingNotesWindow);
     }
   }
   const cases = [...new Set([...(whole ? catalog : bound), ...await ports.core(tip)])];
