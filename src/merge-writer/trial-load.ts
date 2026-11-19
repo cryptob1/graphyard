@@ -176,13 +176,13 @@ def admit():
     try:
         while True:
             why, floor = pressure()
-            # GY-3535: each heat wait, once over, says how long it held the start, so a timed-out trial can tell heat from the head.
+            # GY-3535: a heat wait says how long it held the start when it ends and every 30s, so a trial killed mid-wait can still tell heat from the head.
             hot = why is not None and why.startswith('a CPU sensor')
             if hot and hot_since is None:
                 hot_since = time.time()
-            elif not hot and hot_since is not None:
+            elif hot_since is not None and (not hot or time.time() - hot_since >= 30):
                 print('${heatLine}' + str(int(time.time() - hot_since)) + 's', file=sys.stderr, flush=True)
-                hot_since = None
+                hot_since = time.time() if hot else None
             slot = None if why else take_slot()
             if floor and why != said:
                 with open(note, 'w') as file:
