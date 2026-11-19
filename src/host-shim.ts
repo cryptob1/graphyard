@@ -10,10 +10,12 @@
 //                                  in IMAGE with --network=none, CPU, memory and process limits, only RUN mounted
 //   fetch-records RUN INDEX        the shard's per-file records
 //   clean RUN                      remove a run directory
-// Anything else is refused. Containers keep Docker's default seccomp and system paths and never get
-// the Docker socket or the network, so a shard reaches no private address, the tailnet or the host.
+// Anything else is refused. As in a local trial, containers may start nested sandboxes (seccomp and system
+// paths unconfined, the graphyard-trial AppArmor profile where Docker uses AppArmor; GY-3549), and never
+// get the Docker socket or the network, so a shard reaches no private address, the tailnet or the host.
 import { createHash } from 'node:crypto';
 import { trialLauncher } from './merge-writer/trial-container.js';
+import { trialAppArmorProfile } from './merge-writer/trial-apparmor.js';
 import { defaultDiskFloorGb, minimumTrialContainers, trialHotCelsius, trialPressureBoundSeconds, trialStartOrder } from './merge-writer/trial-load.js';
 
 /** Read-only: Docker's answer, cores, load, the /proc/stat cpu line, CPU sensors and the trial containers running now. */
@@ -153,6 +155,7 @@ else:
         spec = {'image': open(os.path.join(run, 'image')).read().strip(), 'mounts': [[run, run, False]], 'network': 'none',
                 'deadline': min(deadline, int(time.time() * 1000) + 3 * 3600 * 1000), 'docker': os.environ['DOCKER_HOST'], 'user': '1000:0',
                 'limits': {'cpus': max(1, min(cpus, cores)), 'memory': '%dm' % max(512, memory), 'pids': 4096},
+                'apparmor': '${trialAppArmorProfile}' if 'apparmor' in subprocess.run(['docker', 'info', '--format', '{{json .SecurityOptions}}'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True).stdout else None,
                 'load': {'slots': os.path.join(home, '.gy', 'trial-slots'), 'cap': cap, 'order': ${trialStartOrder.merge}, 'hotCelsius': ${trialHotCelsius},
                          'floorBytes': float(os.environ.get('GRAPHYARD_HOST_FLOOR_GB', ${defaultDiskFloorGb})) * 1e9, 'hwmon': '/sys/class/hwmon', 'pressureBoundSeconds': ${trialPressureBoundSeconds}}}
         command = [{'{list}': listed, '{records}': records}.get(word, word) for word in argv]
