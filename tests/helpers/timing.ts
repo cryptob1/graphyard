@@ -51,6 +51,23 @@ export async function steadyState(read: () => Promise<unknown>, options: { warmu
   return { warmup, samples };
 }
 
+/**
+ * Time several reads in steady state, one of each per round, so a baseline and the reads judged
+ * against it see the same load: a runner that grows busier mid-run moves them together (GY-3546).
+ */
+export async function interleavedSteadyState<K extends string>(reads: Record<K, () => Promise<unknown>>, options: { warmup: number; samples: number; clock?: () => number }): Promise<Record<K, SteadyState>> {
+  const clock = options.clock ?? (() => performance.now());
+  const names = Object.keys(reads) as K[];
+  const timed = Object.fromEntries(names.map(name => [name, { warmup: [], samples: [] }])) as Record<K, SteadyState>;
+  for (let round = 0; round < options.warmup + options.samples; round++) {
+    for (const name of names) {
+      const started = clock(); await reads[name]();
+      timed[name][round < options.warmup ? 'warmup' : 'samples'].push(clock() - started);
+    }
+  }
+  return timed;
+}
+
 export interface TimingMeasurement {
   /** Stable name of the assertion, the key its run-to-run spread is recorded under. */
   name: string;
