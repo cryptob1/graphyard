@@ -120,6 +120,7 @@ img.mark{width:26px;height:26px}
 .main .page-heading h1,.page-heading h1{margin:0;font-size:var(--type-title);font-weight:600;letter-spacing:-.5px}
 .summary{margin:var(--space-1) 0 0;font-size:var(--type-body);color:var(--text-2)}
 .page-heading .page-fact{margin:var(--space-2) 0 0;font-size:var(--type-sentence);font-weight:500;line-height:1.5;color:var(--text)}
+.speed{margin:18px 0 0}.speed-figure{margin:0;font-size:40px;font-weight:600;letter-spacing:-.8px;line-height:1.15;color:var(--text);overflow-wrap:anywhere}.speed-line{margin:var(--space-2) 0 0;font-size:var(--type-body);overflow-wrap:anywhere}.speed-line[data-speed-line=warning]{color:var(--blocked);font-weight:500}
 .page-actions{display:flex;align-items:center;gap:var(--space-3);flex-shrink:0}.page-actions button,.page-actions a{white-space:nowrap}
 .search input{width:280px;height:40px;padding:0 var(--space-3);border:1px solid var(--border);border-radius:var(--radius);background:var(--raised);color:var(--text);font-size:var(--type-body)}
 .count{font-size:var(--type-small);background:none;color:var(--text-2);padding:0;margin-left:var(--space-2);font-weight:400}
