@@ -88,7 +88,7 @@ ENV PATH=/usr/local/go/bin:$PATH
 | Item previews | one \`graphyard-preview-KEY-…\` Compose project per previewed item | the host's Docker | — | the item page's Preview panel |
 | The master and agent sessions | Herdr panes and headless runs confined by bubblewrap/Landlock | the host, in worktrees under the checkout | — | the item pages |
 | Graphyard's files | — | the checkout's \`.graphyard/\` and \`~/.config/graphyard/<install>/\` (credentials 0600, CLI releases) | — | — |
-| The heavy-job budget | lock directory shared by every install of this user | \`~/.local/share/graphyard/heavy-jobs/\`; its \`limit\` file sets how many tests, builds and trials run at once (default 2) | — | a waiting job names the holders |
+| The heavy-job budget | lock directory shared by every install of this user | \`~/.local/share/graphyard/heavy-jobs/\`; its \`limit\` file sets how many heavy jobs run at once (default 2) | — | projects holding none go first; waiters name holders |
 | Added hosts | \`graphyard host prepare\` makes the unprivileged gy-compute user with rootless Docker, its key limited to graphyard-host-shim, fetching the rootless extras itself when the host lacks them; \`graphyard host add gy-compute@HOST\` records it; merge trials send it test shards, and a host could forge its own shard results, so add only your own machines | listed on Workers with cores, temperature, steal and runs now, Away while unreachable | — | \`graphyard host list\`; \`graphyard host remove USER@HOST\` |
 | The app under test | \`local\`: served inside the merge trial; a named environment: one instance per batch gate | the host, or wherever the environment's \`up\` command provisions it | — | the Tests page's Where tests run block |
 

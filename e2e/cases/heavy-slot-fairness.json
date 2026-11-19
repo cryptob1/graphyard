@@ -1,0 +1,15 @@
+{
+  "id": "heavy-slot-fairness",
+  "title": "Two installs sharing the host's heavy-job slots each get a trial running before either gets a second",
+  "description": "Two installs' loops share one heavy-jobs directory at limit 2 and submit merge trials while another job holds both slots, the first install's three trials queued ahead of the second's two; when the slots free, one trial from each install starts before either runs a second at once, master status heavyJobs lists holders from both projects, and every trial runs without any job being stopped (GY-3487).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "both installs' trials start before either runs a second at once",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:heavy-slot-fairness tests/heavy-slot-fairness.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
