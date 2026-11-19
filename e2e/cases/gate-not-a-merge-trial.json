@@ -1,0 +1,15 @@
+{
+  "id": "gate-not-a-merge-trial",
+  "title": "A running batch gate never takes the merge-trial slot",
+  "description": "Runs the real loop cycle with trialCap 1, a batch gate in flight and two merges queued: the first merge trial starts beside the gate without waiting for it, master status shows that merge in flight beside the gate, and the second merge stays queued under the cap (GY-3531).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the merge is in flight beside the running gate",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:gate-not-a-merge-trial tests/gate-not-a-merge-trial.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
