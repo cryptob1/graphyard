@@ -1,0 +1,12 @@
+{
+  "id": "main-page-pipeline-time",
+  "title": "The Work page leads with merges an hour and says how long an item takes from release to merge, and warns when the pipeline stalls",
+  "description": "The real control plane's /api/status reads the merges of the last 24 hours, release-to-merge time over the last 10 merges, the last merge and the open item released longest ago from the ledger. A real browser on the built dashboard at 390 and 1280 px leads with one figure, first and largest: merges an hour over the last 24 hours with the count in brackets. Under it one calm line gives the time since the last merge and the median release-to-merge time, with no ids; when the last merge is over three times the median old, or an item has run past the slowest tenth, the sentence becomes a warning naming that item's key, title and stage with one next action. No page scrolls sideways and the top bar's counts keep their meaning.",
+  "tags": ["dashboard"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "status serves merges in 24 hours, release-to-merge minutes, last merge and the oldest open item from the ledger", "run": "node --import tsx tests/helpers/run-tests.ts tests/main-page-pipeline-time-status.test.ts", "timeoutSeconds": 240 },
+    { "kind": "command", "name": "Work page merges-an-hour figure and speed line: calm, stuck item and stale merge at 390 and 1280 px", "run": "npm run test:browser -- browser-tests/main-page-pipeline-time.spec.ts", "timeoutSeconds": 420 }
+  ]
+}
