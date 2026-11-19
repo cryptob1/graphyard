@@ -31,8 +31,10 @@ export const underHeatLimit = (reading: HostReading) => !reading.away && (readin
  * socket, so such a file there would fail as a red verdict that measures neither the merge nor
  * the host. Naming any word keeps the file on this machine; over-marking only costs a host
  * shards, under-marking reads as a false failure.
+ * GY-3536: a test importing the trial runner (merge-writer) or the sandboxed benchmarks needs
+ * namespaces too, which a compute host's shard lacks.
  */
-export const localOnlyTestPattern = /bwrap|unshare|landlock|docker|compose|network|socket|ssh|scp|postgres|mysql|redis|database|withDatabase|server|listen|connect|fetch|http|url|browser|playwright|chromium|firefox|webkit|selenium|puppeteer|e2e/i;
+export const localOnlyTestPattern = /bwrap|unshare|landlock|docker|compose|network|socket|ssh|scp|postgres|mysql|redis|database|withDatabase|server|listen|connect|fetch|http|url|browser|playwright|chromium|firefox|webkit|selenium|puppeteer|e2e|merge-writer|benchmarks|hard-math/i;
 /** Whether a test file's text may run on a remote shard: it names none of the local-only words. */
 export const remoteableTestFile = (text: string) => !localOnlyTestPattern.test(text);
 

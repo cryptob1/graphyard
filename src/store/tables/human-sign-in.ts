@@ -15,3 +15,11 @@ export const teamMembers = defineTable({
   name text PRIMARY KEY, team text NOT NULL, invited_by text NOT NULL, invited_at timestamptz NOT NULL
 );`,
 });
+
+/** GY-3514: a teammate's unopened invite links, by digest; opening one deletes it. */
+export const teamInvites = defineTable({
+  name: 'team_invites', orderBy: 'code_hash',
+  ddl: `CREATE TABLE IF NOT EXISTS team_invites (
+  code_hash text PRIMARY KEY, name text NOT NULL, expires_at timestamptz NOT NULL
+);`,
+});

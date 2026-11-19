@@ -43,14 +43,16 @@ export const gateLimitMs = 45 * 60_000;
 export const gateCeilingMs = 90 * 60_000;
 /**
  * GY-3507: one gate run's bound — twice the median execution time of the recent verified runs,
- * never under the limit above (also the cold start, with no verified run) nor over the ceiling.
- * Only verified runs are sampled, their waits left out, so neither a timeout nor a wait inflates it.
+ * never under the floor nor over the ceiling. Only verified runs are sampled, their waits left out,
+ * so neither a timeout nor a wait inflates it. GY-3523: the floor is the 45-minute limit, or 1.5
+ * times the recorded whole-catalog time when that is longer, so a catalog slower than 45 minutes
+ * can verify once and earn samples; a catalog time above the ceiling is inflated and not trusted.
  */
-export function gateBoundMs(record: Pick<GateRecord, 'verifiedRuns'>): number {
+export function gateBoundMs(record: Pick<GateRecord, 'verifiedRuns'> & Partial<Pick<GateRecord, 'catalogMs'>>): number {
   const runs = (record.verifiedRuns ?? []).map(run => run.ms).sort((a, b) => a - b), middle = runs.length >> 1;
-  if (!runs.length) return gateLimitMs;
-  const median = runs.length % 2 ? runs[middle]! : (runs[middle - 1]! + runs[middle]!) / 2;
-  return Math.min(gateCeilingMs, Math.max(gateLimitMs, Math.ceil(2 * median)));
+  const catalog = record.catalogMs ?? 0, floor = catalog <= gateCeilingMs ? Math.max(gateLimitMs, Math.ceil(1.5 * catalog)) : gateLimitMs;
+  const median = !runs.length ? 0 : runs.length % 2 ? runs[middle]! : (runs[middle - 1]! + runs[middle]!) / 2;
+  return Math.min(gateCeilingMs, Math.max(floor, Math.ceil(2 * median)));
 }
 const minutes = (ms: number) => Math.round(ms / 60_000);
 /** How often the full suite and the whole catalog run against the verified commit. */

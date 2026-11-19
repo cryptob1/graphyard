@@ -1,0 +1,16 @@
+{
+  "id": "one-link-invite",
+  "title": "Invite gives one link that signs a person in once from any device, and the master stays confined",
+  "description": "Against a real control plane and a temporary Postgres, with the host loop's tailscale turning Funnel on for the install's own port alone: Invite returns exactly one link on the Funnel address; opening it as a public request with no Tailscale login signs the person in, and a second open is refused; links last the days the owner picked; a teammate's session is short and renews with use; revoking a maintainer closes their Master page at once; typed lines are listed with who and when. Under real bubblewrap, a command typed into the master session cannot read the operator's token or write the checkout or home outside .graphyard.",
+  "tags": ["dashboard", "authentication", "deployment"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "One-link invite, Funnel, revoke, typed list and master confinement",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/one-link-invite.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

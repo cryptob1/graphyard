@@ -383,7 +383,9 @@ export const completeCommand: CliCommand = {
     '                                to 10 minutes, so a slow plane strands no finished head. Reports',
     '                                what graphyard verify ran on HEAD and its outcome. Refused while',
     '                                GitHub requests are paused, it waits for the named reset and',
-    '                                submits again (bounded)',
+    '                                submits again (bounded). A verification still waiting for a',
+    '                                slot when the request\'s time runs out is queued: the loop',
+    '                                verifies and submits the head, with no blocker',
   ],
   run: async (context, work) => {
     // GY-3330: one idempotency key for this attempt and head — a caller's GRAPHYARD_REQUEST_ID,
@@ -401,6 +403,8 @@ export const completeCommand: CliCommand = {
     // names files; every other item runs nothing.
     const { requestWorkerVerification } = await import('./worker-verification.js');
     const checked = await requestWorkerVerification(context, work, { mode: 'complete', head: body.head, epoch: body.epoch });
+    // GY-3537: the verification still waits for a slot; the head is recorded and the loop submits it.
+    if ('queued' in checked) { context.print('queued for verification; the loop submits it'); return; }
     const rerun = checked.rerun;
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
