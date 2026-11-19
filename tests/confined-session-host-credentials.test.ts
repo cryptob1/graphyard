@@ -110,7 +110,7 @@ test('e2e:confined-session-host-credentials — under real bwrap a worker and a 
       'const calls = [];',
       'await completeCommand.run({ args: ["1", "--head"], repositoryRoot: () => tree, print: () => {},',
       '  api: async (path, body) => { calls.push(path);',
-      '    return path.endsWith("/worker-verification") ? { record: { key: "GY-1", head: body.head, clean: true, at: new Date().toISOString(), ran: [], outstanding: [] }, rerun: { flaked: [], baseFailures: [] } } : { key: "GY-1", submission: { epoch: 1 } }; } }, work);',
+      '    return { key: "GY-1", submission: { epoch: 1 } }; } }, work);',
       'console.log(`WORKER-COMPLETE ${token.length} ${calls.join(",")}`);',
     ].join('\n'));
     const flow = [
