@@ -1,0 +1,9 @@
+{
+  "id": "opencode-probe-own-key",
+  "title": "Each OpenCode account is held only on its own key's limit",
+  "description": "Three OpenCode accounts with three keys, whose live checks a shared OpenCode service answered with another login's refusal: only the over-limit accounts read spent, each until its own reset; the probe records a fingerprint of the key it used; a master's available mark holds until that account's own key reads otherwise; and the Agents page shows the spent account's reset in one line and the mismatched live answer as a fault on the usable account.",
+  "tags": ["capacity"],
+  "target": "any",
+  "required": true,
+  "steps": [{ "kind": "command", "name": "opencode probe own key regression", "run": "node --import tsx tests/helpers/run-tests.ts tests/opencode-probe-own-key.test.ts", "timeoutSeconds": 600 }]
+}
