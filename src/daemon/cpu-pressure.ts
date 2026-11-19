@@ -17,9 +17,11 @@
 // GY-3426: the reading is the package sensor (the hottest core only where no package sensor exists),
 // averaged over the cycles of the last 60 s — one core spikes to 95-100C for a second whenever
 // anything starts, and comparing that instant to the limit held nearly every launch on a 60C host.
+// GY-3532: the window is 120 s, and the mean decides only once it holds 4 samples (the latest
+// before that): turbo spikes are normal on a CPU with a 105C limit.
 import type { DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
-import { trialHotCelsius } from '../merge-writer/trial-load.js';
+import { heatReading, heatWindowMs, trialHotCelsius } from '../merge-writer/trial-load.js';
 import { standingLimit, type MasterRun } from '../master/profiles.js';
 import { sessionTestBudget } from '../runner/registry.js';
 import { overloadAlarm, overloaded, readSessionUsage } from '../session-share.js';
@@ -33,24 +35,26 @@ export const trialHalfCelsius = trialHotCelsius - 5;
 /** GY-3437: from this reading no new implementation session starts, while reviews and trials go on to the launch limit and drain the heat. */
 export const implementationHotCelsius = trialHalfCelsius;
 
-/** GY-3426: the guard compares the average of the readings taken over this window to the limit. */
-export const heatWindowMs = 60_000;
+export { heatWindowMs };
 
 /** GY-3446: the launch heat limit now — a temporary `launchHotCelsius` the master set while it stands, else the default. */
 const hotLimit = (state: Pick<DaemonState, 'cpuPressure'>) => state.cpuPressure?.hotCelsius ?? launchHotCelsius;
+/** GY-3532: the reading a heat line names — the 2 min mean with its limit once it decides, else the one sample. */
+const heatLine = (cpu: NonNullable<DaemonState['cpuPressure']>, limit: number) =>
+  heatReading(cpu.samples)?.mean != null ? `CPU averages ${cpu.celsius}C over 2 min; limit ${limit}C` : `CPU ${cpu.celsius}C`;
 
 /** The one status line master status carries while launches wait — heat first, then pressure — or null when nothing holds them. */
 export function cpuWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | null {
   const cpu = state.cpuPressure;
-  if (cpu?.celsius != null && cpu.celsius >= hotLimit(state)) return `launches waiting: CPU ${cpu.celsius}C`;
+  if (cpu?.celsius != null && cpu.celsius >= hotLimit(state)) return `launches waiting: ${heatLine(cpu, hotLimit(state))}`;
   if (cpu?.avg60 != null && cpu.avg60 > cpuPressureCeiling) return `launches waiting: CPU pressure ${Math.round(cpu.avg60)} percent`;
   return null;
 }
 export const cpuPressureHeld = (state: Pick<DaemonState, 'cpuPressure'>) => cpuWaiting(state) !== null;
 /** GY-3437: the line that holds new implementation sessions — every launch's line, else the lower implementation heat limit's. */
 export function implementationWaiting(state: Pick<DaemonState, 'cpuPressure'>): string | null {
-  const celsius = state.cpuPressure?.celsius;
-  return cpuWaiting(state) ?? (celsius != null && celsius >= hotLimit(state) - (launchHotCelsius - implementationHotCelsius) ? `implementation launches waiting: CPU ${celsius}C; reviews and trials go on` : null);
+  const cpu = state.cpuPressure, limit = hotLimit(state) - (launchHotCelsius - implementationHotCelsius);
+  return cpuWaiting(state) ?? (cpu?.celsius != null && cpu.celsius >= limit ? `implementation launches waiting: ${heatLine(cpu, limit)}; reviews and trials go on` : null);
 }
 /** GY-3401, GY-3416: whether the hottest CPU sensor sits at the trial halving limit. */
 export const cpuHot = (state: Pick<DaemonState, 'cpuPressure'>) => (state.cpuPressure?.celsius ?? -Infinity) >= hotLimit(state) - (launchHotCelsius - trialHalfCelsius);
@@ -126,7 +130,7 @@ export function stealPercent(previous: { total: number; steal: number } | null, 
 /**
  * One cycle's reading (GY-3348): the pressure and steal figures the Workers page and master status
  * show, with the counters the next cycle's steal is measured from, kept on the cursor so a restart
- * loses only one reading, and the package sensor's 60 s average with the readings it is taken over (GY-3373, GY-3426). With neither readable (not Linux) the record clears — launches run and
+ * loses only one reading, and the package sensor's 120 s mean with the readings it is taken over (GY-3373, GY-3426, GY-3532). With neither readable (not Linux) the record clears — launches run and
  * the pages show nothing, exactly as before — and a hold that begins or ends is one journal line.
  */
 export async function cpuPressureStep(cycle: { config?: { run: Pick<MasterRun, 'launchHotCelsius'> }; state: DaemonState; effects: DaemonEffects; now: () => number; log: (line: string) => void }) {
@@ -134,7 +138,7 @@ export async function cpuPressureStep(cycle: { config?: { run: Pick<MasterRun, '
   const reading = await Promise.resolve(effects.cpuPressure?.()).catch(() => null) ?? null;
   const avg60 = reading?.pressure ? pressureAvg60(reading.pressure) : null, at = now(), previous = state.cpuPressure, was = implementationWaiting(state);
   const samples = reading?.celsius == null ? [] : [...(previous?.samples ?? []).filter(([when]) => at - when < heatWindowMs && when <= at), [at, reading.celsius] as [number, number]];
-  const celsius = samples.length ? Math.round(samples.reduce((sum, [, value]) => sum + value, 0) / samples.length) : null;
+  const celsius = heatReading(samples)?.celsius ?? null;
   const stat = avg60 !== null && reading?.stat ? cpuStatTotals(reading.stat) : null, hot = standingLimit(cycle.config?.run.launchHotCelsius, at);
   tallyCpuSeconds((state.cpuSeconds ??= { days: {} }).days, previous?.stat ?? null, stat, now());
   state.cpuPressure = avg60 === null && celsius === null ? null
