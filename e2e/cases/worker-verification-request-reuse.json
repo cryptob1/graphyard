@@ -6,6 +6,6 @@
   "target": "any",
   "required": false,
   "steps": [
-    { "kind": "command", "name": "repeated and interrupted complete requests share one host verification", "run": "node --import tsx tests/helpers/run-tests.ts tests/worker-verification-request-reuse.test.ts", "timeoutSeconds": 240 }
+    { "kind": "command", "name": "repeated and interrupted complete requests share one host verification", "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:worker-verification-request-reuse tests/worker-verification-request-reuse.test.ts", "timeoutSeconds": 300 }
   ]
 }

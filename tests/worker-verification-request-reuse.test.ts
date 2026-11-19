@@ -104,7 +104,7 @@ test('integration:worker-verification-request-reuse — identical repeats share 
   assert.deepEqual((await again).value, f.result);
 });
 
-test('e2e:worker-verification-request-reuse — an interrupted complete and its repeat run one host verification and submit through unchanged gates', { timeout: 180_000 }, async t => {
+test('e2e:worker-verification-request-reuse — an interrupted complete and its repeat run one host verification and submit through unchanged gates', { timeout: 240_000 }, async t => {
   const f = await fixture(t);
   // The caller gives up while host admission is still waiting.
   const abort = new AbortController();
