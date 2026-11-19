@@ -1,7 +1,6 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { bootstrapGate, gateRecordPath, gateSummary, readGateRecord, writeGateRecord } from '../src/batch-gate.js';
@@ -26,7 +25,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const repository = 'owner/project';
 const start = Date.parse('2030-06-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
-const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } as NodeJS.ProcessEnv;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env }).trim();
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
