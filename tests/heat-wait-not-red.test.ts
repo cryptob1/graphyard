@@ -20,7 +20,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 
-// GY-3535: a merge trial whose failing test timed out while its containers waited over a minute for
+// GY-3535: a merge trial whose test failed or timed out while its containers waited over a minute for
 // the CPU to cool is inconclusive: the same head is trialled again, never reworked; the third heat
 // failure stops the retries with one attention line. A shorter heat wait, or none, is a red head as before.
 
@@ -53,19 +53,20 @@ function idleCpu() {
 }
 const heatWait = (seconds: number) => `graphyard trial container: waiting: a CPU sensor reads 97C, at or over its 85C limit\ngraphyard trial container: waiting: a CPU sensor held this start ${seconds}s\ngraphyard trial container: starting\n`;
 const testTimeout = 'not ok - tests/one.test.ts\n  test at tests/one.test.ts:1:1\n  test file timed out after 300000ms';
+const testFailure = 'not ok - tests/one.test.ts\n  test at tests/one.test.ts:1:1\n  AssertionError: \'fail\' !== \'pass\'';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker', role: 'worker' };
 const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };
 
-async function trialWithHeat(heat: string, cycles: number) {
+async function trialWithHeat(heat: string, cycles: number, stdout = testTimeout) {
   const root = await temporaryDirectory('heat-wait-repo');
   const { base, head } = await repository(root);
   const scratch = await temporaryDirectory('heat-wait-root');
   const cpu = idleCpu();
   let attempts = 0;
   const run: ChildRun = async (command, args, { wrapper: _wrapper, ...options } = {}) => {
-    if (command === 'npm' && args.includes('test')) { cpu.step(); throw Object.assign(new Error('test failed'), { status: 1, stdout: testTimeout, stderr: heat }); }
+    if (command === 'npm' && args.includes('test')) { cpu.step(); throw Object.assign(new Error('test failed'), { status: 1, stdout, stderr: heat }); }
     if (command === 'npm') { cpu.step(); return ''; }
     return defaultChildRun(command, args, options);
   };
@@ -132,6 +133,14 @@ test('integration:heat-wait-not-red — a test that timed out while its containe
   const attention = Object.values(state.actions).filter(action => action.kind === 'attention');
   assert.equal(attention.length, 1, 'one attention line');
   assert.match(attention[0]!.detail, new RegExp(`^${key}: .*too hot`), 'the line names the item and the cause');
+});
+
+test('integration:heat-wait-not-red — a test that failed outright while its containers waited over a minute on heat is retried too, never reworked', { timeout: 300_000 }, async () => {
+  const { after, reworks, attempts } = await trialWithHeat(heatWait(75), 4, testFailure);
+  assert.equal(reworks.length, 0, 'no rework is requested');
+  assert.equal(attempts, 2, 'the same head is trialled again');
+  assert.ok(after.at(-1)!.queued, 'the item stays in the merge queue');
+  assert.equal(after.at(-1)!.work.reworkRequested, false);
 });
 
 for (const [label, heat] of [['no heat wait', ''], ['a 50s heat wait', heatWait(50)]] as const) {
