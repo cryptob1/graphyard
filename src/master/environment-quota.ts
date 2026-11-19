@@ -81,8 +81,6 @@ export async function codexAccount(environment: ProbedHome, probe: EnvironmentPr
 
 /** GY-3516: a key named by a short digest, so a reading says whose key answered without ever recording the key. */
 export const keyFingerprint = (key: string) => createHash('sha256').update(key).digest('hex').slice(0, 12);
-/** A plan's cached reading is shared only among accounts holding the same key: another key's limit is never this account's (GY-3516). */
-export const planCacheId = (plan: string, key?: string) => key ? `${plan}#${key}` : plan;
 export async function zaiAccount(environment: ProbedHome, probe: EnvironmentProbe, plan: { id: string | null; now: number }): Promise<{ loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading; key?: string }> {
   const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));
   const zaiKey = opencodeAuth?.['zai-coding-plan']?.key ?? opencodeAuth?.['z.ai']?.key ?? opencodeAuth?.zai?.key;
@@ -128,7 +126,7 @@ export async function zaiAccount(environment: ProbedHome, probe: EnvironmentProb
   // to the provider's endpoint, so selecting among N such accounts costs one probe, not N (GY-1180).
   // Any reading the endpoint answered is shared, a zero-window one too, and it carries the plan's own
   // reason and limit flag rather than a note another account wrote (GY-1260).
-  const shared: PlanReading | null = plan.id ? getCachedPlanUsage(planCacheId(plan.id, own.key), plan.now, probe.cacheMs ?? 30_000) : null;
+  const shared: PlanReading | null = plan.id ? getCachedPlanUsage(plan.id, plan.now, probe.cacheMs ?? 30_000) : null;
   if (shared) return { loggedIn: true, usage: shared.windows, note: shared.reason, reached: shared.reached, shared: true, ...own };
   try {
     const response = await (probe.fetch ?? fetch)('https://api.z.ai/api/monitor/usage/quota/limit', {
