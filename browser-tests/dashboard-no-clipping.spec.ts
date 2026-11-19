@@ -124,8 +124,20 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 800, height: 700 }
       await checkWithMenu(page, 'Settings → Agents');
 
       await page.evaluate(() => { location.hash = 'setup'; });
-      await expect(page.getByRole('group', { name: 'Team access on this machine' })).toBeVisible(settled);
+      await expect(page.getByRole('heading', { name: 'Set up Graphyard', exact: true, level: 1 })).toBeVisible(settled);
       await checkWithMenu(page, 'Settings → Setup');
+
+      // GY-3486: the Invite dialog from the top bar fits the window too.
+      await page.getByRole('button', { name: 'Invite', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Invite' });
+      await expect(dialog.getByRole('group', { name: 'Installs on this machine' })).toBeVisible(settled);
+      const box = await dialog.evaluate(node => { const at = node.getBoundingClientRect(); return { left: at.left, right: at.right, scrollWidth: node.scrollWidth, clientWidth: node.clientWidth, page: document.documentElement.scrollWidth - document.documentElement.clientWidth }; });
+      expect.soft(box.left, 'Invite: the dialog starts inside the window').toBeGreaterThanOrEqual(0);
+      expect.soft(box.right, 'Invite: the dialog ends inside the window').toBeLessThanOrEqual(viewport.width);
+      expect.soft(box.scrollWidth, 'Invite: nothing in the dialog is wider than it').toBeLessThanOrEqual(box.clientWidth);
+      expect.soft(box.page, 'Invite: the page is no wider than the window').toBe(0);
+      await dialog.getByRole('button', { name: 'Close Invite' }).click();
+      await expect(dialog).toBeHidden(settled);
 
       await page.evaluate(() => { location.hash = 'work'; });
       await page.locator('.work-row .card-open').first().click();
