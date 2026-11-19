@@ -383,7 +383,9 @@ export const completeCommand: CliCommand = {
     '                                to 10 minutes, so a slow plane strands no finished head. Reports',
     '                                what graphyard verify ran on HEAD and its outcome. Refused while',
     '                                GitHub requests are paused, it waits for the named reset and',
-    '                                submits again (bounded)',
+    '                                submits again (bounded). A verification still waiting for a',
+    '                                slot when the request\'s time runs out is queued: the loop',
+    '                                verifies and submits the head, with no blocker',
   ],
   run: async (context, work) => {
     // GY-3330: one idempotency key for this attempt and head — a caller's GRAPHYARD_REQUEST_ID,
