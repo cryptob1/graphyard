@@ -1,0 +1,12 @@
+{
+  "id": "expiry-loop-stop",
+  "title": "An item whose workers keep dying at startup stops and says why in one plain line",
+  "description": "GY-3510: three consecutive claims on one item that each expire within 5 minutes of claiming stop its dispatch with one blocker naming the last worker's exit reason; a submitted or longer claim resets the count and other items are unaffected. Against a real control plane and isolated Postgres, the item's page then shows 'Workers keep failing to start: <reason>' with one who-acts-next line and no sideways scroll at 1280 and 390 wide.",
+  "tags": ["dashboard", "dispatch"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "three short expired claims block the item with the last exit reason; resets and neighbours hold", "run": "node --import tsx tests/helpers/run-tests.ts tests/expiry-loop-stop.test.ts", "timeoutSeconds": 240 },
+    { "kind": "command", "name": "the item page shows one plain line and one next action at 1280 and 390", "run": "npm run test:browser -- browser-tests/expiry-loop-stop.spec.ts", "timeoutSeconds": 360 }
+  ]
+}

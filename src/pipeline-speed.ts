@@ -1,5 +1,6 @@
 import type { Work } from './model.js';
 import { currentMergeStep, type CurrentMergeStep } from './model/merge-ledger.js';
+import { startupFailureBlocker } from './model/plain-status.js';
 
 /**
  * An item's timeline: its attempts, submissions, rework rounds and hand-offs, kept on the work
@@ -90,6 +91,21 @@ export function endAttempt(work: Work, epoch: number, end: NonNullable<PipelineA
 export function endLapsedAttempt(work: Work, lease: { epoch: number; expiresAt: string }, now: Date) {
   const deadline = Date.parse(lease.expiresAt);
   endAttempt(work, lease.epoch, 'expired', new Date(Number.isFinite(deadline) ? Math.min(deadline, now.getTime()) : now.getTime()));
+  stopStartupLoop(work, now);
+}
+
+/**
+ * GY-3510: three claims in a row that each expired within 5 minutes of claiming mean the workers
+ * die at startup, so the item is blocked — dispatch stops — naming the last worker's exit reason.
+ * A submitted, released or longer attempt among the last three breaks the run.
+ */
+function stopStartupLoop(work: Work, now: Date) {
+  const last = pipelineTimeline(work).attempts.slice(-3);
+  if (work.blocker || last.length < 3 || !last.every(a => a.end === 'expired' && Date.parse(a.endedAt!) - Date.parse(a.claimedAt) <= 5 * 60_000)) return;
+  const epoch = last[2]!.epoch;
+  const exit = work.sessions?.findLast(s => s.kind === 'implementation' && s.epoch === epoch && s.outcome)?.outcome ?? last[2]!.cause ?? 'the worker exited without a reason';
+  work.blocker = startupFailureBlocker + exit.replace(/\s+/g, ' ').trim().slice(0, 300);
+  work.blockedAt = now.toISOString();
 }
 /**
  * Stamp the assignment's session start at the first lease renewal of its epoch, once: a later
