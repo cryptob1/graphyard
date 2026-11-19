@@ -34,7 +34,7 @@ export async function verificationStep(command: string, args: string[], options:
 }
 
 /**
- * `progress` receives each launcher line (waiting, starting) as it happens, for the worker's `complete` to show (GY-3332).
+ * `progress` receives each launcher line (waiting, starting) as it happens, for the worker's optional `verify` to show (GY-3332).
  * GY-3447: a worker's own verification takes no host heavy-job slot; the trial load cap bounds it. GY-3446: under a host strict cap it does.
  */
 export const runWorkerVerification = (root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot(),

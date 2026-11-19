@@ -124,7 +124,7 @@ test('e2e:confined-session-host-credentials — under real bwrap a worker and a 
       { encoding: 'utf8', timeout: 240_000, killSignal: 'SIGKILL', env: { ...process.env, GRAPHYARD_TOKEN_FILE: f.workerToken } });
     const output = ran.stdout + '\n' + ran.stderr;
     assert.equal(ran.status, 0, `the confined worker ran: ${output.slice(-800)}`);
-    for (const marker of ['OWN-TOKEN-READABLE', 'LOGIN-USABLE', 'GIT-COMMIT-OK', 'the fixture test passes', `WORKER-COMPLETE ${ownToken.length} work/id-1/worker-verification,work/id-1/submit`])
+    for (const marker of ['OWN-TOKEN-READABLE', 'LOGIN-USABLE', 'GIT-COMMIT-OK', 'the fixture test passes', `WORKER-COMPLETE ${ownToken.length} work/id-1/submit`])
       assert.ok(ran.stdout.includes(marker), `${marker}: ${output.slice(-800)}`);
     const sync = JSON.parse(/^WORKER-SYNC (.*)$/m.exec(ran.stdout)![1]);
     assert.equal(sync.ok && sync.merged, true, `graphyard sync merged the base tip: ${JSON.stringify(sync)}`);

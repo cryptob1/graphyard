@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { execFileSync } from 'node:child_process';
 import { createContext } from '../src/cli/context.js';
-import { completeCommand } from '../src/cli/complete.js';
+import { requestWorkerVerification } from '../src/cli/worker-verification.js';
 import { verificationRequestTimeoutMs } from '../src/cli/verification-request.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-test('unit:worker-verification-long-wait — complete survives six minutes before headers; timeout and unreachable stay distinct', async t => {
+test('unit:worker-verification-long-wait — verify survives six minutes before headers; timeout and unreachable stay distinct', async t => {
   const root = await temporaryDirectory('verification-long-wait');
   const git = (...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=test', '-c', 'user.email=test@test', ...args], { encoding: 'utf8' }).trim();
   git('init', '-q'); git('commit', '-q', '--allow-empty', '-m', 'fixture');
@@ -29,7 +29,7 @@ test('unit:worker-verification-long-wait — complete survives six minutes befor
       verificationCalls++;
       assert.equal(req.headers.authorization, 'Bearer test-token');
       assert.ok(req.headers['idempotency-key']);
-      assert.deepEqual(JSON.parse(body), { mode: 'complete', head, epoch: 1 });
+      assert.deepEqual(JSON.parse(body), { mode: 'verify', head, epoch: 1 });
       if (mode === 'disconnect') { t.mock.timers.tick(60_000); req.socket.destroy(); return; }
       if (mode === 'refusal') { res.writeHead(409); res.end('{"error":"verification refused"}'); return; }
       if (mode === 'body-timeout') { res.writeHead(200); res.write('{'); }
@@ -49,11 +49,11 @@ test('unit:worker-verification-long-wait — complete survives six minutes befor
     const context = await createContext('complete', 'GY-1', ['1', '--head', head], false);
     context.repositoryRoot = () => root;
     context.print = () => {};
-    await completeCommand.run(context, { id: 'id-1', key: 'GY-1' } as never);
+    await requestWorkerVerification(context, { id: 'id-1', key: 'GY-1' }, { mode: 'verify', epoch: 1 });
   };
   try {
     await complete();
-    assert.equal(submitted, true);
+    assert.equal(submitted, false);
     // Verification records are local-only, as in an assigned repository.
     await import('node:fs/promises').then(fs => fs.writeFile(`${root}/.git/info/exclude`, '.graphyard/\n'));
     for (const next of ['timeout', 'body-timeout', 'refusal', 'disconnect'] as const) {
