@@ -51,6 +51,13 @@ test('integration:trial-known-flaky — a trial failing only on tests with an op
   assert.deepEqual(red.notes.map(note => note.key), ['GY-1']);
   assert.match(red.notes[0]!.text, /tests\/red\.test\.ts also fail on main/);
 
+  // However many tests are red on the base tip, the note stays within a request's 2000-character reason.
+  const many = Array.from({ length: 200 }, (_, index) => `tests/some/deeply/nested/red-${index}.test.ts`);
+  const wide = world(many, { tip, files: many, tests: ['red case'], cases: ['red case'] });
+  assert.equal((await mergeOne(wide.ports, candidate)).outcome, 'merged');
+  assert.ok(wide.notes[0]!.text.length <= 2000, `note is ${wide.notes[0]!.text.length} characters`);
+  assert.match(wide.notes[0]!.text, /and 190 more also fail on main/);
+
   // A flaky failure beside one of the candidate's own is refused naming the tests, as today.
   const mixed = world(['tests/flaky.test.ts', 'tests/mine.test.ts']);
   const refused = await mergeOne(mixed.ports, candidate);

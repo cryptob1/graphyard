@@ -883,7 +883,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     failure = baseHeld ?? trialFailureReason({ run: known ? { ...run, tests: { ...run.tests, failed: [] } } : run }) ?? requiredProofFailure(item, run) ?? featureCaseFailure(item, merged.addedOrModified ?? []);
     if (known && !failure) {
       for (const { file, item: flakyItem } of known.flaky) await ports.note?.(flakyItem, `${file} failed in ${item.key}'s merge trial on ${mergeSha.slice(0, 12)}; it has this open flaky item, so ${item.key} was not sent back.`, `trial-flaky:${flakyItem.key}:${mergeSha}:${file}`);
-      if (known.red.length) await ports.note?.(item, `Known red: ${known.red.join(', ')} also fail on main (${baseTip.slice(0, 12)}), so they were not counted against this change.`, `trial-known-red:${mergeSha}`);
+      if (known.red.length) await ports.note?.(item, `Known red: ${known.red.slice(0, 10).join(', ')}${known.red.length > 10 ? ` and ${known.red.length - 10} more` : ''} also fail on main (${baseTip.slice(0, 12)}), so they were not counted against this change.`, `trial-known-red:${mergeSha}`);
     }
     // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
