@@ -90,6 +90,8 @@ export function plainReason(reason: string, gate: string, now: number, work?: Wo
  * naming a future not-before instant waits for that instant: nothing is broken, yet the block stays
  * recorded until the master agent lifts it (`master unblock`), so the sentence names that clearer.
  */
+/** GY-3510: the blocker recorded when workers keep dying at startup (`pipeline-speed.ts`). */
+export const startupFailureBlocker = 'Workers keep failing to start: ';
 export type BlockerKind = 'waiting-until' | 'human' | 'item' | 'fault';
 const instant = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})/g;
 const notBeforeWords = /not[- ]before|until|window|first exist|can(?:not|'t)? (?:yet )?exist|earliest|too early|wait/i;
@@ -115,6 +117,8 @@ export function notBeforeInstants(text: string): number[] {
 export const localInstant = (at: number, timeZone?: string) => new Date(at).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short', ...(timeZone ? { timeZone } : {}) });
 export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key' | 'blocker' | 'humanRequest' | 'observationWindow'>, timeZone?: string): { sentence: string; kind: BlockerKind; until?: string } {
   const human = !!work?.humanRequest && !work.humanRequest.answer;
+  // GY-3510: the one blocker shown as recorded — the workers' own exit reason is the next step's clue.
+  if (text.startsWith(startupFailureBlocker)) return { sentence: text, kind: 'fault' };
   const named = (pattern: RegExp) => text.match(pattern)?.[1];
   // A declined answer is the human's last word: what happens next is the master's unblock.
   if (!human && /^A human declined /.test(text)) return { sentence: 'A human declined the request; the master agent decides the next step and clears the block.', kind: 'human' };
