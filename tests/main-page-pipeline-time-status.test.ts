@@ -40,11 +40,15 @@ test('e2e:main-page-pipeline-time — /api/status reports merges in 24 hours, re
   }
   // Released 30, 60 and 90 minutes before merging; the fourth is still in review, released 200 minutes ago.
   const plan = [{ released: 40, merged: 10 }, { released: 80, merged: 20 }, { released: 120, merged: 30 }];
+  // The ledger is append-only; the fixture backdates its release events with the trigger off, as reconcile-face-readers does.
+  await store.pool.query('ALTER TABLE events DISABLE TRIGGER immutable_events');
+  try {
   for (const [index, { released, merged }] of plan.entries()) {
     await store.pool.query("UPDATE events SET created_at=$2 WHERE work_id=$1 AND kind='ready'", [created[index].id, ago(released)]);
     await store.pool.query(`UPDATE work_items SET document=jsonb_set(jsonb_set(document,'{stage}','"done"'),'{delivery}',jsonb_build_object('mergedAt',$2::text)) WHERE id=$1`, [created[index].id, ago(merged)]);
   }
   await store.pool.query("UPDATE events SET created_at=$2 WHERE work_id=$1 AND kind='ready'", [created[3].id, ago(200)]);
+  } finally { await store.pool.query('ALTER TABLE events ENABLE TRIGGER immutable_events'); }
   await store.pool.query(`UPDATE work_items SET document=jsonb_set(document,'{stage}','"review"') WHERE id=$1`, [created[3].id]);
 
   const { pipelineTime } = await api('status');
