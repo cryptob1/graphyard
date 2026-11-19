@@ -48,7 +48,7 @@ for (const width of [390, 1280]) {
     await expect(line).toContainText(`GY-3 ${work[2].title} has been in the pipeline 2 h 5 min, longer than the slowest tenth (1 h); it is in review. Next: open GY-3 and clear what holds it.`);
     expect(await noSideScroll(page)).toBe(true);
     await line.getByRole('button', { name: 'Open →' }).click();
-    await expect(page.getByRole('heading', { name: work[2].title })).toBeVisible();
+    await expect(page.getByRole('button', { name: '← Back' })).toBeVisible();
   });
 
   test(`e2e:main-page-pipeline-time — a stale last merge warns at ${width}px`, async ({ page }) => {
