@@ -24,7 +24,7 @@ import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies, trialImage } from './trial-container.js';
 import { cachedPasses, commitDependencies, dependencyKey, moduleFile, recordPasses, testResultKeys, warmDependencies } from './trial-caches.js';
-import { HostDroppedError, readShardHosts, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, splitLocalOnlyTests, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
+import { HostDroppedError, readShardHosts, shardSshSession, type ShardSshSession, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, splitLocalOnlyTests, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
 import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes, trialStartOwner } from './trial-load.js';
@@ -756,7 +756,7 @@ export interface RunTrialInput {
   /** GY-3283: run only the declared check of this name, whatever paths it is limited to (a worker's `graphyard check NAME`). */
   only?: string;
   /** GY-3412: the hosts a selection's shards fan out to — those `graphyard host add` recorded unless a test names others — and how they are read. */
-  remote?: { hosts: readonly string[]; read?: (hosts: readonly string[]) => Promise<HostReading[]> };
+  remote?: { hosts: readonly string[]; read?: (hosts: readonly string[], transport: ShardSshSession) => Promise<HostReading[]> };
 }
 const tailLength = 4000;
 /**
@@ -1421,7 +1421,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     // GY-3412: with added hosts, every host is read once and the selection is cut for this machine's
     // lanes plus the real free cores of every remote host under its heat limit.
     const hosts = input.remote?.hosts ?? await shardHosts();
-    const readings = hosts.length ? await (input.remote?.read ?? (named => readShardHosts(named, run, cores)))(hosts) : [];
+    // GY-3534: one SSH transport carries the probe and every shard, over a few multiplexed connections per host.
+    const transport = hosts.length ? shardSshSession(run) : undefined;
+    const readings = hosts.length ? await (input.remote?.read ?? ((named, shared) => readShardHosts(named, run, cores, shared)))(hosts, transport!) : [];
     const remoteLanes = readings.slice(1).filter(underHeatLimit).reduce((sum, reading) => sum + Math.floor(realFreeCores(reading)), 0);
     // GY-3419: test files naming bwrap, Docker or the network are local-only — a remote shard runs
     // with no namespaces, network or Docker socket, so they would fail there as red verdicts that
@@ -1440,7 +1442,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     let stopped: unknown = null;
     // A shard a host turned away is noted after every shard's output, so the note stays in the log tail kept on the item.
     const dropped = new Map<string, HostDroppedError>();
-    const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, deadline, signal: input.signal }) : null;
+    const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, deadline, signal: input.signal, transport }) : null;
     // One shard on this machine, or on `remote`; a remote host that turned it away rethrows, so it runs elsewhere.
     const shard = async (index: number, remote?: string) => {
       const group = shards[index]!, entries: string[] = [];
