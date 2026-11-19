@@ -152,6 +152,12 @@ test('integration:worker-self-verifies — graphyard verify runs exactly the aut
     assert.match(verified.output.outstanding[0].reason, /manual proof is judged by an independent producer/);
     assert.equal(verified.output.head, execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository.root, encoding: 'utf8' }).trim());
 
+    // A failing optional result is reported, but the merge trial decides the submitted head.
+    const completed = await cli(repository.root, control.url, 'complete', 'GY-7', '1');
+    assert.equal(completed.code, 0);
+    assert.equal(completed.output.selfVerification.state, 'failing');
+    assert.equal(control.submitted.length, 1);
+
     // Fixed and re-verified, the report passes; complete reports an optional verification without refreshing it.
     await repository.commit({ 'tests/item.test.ts': suite(passing('unit:vbr-parse — parses one'), passing('integration:vbr-flow — flows'), failing('manual:vbr-docs — never run here')) }, 'fix');
     assert.equal((await cli(repository.root, control.url, 'verify', 'GY-7')).code, 0);

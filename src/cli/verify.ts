@@ -248,7 +248,7 @@ export async function written(root: string, record: VerifyRecord) {
 export async function selfVerification(root: string, key: string) {
   let record: VerifyRecord;
   try { record = JSON.parse(await readFile(recordPath(root, key), 'utf8')); } catch {
-    return { state: 'not-run' as const, reason: `graphyard verify ${key} was not run in this worktree; no proof was checked before submission`, ran: [], outstanding: [] };
+    return { state: 'not-run' as const, reason: `graphyard verify ${key} has no saved result in this worktree`, ran: [], outstanding: [] };
   }
   const head = git(root, ['rev-parse', 'HEAD']);
   const summary = { ran: record.ran.map(({ proof, criteria, result, executed, failed, skipped, abnormal, leftToCi, unexercised, preserved, exercise }) => ({ proof, criteria, result, executed, failed, skipped, ...(abnormal ? { abnormal } : {}), ...(leftToCi ? { leftToCi } : {}), ...(unexercised ? { unexercised } : {}), ...(preserved ? { preserved } : {}), ...(exercise?.result === 'indeterminate' ? { exerciseIndeterminate: exercise.reason } : {}) })),
@@ -261,8 +261,8 @@ export async function selfVerification(root: string, key: string) {
   const unjudged = record.ran.filter(entry => entry.exercise?.result === 'indeterminate');
   const notes = unjudged.length ? `; not run against the base, so unjudged for exercise: ${unjudged.map(entry => `${entry.proof} (${entry.exercise!.reason})`).join(', ')}` : '';
   return { state: failing.length || unexercised.length ? 'failing' as const : 'passing' as const,
-    reason: failing.length ? `${failing.map(entry => entry.proof).join(', ')} did not pass on HEAD; the control plane returns this head to its worker before review`
-      : unexercised.length ? `${unexercised.map(entry => entry.proof).join(', ')} passed on HEAD and against the base without the change; a producer records such a proof as not exercising its criterion and the head returns to its worker`
+    reason: failing.length ? `${failing.map(entry => entry.proof).join(', ')} did not pass on HEAD in the optional verification`
+      : unexercised.length ? `${unexercised.map(entry => entry.proof).join(', ')} passed on HEAD and against the base without the change; the optional verification did not demonstrate that the change is exercised`
       : deferred.length ? `the item's own criteria passed on HEAD${clean}; ${deferred.map(entry => entry.proof).join(', ')} did not complete in this sandbox with every case of the proof passing, so its failure is left to CI${notes}`
       : `every mechanical proof passed on HEAD${clean}${notes}`, ...summary };
 }
