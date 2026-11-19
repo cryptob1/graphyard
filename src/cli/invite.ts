@@ -3,26 +3,22 @@ import type { CliCommand } from './registry.js';
 import { asRecordedOperator } from './session-commands.js';
 
 /**
- * GY-3215: the operator invites a teammate as their own human principal, or revokes one. The link it
- * prints is single use and lives 24 hours; the operator delivers it, and the session it opens
- * renews itself until 90 days unused. After that session ends, the operator invites again.
+ * GY-3215: the operator invites a teammate as their own human principal, or revokes one. GY-3514: the
+ * link it prints opens once, on the install's Funnel address, within the days the operator picks.
  */
 export const inviteCommand: CliCommand = {
   name: 'invite',
-  help: ['  invite NAME --role ROLE      Print a one-time link (24 hours) that signs teammate NAME in as their own',
-    '                                person; ROLE viewer reads everything, maintainer also files work',
+  help: ['  invite NAME --role ROLE [--days 1|7|30]  Print one link that signs NAME in once (7 days by default);',
+    '                                ROLE viewer reads everything; maintainer also files work and types into the master',
     '  invite revoke NAME           End teammate NAME\'s sessions at once and remove them'],
   async run(context) {
-    const { values, positionals } = parseArgs({ args: [context.id ?? '', ...context.args].filter(Boolean), allowPositionals: true, options: { role: { type: 'string' } } });
+    const { values, positionals } = parseArgs({ args: [context.id ?? '', ...context.args].filter(Boolean), allowPositionals: true, options: { role: { type: 'string' }, days: { type: 'string' } } });
     const revoke = positionals[0] === 'revoke' && positionals.length === 2;
     const name = revoke ? positionals[1] : positionals[0];
-    if (!name || positionals.length > (revoke ? 2 : 1) || (!revoke && !values.role)) throw new Error('Usage: graphyard invite NAME --role viewer|maintainer, or graphyard invite revoke NAME');
-    const recorded = await asRecordedOperator(context.repositoryRoot());
+    if (!name || positionals.length > (revoke ? 2 : 1) || (!revoke && !values.role)) throw new Error('Usage: graphyard invite NAME --role viewer|maintainer [--days 1|7|30], or graphyard invite revoke NAME');
+    await asRecordedOperator(context.repositoryRoot());
     if (revoke) return context.print(await context.api(`invites/${encodeURIComponent(name)}/revoke`, {}));
-    // GY-3294: the machine's reusable Tailscale share link goes with it (Setup alone makes single-use device invites).
-    const link = await context.api('invites', { name, role: values.role, share: 'reusable' }) as { code: string; principal: string; role: string; expiresAt: string; message?: string | null; missing?: string | null };
-    return context.print({ invite: `${(recorded?.reachableUrl ?? context.base).replace(/\/+$/, '')}/#sign-in=${link.code}`, teammate: link.principal, role: link.role, expiresAt: link.expiresAt, singleUse: true,
-      ...(link.message ? { message: link.message } : link.missing ? { missing: link.missing } : {}),
-      next: `Send this link to ${link.principal}; it opens their own session, which renews itself until 90 days unused` });
+    const invite = await context.api('invites', { name, role: values.role, ...(values.days ? { days: Number(values.days) } : {}) }) as { link: string; name: string; role: string; expiresAt: string; note: string | null };
+    return context.print({ ...invite, next: `Send this link to ${invite.name}; it opens once` });
   },
 };

@@ -61,6 +61,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:4f8d8e3473c38d69bf733e899efb6cc30937564188b320ba0e94cb7ef75243af',
   // GY-3402: the install-wide record reads (registry, connect, team access) by an index on kind family.
   'sha256:9de9a189bd4dc3a4eefb2aa95f14728b78bb11abf292b60e8307ea95701546a9',
+  // GY-3514: a teammate's one-use invite links (team_invites).
+  'sha256:7afddc723107a3fa442bc324ec8900b253ee732711d8be84b6751100987fb881',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

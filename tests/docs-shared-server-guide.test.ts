@@ -40,7 +40,7 @@ test('e2e:docs-shared-server-guide — docs/shared-server.md carries the shared 
   for (const fact of ['4310', 'http://SERVER:PORT']) assert.ok(ports.includes(fact), `Ports says: ${fact}`);
 
   const signin = section(guide, 'Signing in and inviting people');
-  for (const fact of ['Invite someone', '24 hours', 'viewer', 'maintainer', 'graphyard login']) assert.ok(signin.includes(fact), `Sign-in says: ${fact}`);
+  for (const fact of ['Invite someone', 'opens once', 'viewer', 'maintainer', 'graphyard login']) assert.ok(signin.includes(fact), `Sign-in says: ${fact}`);
 
   const move = section(guide, 'Moving an install by hand');
   for (const fact of ['~/.config/graphyard/<install>/', '~/.config/graphyard/masters/', '.git/worktrees']) assert.ok(move.includes(fact), `Moving says: ${fact}`);
