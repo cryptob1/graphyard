@@ -247,7 +247,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     cpuPressure: state?.cpuPressure
       ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal, celsius: state.cpuPressure.celsius,
         // GY-3532: the latest package sample beside the 120 s mean the heat rule compares (null under 4 samples).
-        latestCelsius: heatReading(state.cpuPressure.samples)?.latest ?? null, meanCelsius: heatReading(state.cpuPressure.samples)?.mean ?? null,
+        ...((heat) => ({ latestCelsius: heat?.latest ?? null, meanCelsius: heat?.mean ?? null }))(heatReading(state.cpuPressure.samples)),
         waiting: implementationWaiting(state), testBudget: state.cpuPressure.testBudget, trialCap: state.cpuPressure.trialCap }
       : null,
     // GY-3438: every live agent session with its CPU and memory use beside its fair share, as the loop last read its cgroup.
