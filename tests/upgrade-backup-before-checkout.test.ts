@@ -5,6 +5,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import pg from 'pg';
+import { writeBackupFile } from '../src/backup.js';
 import { freePort } from '../src/cli/test-isolation.js';
 import { liveEffects, runUpgrade, upgradeFailure, upgradePlan, type UpgradeInputs } from '../src/cli/upgrade.js';
 import type { InstallRecord } from '../src/install/secrets.js';
@@ -92,8 +93,7 @@ test('integration:upgrade-backup-before-checkout — the backup runs first, on t
     assert.match(message, /^upgrade stopped at backup: .*ECONNREFUSED.*; nothing was changed$/);
 
     // The release under test, on a ledger with a large events table: the upgrade's backup streams it to
-    // disk in a heap far smaller than the table, with no statement timeout, and db verify and db restore
-    // read the file back in the same heap.
+    // disk in a heap far smaller than the table, and db verify and db restore read the file back in the same heap.
     const create = async (name: string) => {
       const admin = new pg.Client({ connectionString: url });
       await admin.connect();
@@ -103,23 +103,24 @@ test('integration:upgrade-backup-before-checkout — the backup runs first, on t
     const current = await create('current'), restored = await create('restored');
     const migrated = new Store(current);
     try { await migrated.init(); } finally { await migrated.close(); }
+    // The backup's queries run with no statement timeout, whatever the connection's: it waits past 200 ms for a restore's lock.
+    const holder = new pg.Client({ connectionString: current }), short = new pg.Pool({ connectionString: current, statement_timeout: 200 });
+    await holder.connect();
+    try {
+      await holder.query('SELECT pg_advisory_lock($1)', [advisoryLocks.backup]);
+      const released = holder.query('SELECT pg_sleep(1), pg_advisory_unlock($1)', [advisoryLocks.backup]);
+      assert.equal((await writeBackupFile(short, join(directory, 'waited.json'))).schema, schema + 1);
+      await released;
+    } finally { await holder.end(); await short.end(); }
     const seeding = new pg.Client({ connectionString: current });
     await seeding.connect();
     try { await seeding.query(`INSERT INTO events(actor,kind,payload) SELECT 'seed','test.large',jsonb_build_object('blob',repeat(md5(i::text),3200)) FROM generate_series(1,4000) i`); }
     finally { await seeding.end(); }
     const large = { ...inputsFor(repositoryRoot, newer, current, join(directory, 'backups', 'large.json'), schema + 1), current: checkoutRelease(repositoryRoot) };
-    const holder = new pg.Client({ connectionString: current });
-    await holder.connect();
     const heap = process.env.NODE_OPTIONS;
     process.env.NODE_OPTIONS = `${heap ?? ''} --max-old-space-size=160`.trim();
     try {
-      // The role's timeout is shorter than the wait for a restore's lock, and the backup still completes.
-      await holder.query(`ALTER ROLE graphyard IN DATABASE current SET statement_timeout = 200`);
-      await holder.query('SELECT pg_advisory_lock($1)', [advisoryLocks.backup]);
-      // The server releases the lock a second later on its own: the backup step blocks this process while it runs.
-      const released = holder.query('SELECT pg_sleep(1), pg_advisory_unlock($1)', [advisoryLocks.backup]);
       await liveEffects(large, join(directory, 'upgrade.json')).run(upgradePlan(large).steps.find(step => step.id === 'backup')!);
-      await released;
       assert.ok(statSync(large.backupFile).size > 400_000_000, 'the ledger is larger than the backup\'s heap');
       const verified = JSON.parse(cliRun(repositoryRoot, current, 'db', 'verify', large.backupFile));
       assert.equal(verified.valid, true); assert.equal(verified.rows.events, 4000);
@@ -127,8 +128,6 @@ test('integration:upgrade-backup-before-checkout — the backup runs first, on t
       assert.equal(back.counts.events, 4000, 'the restore read the file back');
     } finally {
       if (heap === undefined) delete process.env.NODE_OPTIONS; else process.env.NODE_OPTIONS = heap;
-      await holder.query('ALTER ROLE graphyard IN DATABASE current RESET statement_timeout').catch(() => {});
-      await holder.end();
     }
   } finally { await cluster.stop(); }
 });
