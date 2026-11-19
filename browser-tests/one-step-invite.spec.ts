@@ -1,5 +1,5 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
-import { createServer } from 'node:http';
+import { createServer, request } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -14,6 +14,13 @@ import { viaSocket } from '../tests/helpers/serve-socket';
 test.use({ actionTimeout: 15_000 });
 
 type Reply = { status: number; body: any };
+/** A plain request to the 127.0.0.1 TCP port, with whatever headers a local process cares to forge. */
+const overTcp = (port: number, path: string, headers: Record<string, string>) => new Promise<Reply>((resolve, reject) => {
+  const req = request({ host: '127.0.0.1', port, path, headers }, res => {
+    let data = ''; res.setEncoding('utf8'); res.on('data', chunk => { data += chunk; }); res.on('end', () => resolve({ status: res.statusCode!, body: data ? JSON.parse(data) : null }));
+  });
+  req.on('error', reject); req.end();
+});
 const call = async (url: string, path: string, token: string | null, body?: unknown, headers: Record<string, string> = {}): Promise<Reply> => {
   const response = await fetch(url + path, { method: body === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID(), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   return { status: response.status, body: await response.json().catch(() => null) };
@@ -108,9 +115,9 @@ test('e2e:one-step-invite — Invite from the top bar admits a Tailscale login t
       expect(bob.status).toBe(403);
       expect(bob.body.error).toBe('You are not invited to this install. Ask the owner to invite bob@example.com.');
       // The same header on the 127.0.0.1 TCP port is anyone's to forge: it opens no session.
-      const forged = await call(install.url, '/api/status', null, undefined, { 'Tailscale-User-Login': 'ana@example.com', Host: `yard.tail-test.ts.net:${install.port}` });
+      const forged = await overTcp(install.port, '/api/status', { 'Tailscale-User-Login': 'ana@example.com', Host: `yard.tail-test.ts.net:${install.port}` });
       expect(forged.status).toBe(401);
-      const local = await call(install.url, '/api/status', null, undefined, { 'Tailscale-User-Login': 'ana@example.com' });
+      const local = await overTcp(install.port, '/api/status', { 'Tailscale-User-Login': 'ana@example.com', Host: `127.0.0.1:${install.port}` });
       expect(JSON.stringify(local.body)).not.toContain('ana@example.com');
     }
 
@@ -122,7 +129,8 @@ test('e2e:one-step-invite — Invite from the top bar admits a Tailscale login t
     await expect(teammates.getByRole('listitem').filter({ hasText: 'ana@example.com' })).toContainText(b.tailnet, settled);
 
     // Only the operator's human session invites: a reader, a maintainer and an operator-agent identity are refused.
-    await call(a.url, '/api/invites', a.token, { logins: ['mo@example.com'], role: 'maintainer', installs: [a.tailnet] });
+    expect((await call(a.url, '/api/invites', a.token, { name: 'mo@example.com', role: 'maintainer', share: 'reusable' })).status).toBe(200);
+    expect((await viaSocket(a.socket, '/api/status', 'mo@example.com')).body.actor).toMatchObject({ id: 'mo@example.com', team: 'maintainer' });
     expect((await viaSocket(a.socket, '/api/invites', 'mo@example.com', { logins: ['eve@example.com'], role: 'viewer', installs: [a.tailnet] })).status).toBe(403);
     expect((await call(a.url, '/api/invites', a.reader, { logins: ['eve@example.com'], role: 'viewer', installs: [a.tailnet] })).status).toBe(403);
     const agentToken = `operator-agent-${randomUUID()}`;
