@@ -19,7 +19,7 @@ Each repository gets its own install: run `graphyard up --repo OWNER/NAME` once 
 
 ## Sharing the machine over Tailscale
 
-Install Tailscale on the server, sign in, rerun `graphyard up`: every install is served on the tailnet with `tailscale serve --bg --http=PORT` — never `tailscale funnel`; nothing is public. To let a person in, press **Invite** in the top bar. The first time it asks once for a Tailscale API token, which the browser seals to this machine; each invite then makes the Tailscale device invite itself (multi-use when it names several people). Until then a machine share link saved earlier (Tailscale admin console: Machines, this machine, Share) is used; Tailscale expires an unused one 30 days after it was made.
+Install Tailscale on the server, sign in, rerun `graphyard up`: every install is served on the tailnet with `tailscale serve --bg --http=PORT` — never `tailscale funnel`; nothing is public. To let a person in, press **Invite** in the top bar. The first time it asks once for a Tailscale API key, which the browser seals to this machine; each invite then makes the Tailscale device invite itself (multi-use when it names several people). Until then a machine share link saved earlier (Tailscale admin console: Machines, this machine, Share) is used; Tailscale expires an unused one 30 days after it was made.
 
 ## One Herdr, holding only the Master sessions
 
