@@ -433,14 +433,16 @@ export async function withHeavyJob<T>(label: string, job: () => Promise<T>, opti
  * last to end gives it back, and while no part runs on this machine the job holds none.
  */
 export function sharedHeavyJob(label: string, options: Parameters<typeof withHeavyJob>[2] = {}) {
-  let parts = 0, slot: Promise<() => void> | null = null;
+  type Held = { release: () => void; inherited?: Record<string, string> };
+  let parts = 0, slot: Promise<Held> | null = null;
   return async <T>(part: () => Promise<T>): Promise<T> => {
     parts++;
     try {
-      await (slot ??= new Promise<() => void>((taken, failed) => { withHeavyJob(label, () => new Promise<void>(release => taken(release)), options).catch(failed); }));
-      return await part();
+      // A part's children carry the slot's mark as a whole held job's do, so a suite inside takes no second slot.
+      const { inherited } = await (slot ??= new Promise<Held>((taken, failed) => { withHeavyJob(label, () => new Promise<void>(release => taken({ release, inherited: inheritedVariables.getStore() })), options).catch(failed); }));
+      return await (inherited ? inheritedVariables.run(inherited, part) : part());
     } finally {
-      if (--parts === 0 && slot) { const held = slot; slot = null; (await held.catch(() => null))?.(); }
+      if (--parts === 0 && slot) { const held = slot; slot = null; (await held.catch(() => null))?.release(); }
     }
   };
 }
