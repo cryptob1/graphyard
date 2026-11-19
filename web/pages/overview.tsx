@@ -14,6 +14,7 @@ import { BuildLine } from '../fun';
 import { useGlide } from '../glide';
 import { EmptyState } from '../components/page-layout';
 import { WhereItRuns } from '../components/where-it-runs';
+import { pipelineSentence, type PipelineTime } from '../../src/pipeline-speed';
 
 /**
  * The Work page with its motion (GY-3272 AC-4b): on every render, a row that changed group is
@@ -23,6 +24,18 @@ import { WhereItRuns } from '../components/where-it-runs';
 export function WorkPage(dashboard: Dashboard) {
   useGlide();
   return OverviewPage(dashboard);
+}
+
+/** GY-3527: the page's headline, merges an hour over the last 24 hours, and under it one line on how long an item takes; a warning names the item to open. */
+function Speed({ time, now, open }: { time?: PipelineTime | null; now: number; open: (id: string) => void }) {
+  if (!time) return null;
+  const line = pipelineSentence(time, now);
+  return <div className="speed">
+    <p className="speed-figure" data-speed-figure>{line.figure}</p>
+    <p className="speed-line" data-speed-line={line.warning ? 'warning' : 'calm'}>
+      {line.text}{line.open && <> <button type="button" className="text-button" onClick={() => open(line.open!)}>Open →</button></>}
+    </p>
+  </div>;
 }
 
 /**
@@ -62,6 +75,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   </section>;
   const admin = status?.actor?.role === 'admin';
   return <>
+    <Speed time={status?.pipelineTime} now={now} open={setSelected}/>
     <div className="page-heading"><div><h1>Work</h1><p className="page-fact">{board ? summarySentence(counts) : 'Reading the board…'}</p><BuildLine/></div>
       <div className="page-actions"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
