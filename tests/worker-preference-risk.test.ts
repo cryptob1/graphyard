@@ -32,6 +32,7 @@ const sensitivePaths: Record<string, string> = {
   'persistence layer': 'src/store/work-store.ts', 'server auth, principals, API assembler, bootstrap or routes': 'src/server/auth.ts', 'operator agent': 'src/operator-agent.ts',
   installation: 'src/install/index.ts', deployment: 'deploy/compose.yml', Dockerfile: 'Dockerfile', 'compose file': 'compose.yaml',
   'CI configuration': '.github/workflows/ci.yml', dependencies: 'package.json', 'merge path': 'src/regression-guard.ts', 'merge writer': 'src/merge-writer/index.ts',
+  'Graphyard configuration': 'graphyard.json',
 };
 const normalFiles = ['src/master/dispatch.ts', 'src/model/worker-preference.ts', 'tests/worker-preference-risk.test.ts', 'docs/delegation.md'];
 /** Directory scopes that cover a sensitive surface while matching no rule literally. */

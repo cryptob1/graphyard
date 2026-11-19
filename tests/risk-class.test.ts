@@ -62,7 +62,7 @@ test('unit:risk-class-paths — every sensitive rule of the criterion classifies
   assert.equal(mixed.risk, 'sensitive');
   assert.deepEqual(mixed.reasons, ['src/store/tables/work.ts: persistence layer']);
   // The rule table is the criterion's list, one rule per surface.
-  assert.equal(sensitiveRules.length, 11);
+  assert.equal(sensitiveRules.length, 12, 'the criterion\'s rules and Graphyard\'s own configuration');
   assert.ok(sensitiveRules.every(({ pattern }) => pattern.source.startsWith('^')), 'every rule is anchored at the start of the path');
   // Node-free: the module imports nothing from node: and nothing but the work type.
 });
@@ -257,4 +257,17 @@ test('unit:risk-class-repository-sample — the newest 50 first-parent merges of
   // is reported rather than required.
   assert.ok(counts.storeOrInstall >= 1, `the newest ${sampleSize} merges include a merge touching src/store/ or src/install/`);
   console.log(`unit:risk-class-repository-sample: ${sample.length} merges, ${counts.sensitive} sensitive, ${counts.normal} normal, ${counts.storeOrInstall} touching src/store/ or src/install/, ${counts.docsOnly} docs-only`);
+});
+
+test('unit:graphyard-json-always-sensitive — a change to graphyard.json is sensitive in every repository, whether it declares its own sensitive list or not', async () => {
+  const { resolveRepositoryPolicy } = await import('../src/model-boundary/repository-policy.js');
+  for (const policy of [resolveRepositoryPolicy({}), resolveRepositoryPolicy({ risk: { sensitive: [{ rule: 'payments', glob: 'src/payments/**' }] } }), resolveRepositoryPolicy({ risk: { sensitive: [{ rule: 'payments', glob: '!src/payments/**' }] } })]) {
+    const verdict = classifyRisk([{ path: 'graphyard.json' }], policy);
+    assert.equal(verdict.risk, 'sensitive');
+    assert.match(verdict.reasons.join(' '), /Graphyard configuration/);
+    assert.equal(classifyRisk([{ path: 'src/lib/format.ts' }], policy).risk, 'normal', 'an ordinary file stays normal');
+  }
+  // A repository that already lists graphyard.json keeps one entry, its own.
+  const listed = resolveRepositoryPolicy({ risk: { sensitive: [{ rule: 'ours', glob: 'graphyard.json' }] } });
+  assert.deepEqual(listed.risk.sensitive.filter(entry => entry.glob === 'graphyard.json').map(entry => entry.rule), ['ours']);
 });

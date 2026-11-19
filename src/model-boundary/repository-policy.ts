@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { pendingOutcomeRules, releaseFailureActions, type RepositoryPolicy, type SensitiveEntry, defaultRepositoryPolicy, genericSensitiveRules, type Source, policySections, repositoryPolicyVariable, gitToplevel, configFile } from '../model/repository-policy.js';
+import { pendingOutcomeRules, releaseFailureActions, type RepositoryPolicy, type SensitiveEntry, defaultRepositoryPolicy, genericSensitiveRules, withControlFiles, type Source, policySections, repositoryPolicyVariable, gitToplevel, configFile } from '../model/repository-policy.js';
 // ---- Per-repository policy (GY-1843) -------------------------------------------------------------
 
 /**
@@ -61,10 +61,10 @@ export const repositoryPolicySchema = z.object({
   gate: z.object({ core: z.array(z.string().trim().regex(/^[a-z0-9][a-z0-9-]*$/)).max(50) }).strict().optional(),
 }).strict();
 
-/** The declared positive entries, else the generic ones, followed by every exclusion (`!glob`). */
+/** The declared positive entries, else the generic ones, then graphyard.json, followed by every exclusion (`!glob`). */
 const sensitiveInForce = (entries: SensitiveEntry[]) => {
   const positive = entries.filter(entry => !entry.glob.startsWith('!'));
-  return [...(positive.length ? positive : genericSensitiveRules), ...entries.filter(entry => entry.glob.startsWith('!'))];
+  return withControlFiles([...(positive.length ? positive : genericSensitiveRules), ...entries.filter(entry => entry.glob.startsWith('!'))]);
 };
 /** The policy in force for a declaration: each section it declares, every other section's default. */
 export function resolveRepositoryPolicy(input: unknown): RepositoryPolicy {

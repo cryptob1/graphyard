@@ -116,6 +116,6 @@ test('unit:one-merge-rule — a sensitive head waits for one reviewer approval b
   // section is dropped, and of its `only` entries a lane-only one never counted for review and still does not.
   const upgraded = resolveRepositoryPolicy({ review: { normalChanges: 'post-merge' }, risk: { sensitive: [
     { rule: 'store', glob: 'src/store/' }, { rule: 'auth', glob: 'src/auth.ts', only: 'risk' }, { rule: 'ceremony', glob: 'docs/', only: 'lane' }] } });
-  assert.deepEqual(upgraded.risk.sensitive, [{ rule: 'store', glob: 'src/store/' }, { rule: 'auth', glob: 'src/auth.ts' }]);
+  assert.deepEqual(upgraded.risk.sensitive, [{ rule: 'store', glob: 'src/store/' }, { rule: 'auth', glob: 'src/auth.ts' }, { rule: 'Graphyard configuration', glob: 'graphyard.json' }], 'graphyard.json is sensitive beside what the repository declares');
   assert.equal('review' in upgraded, false);
 });

@@ -35,7 +35,7 @@ test('e2e:sensitive-path-exclusion — an exclusion keeps the generic positive l
   assert.equal(classifyRisk([{ path: 'apps/pm/nested/package.json' }], excluding).risk, 'sensitive', '* stays within one segment');
   // Exclusions are evaluated after declared positive entries too, wherever they sit in the list.
   const declared = resolveRepositoryPolicy({ risk: { sensitive: [{ rule: 'per-app manifests', glob: '!apps/*/package.json' }, { rule: 'manifests', glob: '**/package.json' }] } });
-  assert.deepEqual(declared.risk.sensitive.map(entry => entry.glob), ['**/package.json', '!apps/*/package.json']);
+  assert.deepEqual(declared.risk.sensitive.map(entry => entry.glob), ['**/package.json', 'graphyard.json', '!apps/*/package.json']);
   assert.equal(classifyRisk([{ path: 'apps/pm/package.json' }], declared).risk, 'normal');
   assert.equal(classifyRisk([{ path: 'pnpm-lock.yaml' }], declared).risk, 'normal', 'declared positives replace the generics');
   // A repository with no exclusions classifies exactly as today.

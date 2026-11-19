@@ -35,8 +35,16 @@ export const genericSensitiveRules: readonly SensitiveEntry[] = [
   ...anywhere('secrets', '**/secrets/**', '**/secrets.*', '**/.env*'),
 ];
 
+/**
+ * Graphyard's own configuration, sensitive in every repository whatever it declares: graphyard.json
+ * holds the merge checks, the proof runners and this very list, so a worker changing it inside an
+ * ordinary item could loosen how its own change is judged. A change to it is reviewed before merge.
+ */
+export const controlFileRules: readonly SensitiveEntry[] = anywhere('Graphyard configuration', 'graphyard.json');
+export const withControlFiles = (entries: SensitiveEntry[]) => [...entries.filter(entry => !entry.glob.startsWith('!')), ...controlFileRules.filter(rule => !entries.some(entry => entry.glob === rule.glob)), ...entries.filter(entry => entry.glob.startsWith('!'))];
+
 export const defaultRepositoryPolicy: RepositoryPolicy = {
-  risk: { sensitive: [...genericSensitiveRules], declared: false },
+  risk: { sensitive: withControlFiles([...genericSensitiveRules]), declared: false },
   e2e: { pendingOutcomes: 'non-blocking', serve: null },
   release: { onFailure: 'revert', revertUnmatched: true },
   product: null,
