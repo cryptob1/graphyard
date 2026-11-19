@@ -81,7 +81,7 @@ before(async () => {
     reason: 'fixture: one worker account',
   });
   await call('agent-registry/connect', { host: 'host-a', provider: 'claude', reason: 'fixture: a second Claude account' });
-  await call('team-access/host', { dnsName: 'yard.tail-test.ts.net', ip: '100.64.0.7', tokenSaved: false, publicKey: null, shareLink: null, applied: { share: null, token: null } });
+  await call('team-access/host', { dnsName: 'yard.tail-test.ts.net', ip: '100.64.0.7', applied: { team: null } });
   // Newer bookkeeping after them, as the loop keeps writing.
   await store.pool.query(`INSERT INTO events(actor, kind, payload) SELECT 'fixture-coordinator', 'loop-state.saved', '{"ids":["x"]}' FROM generate_series(1, 2000)`);
   await store.pool.query('ANALYZE events');
