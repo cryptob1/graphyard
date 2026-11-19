@@ -18,11 +18,11 @@ import { FleetOverview } from '../web/pages/fleet.js';
 // The probe's own-key reading decides, and records which key it used.
 const now = Date.parse('2026-11-19T00:18:58Z');
 const resets = { a: '2026-11-21T03:54:09.000Z', b: '2026-11-25T00:00:00.000Z', c: '2026-11-20T12:49:15.000Z' };
-const used: Record<string, number> = { a: 100, b: 10, c: 100 };
+const used: Record<string, number> = { a: 100, b: 10, c: 10 };
 // What the shared service answered for each account's `opencode run`, as the incident recorded it.
 const beijing = (iso: string) => new Date(Date.parse(iso) + 8 * 3_600_000).toISOString().slice(0, 19).replace('T', ' ');
 const refusal = (owner: 'a' | 'c') => `{"type":"error","error":{"type":"provider.quota","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at ${beijing(resets[owner])}"}}`;
-const served: Record<string, string> = { a: refusal('c'), b: refusal('a'), c: refusal('c') };
+const served: Record<string, string> = { a: refusal('c'), b: refusal('a'), c: refusal('a') };
 const fingerprint = (key: string) => createHash('sha256').update(key).digest('hex').slice(0, 12);
 const zai = (async (_url: string, init?: RequestInit) => {
   const key = (init?.headers as Record<string, string>).Authorization.replace('Bearer ', '');
@@ -58,7 +58,7 @@ async function probe(registry: AgentRegistry, name: string, when = now) {
   return account.quota;
 }
 
-test('integration:opencode-probe-own-key — three keys, one probe each: only the over-limit accounts are exhausted, each with its own reset, and the probe names the key it used', async () => {
+test('integration:opencode-probe-own-key — three keys, one probe each: only the over-limit account is exhausted, each with its own reset, and the probe names the key it used', async () => {
   const registry = await fleet();
   for (const name of ['a', 'b', 'c']) {
     const quota = await probe(registry, `opencode-${name}`);
@@ -100,8 +100,10 @@ test('e2e:opencode-probe-own-key — the Agents page names a spent account\'s ow
   assert.match(row('opencode-a'), /data-status="spent"/);
   assert.ok(row('opencode-a').includes(localTime(resets.a)), 'opencode-a is back at its own reset');
   assert.ok(!row('opencode-a').includes(localTime(resets.c)), 'never at another account\'s');
-  const usable = row('opencode-b');
-  assert.doesNotMatch(usable, /data-status="spent"/);
-  assert.match(usable, /data-fault/, 'the mismatch is shown on the account, not hidden');
-  assert.match(usable, /Live check answered with another account&#x27;s limit/);
+  for (const name of ['opencode-b', 'opencode-c']) {
+    const usable = row(name);
+    assert.doesNotMatch(usable, /data-status="spent"/, name);
+    assert.match(usable, /data-fault/, 'the mismatch is shown on the account, not hidden');
+    assert.match(usable, /Live check answered with another account&#x27;s limit/);
+  }
 });
