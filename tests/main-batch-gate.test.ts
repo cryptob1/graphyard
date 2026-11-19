@@ -236,7 +236,7 @@ function gatePorts(landings: ServeLanding[], fails: (commit: string, check: stri
     fetch: async () => reverted.length ? `${'f'.repeat(39)}${reverted.length}` : tip,
     landings: async () => landings,
     files: async () => ['src/a.ts'],
-    catalog: async () => ['create-work-item', 'smoke', ...landings.flatMap(landing => landing.item.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))))],
+    catalog: async () => ['create-work-item', 'smoke', ...landings.flatMap(landing => landing.item!.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))))],
     core: async () => ['create-work-item', 'smoke'],
     run: async (commit, checks) => {
       runs.push({ commit, checks: [...checks] });
