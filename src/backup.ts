@@ -1,7 +1,6 @@
 import { createHash, type Hash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { open, readFile, rm } from 'node:fs/promises';
-import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import type pg from 'pg';
 import { advisoryLocks, ledgerOrder, ledgerSeeded, ledgerSequences, ledgerTables } from './store.js';
@@ -170,43 +169,47 @@ export async function writeBackupFile(pool: pg.Pool, file: string) {
   } finally { db.release(); }
 }
 
+/** A file's lines, read as the consumer asks for them: a slow restore never buffers the file. */
+async function* fileLines(file: string) {
+  let rest = '';
+  for await (const chunk of createReadStream(file, { encoding: 'utf8', highWaterMark: 1 << 20 })) {
+    const lines = (rest + chunk).split('\n'); rest = lines.pop()!;
+    yield* lines;
+  }
+  if (rest) yield rest;
+}
+
 type Chunk = { name: string; rows: unknown[] };
 /** The file's header and its tables' rows in chunks (every table at least one, possibly empty), digest-checked at the end when `hash` is given. */
 async function* streamedChunks(file: string, hash?: Hash): AsyncGenerator<Chunk, Header & { digest: string }> {
-  const lines = createInterface({ input: createReadStream(file, 'utf8'), crlfDelay: Infinity });
   let header: Header | null = null, name: string | null = null, rows: unknown[] = [], bytes = 0, count = 0;
-  try {
-    for await (const line of lines) {
-      if (!header) {
-        const { tables: _tables, ...rest } = JSON.parse(`${line}]}`); void _tables;
-        header = headerSchema.parse(rest);
-        hash?.update(digestHead(header));
-      } else if (line.startsWith('],"digest":')) {
-        const digest = String(JSON.parse(`{${line.slice(2)}`).digest);
-        if (hash && `sha256:${hash.update(digestTail(header)).digest('hex')}` !== digest) throw new Error('Backup digest does not match its contents; the file is corrupt or was edited');
-        return { ...header, digest };
-      } else if (line === ']}') {
-        hash?.update(']}');
-        yield { name: name!, rows }; name = null; rows = []; bytes = 0;
-      } else if (name === null) {
-        const start = /^(,?)\{"name":("[a-z_]+"),"rows":\[$/.exec(line);
-        if (!start) throw new Error('Backup file is not a backup Graphyard wrote; the file is corrupt or truncated');
-        hash?.update(line); name = tableName.parse(JSON.parse(start[2])); count = 0;
-      } else {
-        const row = z.record(z.string(), z.unknown()).parse(JSON.parse(line.startsWith(',') ? line.slice(1) : line));
-        hash?.update(`${count++ ? ',' : ''}${canonical(row)}`);
-        rows.push(row); bytes += line.length;
-        if (rows.length >= restoreChunkRows || bytes >= restoreChunkBytes) { yield { name, rows }; rows = []; bytes = 0; }
-      }
+  for await (const line of fileLines(file)) {
+    if (!header) {
+      const { tables: _tables, ...rest } = JSON.parse(`${line}]}`); void _tables;
+      header = headerSchema.parse(rest);
+      hash?.update(digestHead(header));
+    } else if (line.startsWith('],"digest":')) {
+      const digest = String(JSON.parse(`{${line.slice(2)}`).digest);
+      if (hash && `sha256:${hash.update(digestTail(header)).digest('hex')}` !== digest) throw new Error('Backup digest does not match its contents; the file is corrupt or was edited');
+      return { ...header, digest };
+    } else if (line === ']}') {
+      hash?.update(']}');
+      yield { name: name!, rows }; name = null; rows = []; bytes = 0;
+    } else if (name === null) {
+      const start = /^(,?)\{"name":("[a-z_]+"),"rows":\[$/.exec(line);
+      if (!start) throw new Error('Backup file is not a backup Graphyard wrote; the file is corrupt or truncated');
+      hash?.update(line); name = tableName.parse(JSON.parse(start[2])); count = 0;
+    } else {
+      const row = z.record(z.string(), z.unknown()).parse(JSON.parse(line.startsWith(',') ? line.slice(1) : line));
+      hash?.update(`${count++ ? ',' : ''}${canonical(row)}`);
+      rows.push(row); bytes += line.length;
+      if (rows.length >= restoreChunkRows || bytes >= restoreChunkBytes) { yield { name, rows }; rows = []; bytes = 0; }
     }
-  } finally { lines.close(); }
+  }
   throw new Error('Backup file ends before its digest; the file is truncated');
 }
 
-const streamed = async (file: string) => {
-  const lines = createInterface({ input: createReadStream(file, 'utf8'), crlfDelay: Infinity });
-  try { for await (const line of lines) return line.endsWith(tablesOpen); return false; } finally { lines.close(); }
-};
+const streamed = async (file: string) => { for await (const line of fileLines(file)) return line.endsWith(tablesOpen); return false; };
 
 /** Verify a backup file without touching any database or holding it in memory: its digest, generation and table list, and each table's row count. */
 export async function verifyBackupFile(file: string) {
