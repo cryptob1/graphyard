@@ -454,7 +454,7 @@ export function proposeDelivery(input: ScanInput, deploy: DeployDetection, stack
       && !detected.applications.some(existing => existing.id === application.id)) as unknown as typeof detected.applications;
     local = { ...localDeliveryDefaults, ...detected, applications: [...detected.applications, ...nodeApplications] };
   }
-  const kept = Object.fromEntries((['previews', 'candidateMaxChanges', 'productionVerification', 'applications', 'cases'] as const).filter(key => committed?.[key] !== undefined).map(key => [key, committed![key]]));
+  const kept = Object.fromEntries((['proofRunners', 'previews', 'candidateMaxChanges', 'productionVerification', 'applications', 'cases'] as const).filter(key => committed?.[key] !== undefined).map(key => [key, committed![key]]));
   return deliveryPolicySchema.parse({
     mode,
     mergeGate,

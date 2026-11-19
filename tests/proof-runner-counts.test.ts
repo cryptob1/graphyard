@@ -19,7 +19,8 @@ import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { mergeOne, runMergeTrial, type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import { masterConfigSchema } from '../src/master.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
-import { countJunitCases, countProofCases, junitCases } from '../src/proof-runner.js';
+import { countByRunner, countJunitCases, countProofCases, junitCases } from '../src/proof-runner.js';
+import { deliveryPolicySchema } from '../src/model-boundary/delivery-policy.js';
 import { runProof } from '../src/cli/verify.js';
 import type { Principal, Work } from '../src/model.js';
 
@@ -203,5 +204,38 @@ test(`${own} — graphyard verify counts a vitest proof through the same functio
     assert.deepEqual(await runProof(checkout, 'unit:absent', []), { result: 'fail', executed: 0, failed: 0, skipped: 0, files: [], abnormal: 'no test file names it' });
     await write('src/proof.test.ts', vitestProof('fail'));
     assert.deepEqual(await runProof(checkout, 'unit:declared', ['src/proof.test.ts']), { result: 'fail', executed: 1, failed: 1, skipped: 0, files: ['src/proof.test.ts'] });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+// A Python repository whose pytest lives in a venv that its own tests/pytest-proof.sh builds.
+const declaredRunners = [{ files: ['**/test_*.py', '**/*_test.py'], command: 'sh tests/pytest-proof.sh {report} {files}', output: 'junit' }];
+const declaredPolicy = { mode: 'local', mergeGate: { preMerge: [], perCandidate: [] }, candidateSchedule: null, deploy: { adapter: 'command', uat: null, production: null }, proofRunners: declaredRunners };
+
+test(`${own} — delivery.proofRunners validates as a Python repository declares it, and a runner without {files}, without {report} or with a cwd outside the repository is refused`, () => {
+  assert.equal(deliveryPolicySchema.safeParse(declaredPolicy).success, true);
+  assert.equal(deliveryPolicySchema.safeParse({ ...declaredPolicy, proofRunners: [{ ...declaredRunners[0], command: 'pytest {report}' }] }).success, false);
+  assert.equal(deliveryPolicySchema.safeParse({ ...declaredPolicy, proofRunners: [{ ...declaredRunners[0], command: 'pytest {files}' }] }).success, false);
+  assert.equal(deliveryPolicySchema.safeParse({ ...declaredPolicy, proofRunners: [{ ...declaredRunners[0], cwd: '../elsewhere' }] }).success, false);
+  assert.equal(deliveryPolicySchema.safeParse({ ...declaredPolicy, proofRunners: [] }).success, false);
+});
+
+test(`${own} — a declared runner runs its own command in its cwd over the files its globs own; a parametrised pytest case is the proof's case, a longer name is not`, { timeout: 120_000 }, async () => {
+  const root = await temporaryDirectory('proof-runner-declared');
+  try {
+    const report = '<?xml version="1.0"?><testsuites><testsuite name="pytest"><testcase name="test_unit_report[early]"/><testcase name="test_unit_report[late]"><failure message="no"/></testcase><testcase name="test_unit_report_ready"/></testsuite></testsuites>';
+    const fixture = await repository(root, { 'svc/tests/test_report.py': 'def test_unit_report(): pass\n', 'svc/tests/helper.py': 'unit_report = 1\n', 'other/test_unit_report.py': 'def test_unit_report(): pass\n',
+      'graphyard.json': JSON.stringify({ delivery: { proofRunners: [{ files: ['svc/**/test_*.py'], command: 'sh run.sh {report} {files}', output: 'junit', cwd: 'svc' }] } }) });
+    const invoked: string[][] = [];
+    const counts = await countByRunner({ root: fixture.checkout, proofs: ['unit:report', 'unit:report-ready', 'unit:absent'], scratch: root, git: defaultChildRun,
+      runner: async (command, args) => { invoked.push([command, ...args]); await writeFile(/'([^']*report\.xml)'/.exec(args[1]!)![1]!, report); return ''; } });
+    assert.equal(invoked.length, 1);
+    assert.match(invoked[0]![2]!, /^cd 'svc' && sh run\.sh '.*-report\.xml' 'tests\/test_report\.py'$/, 'the files an other directory owns are not run, and the paths are relative to cwd');
+    assert.deepEqual(counts['unit:report'], { executed: 2, failed: 1, skipped: 0, files: ['svc/tests/test_report.py'] });
+    assert.equal(counts['unit:report-ready']!.reason, 'no test file names it');
+    assert.equal(counts['unit:absent']!.reason, 'no test file names it');
+    // A declaration that does not parse is named, not run some other way.
+    await fixture.write('graphyard.json', JSON.stringify({ delivery: { proofRunners: [{ files: ['**/*.py'], command: 'pytest', output: 'junit' }] } }));
+    const refused = await countByRunner({ root: fixture.checkout, proofs: ['unit:report'], scratch: root, git: defaultChildRun, runner: async () => assert.fail('no runner runs') });
+    assert.match(refused['unit:report']!.reason!, /delivery\.proofRunners does not parse/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

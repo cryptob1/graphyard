@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { deliveryModes, deploymentAdapters } from '../model/delivery-policy.js';
 import { projectDeliveryShape } from './project-applications.js';
 import { applicationProblems } from '../model/project-applications.js';
+import { proofRunnersSchema } from '../proof-runner.js';
 /** One classified check: its name, the command that runs it when one is known, and why it sits where it does. */
 export const gateCheckSchema = z.object({
   check: z.string().trim().min(1).max(100),
@@ -48,6 +49,8 @@ export const deliveryPolicySchema = z.object({
     uat: z.string().trim().min(1).max(1000).nullable().default(null),
     production: z.string().trim().min(1).max(1000).nullable().default(null),
   }).strict()),
+  /** How the repository's proof cases run (proof-runner.ts); absent, the runner is detected. */
+  proofRunners: proofRunnersSchema.optional(),
   ...projectDeliveryShape,
 }).strict().superRefine((policy, context) => {
   for (const message of applicationProblems(policy)) context.addIssue({ code: 'custom', path: ['cases'], message });

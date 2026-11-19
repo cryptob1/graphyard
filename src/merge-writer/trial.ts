@@ -1279,6 +1279,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         enterStep('tests: proof runner');
         const ran = await child('tests', command, args);
         if (hostEnded(ran)) throw runnerFailure('tests', ran);
+        return ran.out;
       },
     });
     return finish(...verdict);

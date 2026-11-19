@@ -100,7 +100,7 @@ export async function runProof(root: string, proof: string, files: string[], por
     const tap = String(run?.stdout ?? ''), { executed, failed, skipped } = countProofCases(tap, proof);
     // GY-3170: what TAP counted nothing for, the repository's own runner counts, as the merge trial does.
     if (!executed && !skipped) {
-      const counted = (await countByRunner({ root, proofs: [proof], scratch, runner: async (command, args) => spawn(command, args), git: defaultChildRun }))[proof];
+      const counted = (await countByRunner({ root, proofs: [proof], scratch, runner: async (command, args) => spawn(command, args).stdout, git: defaultChildRun }))[proof];
       if (counted) return { result: counted.executed > 0 && counted.failed === 0 && counted.skipped === 0 ? 'pass' : 'fail', executed: counted.executed, failed: counted.failed, skipped: counted.skipped, files: counted.files, ...(counted.reason ? { abnormal: counted.reason } : {}) };
     }
     if (!run) return { result: 'fail', executed: 0, failed: 0, skipped: 0, files };
