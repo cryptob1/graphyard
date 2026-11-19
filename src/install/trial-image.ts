@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { publishedSourceImages, type AdapterContext } from './adapters.js';
 import type { PlanAction } from './types.js';
@@ -29,8 +30,12 @@ export const trialAppArmorPlan = (enabled = appArmorEnabled()): PlanAction[] => 
   id: 'provider.trial-apparmor', target: 'provider', state: 'update', command: trialAppArmorLoadCommand,
   title: `Load the AppArmor profile ${trialAppArmorProfile} (flags=(unconfined) with userns) at ${trialAppArmorProfilePath}, loaded again on boot, so merge-trial tests can start nested sandboxes; other containers keep docker-default`,
 }] : [];
-export const provisionTrialAppArmor = async (ctx: AdapterContext, enabled = appArmorEnabled()) => {
-  if (!enabled) return;
+/** The profile file as this host has it, or null when it is absent or unreadable. */
+const installedTrialAppArmorProfile = () => { try { return readFileSync(trialAppArmorProfilePath, 'utf8'); } catch { return null; } };
+/** A profile already written with this text is loaded on boot (apparmor_parser -W cached it), so a rerun
+ *  needs no root: an administrator who loaded it once by hand lets an installer without sudo go on. */
+export const provisionTrialAppArmor = async (ctx: AdapterContext, enabled = appArmorEnabled(), installed = installedTrialAppArmorProfile) => {
+  if (!enabled || installed() === trialAppArmorProfileText) return;
   try {
     await ctx.transport.exec('sudo', ['-n', 'tee', trialAppArmorProfilePath], { input: trialAppArmorProfileText });
     await ctx.transport.exec('sudo', ['-n', 'apparmor_parser', '-r', '-W', trialAppArmorProfilePath]);

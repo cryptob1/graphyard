@@ -76,8 +76,14 @@ test('e2e:trial-container-apparmor — on an AppArmor host install plans and loa
   assert.match(action!.command!, /profile graphyard-trial flags=\(unconfined\) \{\s+userns,\s+\}/);
   assert.match(action!.command!, new RegExp(`sudo apparmor_parser -r -W ${trialAppArmorProfilePath}`));
   const calls: { program: string; args: string[]; input?: string }[] = [];
-  await provisionTrialAppArmor(stubTransport(calls));
+  await provisionTrialAppArmor(stubTransport(calls), true, () => null);
   assert.deepEqual(calls.map(call => [call.program, ...call.args].join(' ')), [`sudo -n tee ${trialAppArmorProfilePath}`, `sudo -n apparmor_parser -r -W ${trialAppArmorProfilePath}`]);
+  const written = calls[0]!.input!;
+  const rerun: typeof calls = [];
+  await provisionTrialAppArmor(stubTransport(rerun), true, () => written);
+  assert.deepEqual(rerun, [], 'a profile already written with this text is not written or loaded again, so no sudo is needed');
+  await provisionTrialAppArmor(stubTransport(rerun), true, () => `${written}# edited\n`);
+  assert.equal(rerun.length, 2, 'a profile with other text is written and loaded again');
   assert.match(calls[0]!.input!, /flags=\(unconfined\)/); assert.match(calls[0]!.input!, /^\s+userns,$/m);
   assert.ok(existsSync(apparmor.loaded), 'the stub apparmor_parser loaded the profile');
 
