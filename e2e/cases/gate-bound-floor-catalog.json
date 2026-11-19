@@ -1,0 +1,15 @@
+{
+  "id": "gate-bound-floor-catalog",
+  "title": "A batch gate with no verified run gets 1.5 times its catalog time",
+  "description": "Runs the gate over a 55-minute recorded catalog with no verified run: a 60-minute run is inside the 82.5-minute bound, verifies and becomes the first sample instead of timing out at 45 minutes (GY-3523).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a gate longer than 45 minutes and shorter than 1.5 times its catalog verifies",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:gate-bound-floor-catalog tests/gate-bound-floor-catalog.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

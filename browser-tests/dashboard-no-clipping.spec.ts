@@ -29,7 +29,6 @@ async function seed(url: string) {
       body: JSON.stringify({ title: `A long enough title for row ${n} that it has to wrap onto a second line on a narrow window`, why: 'The operator reads the whole row.', simplest: 'One row per item.', type: 'feature', criteria: [{ id: 'AC-1', text: 'It works', proofs: ['e2e:fixture'] }] }) })).json() as { id: string };
     if (n > 1) await fetch(`${url}/api/work/${item.id}/ready`, { method: 'POST', headers: { ...operator, 'Idempotency-Key': `no-clipping-ready-${n}` }, body: JSON.stringify({ reason: 'Seeded' }) });
   }
-  await fetch(`${url}/api/team-access/share-link`, { method: 'POST', headers: operator, body: JSON.stringify({ url: 'https://login.tailscale.com/admin/invite/no-clipping-share' }) });
 }
 
 /** What the open page shows about clipping, read after a sideways wheel scroll. */
@@ -130,7 +129,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 800, height: 700 }
       // GY-3486: the Invite dialog from the top bar fits the window too.
       await page.getByRole('button', { name: 'Invite', exact: true }).click();
       const dialog = page.getByRole('dialog', { name: 'Invite' });
-      await expect(dialog.getByRole('group', { name: 'Installs on this machine' })).toBeVisible(settled);
+      await expect(dialog.getByRole('textbox', { name: 'Name' })).toBeVisible(settled);
       const box = await dialog.evaluate(node => { const at = node.getBoundingClientRect(); return { left: at.left, right: at.right, scrollWidth: node.scrollWidth, clientWidth: node.clientWidth, page: document.documentElement.scrollWidth - document.documentElement.clientWidth }; });
       expect.soft(box.left, 'Invite: the dialog starts inside the window').toBeGreaterThanOrEqual(0);
       expect.soft(box.right, 'Invite: the dialog ends inside the window').toBeLessThanOrEqual(viewport.width);

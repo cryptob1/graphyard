@@ -120,6 +120,7 @@ img.mark{width:26px;height:26px}
 .main .page-heading h1,.page-heading h1{margin:0;font-size:var(--type-title);font-weight:600;letter-spacing:-.5px}
 .summary{margin:var(--space-1) 0 0;font-size:var(--type-body);color:var(--text-2)}
 .page-heading .page-fact{margin:var(--space-2) 0 0;font-size:var(--type-sentence);font-weight:500;line-height:1.5;color:var(--text)}
+.speed{margin:18px 0 0}.speed-figure{margin:0;font-size:40px;font-weight:600;letter-spacing:-.8px;line-height:1.15;color:var(--text);overflow-wrap:anywhere}.speed-line{margin:var(--space-2) 0 0;font-size:var(--type-body);overflow-wrap:anywhere}.speed-line[data-speed-line=warning]{color:var(--blocked);font-weight:500}
 .page-actions{display:flex;align-items:center;gap:var(--space-3);flex-shrink:0}.page-actions button,.page-actions a{white-space:nowrap}
 .search input{width:280px;height:40px;padding:0 var(--space-3);border:1px solid var(--border);border-radius:var(--radius);background:var(--raised);color:var(--text);font-size:var(--type-body)}
 .count{font-size:var(--type-small);background:none;color:var(--text-2);padding:0;margin-left:var(--space-2);font-weight:400}
@@ -386,6 +387,7 @@ tr.spent-summary td{padding:6px var(--space-4)}tr.spent-summary button{all:unset
 .master-thread h2{font-size:var(--type-small);margin:0 0 4px;color:var(--text-2)}
 .master-thread ol{list-style:none;margin:0;padding:0;display:grid;gap:6px}
 .master-thread li{font-size:var(--type-small);overflow-wrap:anywhere}.master-thread time{color:var(--text-3);font-size:11px}.master-thread p{margin:2px 0 0;white-space:pre-wrap}
+.typed-input{min-width:0;margin-top:8px}.typed-input h2{font-size:var(--type-small);margin:0 0 4px;color:var(--text-2)}.typed-input ol{list-style:none;margin:0;padding:0;display:grid;gap:4px}.typed-input li{font-size:var(--type-small);overflow-wrap:anywhere;min-width:0}.typed-input time{color:var(--text-3);font-size:11px}.typed-input code{white-space:pre-wrap;overflow-wrap:anywhere}
 .live-terminal{display:flex;flex-direction:column;min-width:0;min-height:0;gap:8px;height:60dvh}
 .terminal-info{display:flex;flex-wrap:wrap;gap:4px 16px;font-size:12px;color:var(--text-2);flex-shrink:0;overflow-wrap:anywhere}
 .terminal-session{color:var(--text)}

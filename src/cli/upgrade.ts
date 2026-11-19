@@ -3,7 +3,7 @@
 import { createRequire } from 'node:module';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from 'node:fs';
-import { mkdir, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBackup } from '../backup.js';
@@ -12,6 +12,7 @@ import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBas
 import { repositoryFromRemote } from '../onboarding.js';
 import { installDirectory, readInstallRecord, type InstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
+import { localDatabaseUrl, localPaths, readLocalEnvironment } from '../install/local-runtime.js';
 import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
@@ -37,6 +38,8 @@ export interface UpgradeInputs {
   cliChanges: string[];
   /** The image the redeploy names instead of the target's published one: a compose install's own build (GY-1982). */
   image?: string;
+  /** GY-3524: the database the backup reads; a credential, so no plan, record or output names it. */
+  databaseUrl?: string | null;
 }
 export interface UpgradePlan {
   from: Release; to: UpgradeTarget; databaseSchema: number | null; steps: UpgradeStep[]; rollback: string; cliChanges: string[];
@@ -141,6 +144,32 @@ export function resolveTarget(cliRoot: string, to?: string): UpgradeTarget {
   return { version, revision, schema: revisionSchema(cliRoot, revision) };
 }
 
+/**
+ * GY-3524: the database the install's own server runs on — DATABASE_URL when set, else the install's
+ * recorded deploy settings, read as its server reads them: a local install's runtime variables or its
+ * cluster's password and port, a compose install's server.env with the db service's container address.
+ * Null when no install is recorded.
+ */
+export async function installDatabaseUrl(directory: string | null, install: InstallRecord | null, run: ChildRun = defaultChildRun): Promise<string | null> {
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
+  if (!directory || !install) return null;
+  if (install.provider === 'local') {
+    const paths = localPaths(directory);
+    const recorded = (await readLocalEnvironment(paths))?.DATABASE_URL;
+    if (recorded) return recorded;
+    const [password, port] = await Promise.all([readFile(paths.passwordFile, 'utf8'), readFile(paths.portFile, 'utf8')]);
+    return localDatabaseUrl(password.trim(), Number(port.trim()));
+  }
+  const compose = join(directory, 'compose');
+  const line = (await readFile(join(compose, 'server.env'), 'utf8')).split('\n').find(entry => entry.startsWith('DATABASE_URL='));
+  if (!line) return null;
+  const container = String(await run('docker', ['compose', 'ps', '--quiet', 'db'], { cwd: compose })).trim();
+  const address = String(await run('docker', ['inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}', container])).trim().split(' ')[0];
+  const url = new URL(line.slice('DATABASE_URL='.length));
+  url.hostname = address;
+  return url.href;
+}
+
 async function databaseSchemaOf(url: string | null): Promise<number | null> {
   if (process.env.DATABASE_URL) { const store = new Store(process.env.DATABASE_URL); try { return await store.schema(); } finally { await store.close(); } }
   if (!url) return null;
@@ -170,8 +199,9 @@ export function liveEffects(inputs: UpgradeInputs, recordFile: string, fetchHeal
     async record(entry) { await mkdir(resolve(recordFile, '..'), { recursive: true }); await writeFile(recordFile, `${JSON.stringify({ at: new Date().toISOString(), ...entry }, null, 2)}\n`); },
     async run(step) {
       if (step.id === 'backup') {
-        if (!process.env.DATABASE_URL) throw new Error('Set DATABASE_URL to the Graphyard database so the upgrade can back it up before the server migrates it');
-        const store = new Store(process.env.DATABASE_URL);
+        const databaseUrl = inputs.databaseUrl === undefined ? process.env.DATABASE_URL : inputs.databaseUrl;
+        if (!databaseUrl) throw new Error('Set DATABASE_URL to the Graphyard database so the upgrade can back it up before the server migrates it');
+        const store = new Store(databaseUrl);
         try { const backup = await createBackup(store.pool); await mkdir(resolve(inputs.backupFile, '..'), { recursive: true }); await writeFile(inputs.backupFile, JSON.stringify(backup), { flag: 'wx', mode: 0o600 }); }
         finally { await store.close(); }
       } else if (step.id === 'health') {
@@ -593,14 +623,16 @@ export const upgradeCommands = defineCommands([{
     const url = process.env.GRAPHYARD_URL || context.connection?.url ? context.base : null;
     const current = checkoutRelease(cliRoot);
     const target = resolveTarget(cliRoot, to);
-    const inputs: UpgradeInputs = { cliRoot, repoRoot, current, target, cliChanges: cliChangesOf(cliRoot), databaseSchema: await databaseSchemaOf(url), url,
-      install: directory ? await readInstallRecord(directory) : null,
+    const install = directory ? await readInstallRecord(directory) : null;
+    const inputs: UpgradeInputs = { cliRoot, repoRoot, current, target, cliChanges: cliChangesOf(cliRoot), databaseSchema: await databaseSchemaOf(url), url, install,
       backupFile: join(directory ?? join(repoRoot, '.graphyard'), 'backups', `before-${target.version}-${Date.now()}.json`) };
     const plan = upgradePlan(inputs);
     console.log(renderPlan(plan));
     if (flags.includes('--plan')) return;
+    // The plan needs no credential: the install's database is resolved only for a real upgrade.
+    const databaseUrl = inputs.databaseUrl = await installDatabaseUrl(directory, install);
     // Every precondition a later step needs is checked before the record and the checkout move.
-    if (!process.env.DATABASE_URL) throw new Error('Set DATABASE_URL to the Graphyard database so the upgrade can back it up before the server migrates it; nothing was changed');
+    if (!databaseUrl) throw new Error('Set DATABASE_URL to the Graphyard database so the upgrade can back it up before the server migrates it; nothing was changed');
     if (!url) throw new Error('Set GRAPHYARD_URL so the upgrade can read /healthz after the redeploy; nothing was changed');
     const result = await runUpgrade(plan, liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json')));
     if (result.ok) { await migrateHerdr(repoRoot); console.log(`upgraded to ${target.version}`); return; }

@@ -19,11 +19,3 @@ test('unit:test-browser-tests-master-page-compose-install-spec-ts-pinned — eve
     assert.ok(budgets.length > 0 && budgets.every(ms => ms >= 60_000), `${name} boots a database and sets test.setTimeout of at least 60 s (found ${budgets.join(', ') || 'none'})`);
   }
 });
-
-// The same trial then failed one-click-team-access: each retry reloaded the page and allowed its synced
-// data one second to appear, which a loaded host never met. GY-3412 gave each reload poll 5 s; this pins
-// that no poll falls back to one second.
-test('unit:test-browser-tests-master-page-compose-install-spec-ts-pinned — one-click-team-access never gives a reload a one-second check', () => {
-  const spec = readFileSync(join(root, 'browser-tests', 'one-click-team-access.spec.ts'), 'utf8');
-  assert.doesNotMatch(spec, /reload\([^)]*\);[^\n]*\{ timeout: 1_000 \}/, 'no reload followed by a one-second check');
-});
