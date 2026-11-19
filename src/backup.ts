@@ -56,6 +56,8 @@ export async function createBackup(pool: pg.Pool): Promise<Backup> {
   const db = await pool.connect();
   try {
     await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    // GY-3538: a whole-ledger read outlasts any request's statement timeout, the pool's or the role's.
+    await db.query('SET LOCAL statement_timeout = 0');
     // The backup lock, shared: backups run beside each other and beside coordination work, and
     // only a restore excludes them. Never the coordination lock (GY-203).
     await db.query('SELECT pg_advisory_xact_lock_shared($1)', [advisoryLocks.backup]);
