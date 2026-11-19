@@ -353,11 +353,11 @@ export const openFlakyItem = (work: readonly Work[], check: string) => work.find
 /**
  * GY-3545: a trial's failures that are not the candidate's: the build passed, no E2E case failed,
  * and every failing test file has an open flaky-check item or fails on the base tip too, case for
- * case (`failureIsBase`). Null when any failure is the candidate's.
+ * case (`failureIsBase`) where a `note` can record it as a known red. Null when any failure is the candidate's.
  */
-export async function knownFailures(ports: Pick<MergePorts, 'flaky'>, run: MergeTrialRun): Promise<{ flaky: { file: string; item: Pick<Work, 'id' | 'key'> }[]; red: string[] } | null> {
+export async function knownFailures(ports: Pick<MergePorts, 'flaky' | 'note'>, run: MergeTrialRun): Promise<{ flaky: { file: string; item: Pick<Work, 'id' | 'key'> }[]; red: string[] } | null> {
   if (run.build !== 'pass' || !run.tests.failed.length || run.tests.failed[0] === 'secret-scan' || run.e2e?.some(entry => entry.missing || entry.failingStep)) return null;
-  const onBase = !!run.base && run.base.cases.length > 0 && run.base.cases.every(test => run.base!.tests.includes(test));
+  const onBase = !!ports.note && !!run.base && run.base.cases.length > 0 && run.base.cases.every(test => run.base!.tests.includes(test));
   const flaky: { file: string; item: Pick<Work, 'id' | 'key'> }[] = [], red: string[] = [];
   for (const file of run.tests.failed) {
     const item = await ports.flaky?.(`test:${file}`);
@@ -790,7 +790,7 @@ export interface MergePorts {
   onStep?: (step: string) => void;
   /** GY-3545: the open "Flaky check on main" item for `check` (`test:FILE`), or null; absent, no failure is excused as flaky. */
   flaky?(check: string): Promise<Pick<Work, 'id' | 'key'> | null>;
-  /** GY-3545: records `text` as a note on `item` under `idempotencyKey`; absent, nothing is noted. */
+  /** GY-3545: records `text` as a note on `item` under `idempotencyKey`; absent, nothing is noted and a base-tip failure holds the head as before (GY-1834). */
   note?(item: Pick<Work, 'id' | 'key'>, text: string, idempotencyKey: string): Promise<unknown>;
 }
 export type MergeOutcome =
@@ -865,6 +865,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
   // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
   if (!adopted) await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
   let run: MergeTrialRun | null = null;
+  let baseHeld: string | null = null;
   let failure: string | null = null;
   if (!kept) {
     try { run = await ports.trial(mergeSha, merged.files, item, baseTip, ports.onStep, undefined, [{ key: item.key, head }]); }
@@ -877,7 +878,9 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     // GY-3545: failures that are tests with an open flaky-check item, or red on the base tip too, are not
     // the candidate's: each is noted where it belongs and the candidate goes on to its remaining gates.
     const known = await knownFailures(ports, run);
-    failure = trialFailureReason({ run: known ? { ...run, tests: { ...run.tests, failed: [] } } : run }) ?? requiredProofFailure(item, run) ?? featureCaseFailure(item, merged.addedOrModified ?? []);
+    // GY-1834: with nowhere to record a known red, a failure every file of which fails on the base tip too is held, never reworked.
+    baseHeld = !known && failureIsBase(run) ? baseFailureReason(run.base!) : null;
+    failure = baseHeld ?? trialFailureReason({ run: known ? { ...run, tests: { ...run.tests, failed: [] } } : run }) ?? requiredProofFailure(item, run) ?? featureCaseFailure(item, merged.addedOrModified ?? []);
     if (known && !failure) {
       for (const { file, item: flakyItem } of known.flaky) await ports.note?.(flakyItem, `${file} failed in ${item.key}'s merge trial on ${mergeSha.slice(0, 12)}; it has this open flaky item, so ${item.key} was not sent back.`, `trial-flaky:${flakyItem.key}:${mergeSha}:${file}`);
       if (known.red.length) await ports.note?.(item, `Known red: ${known.red.join(', ')} also fail on main (${baseTip.slice(0, 12)}), so they were not counted against this change.`, `trial-known-red:${mergeSha}`);
@@ -896,6 +899,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     // displaced by a review that has not passed — only a passing trial settles as kept below.
     if (failure) {
       await ports.record(item, { kind: 'refused', head, reason: failure });
+      if (baseHeld) return { outcome: 'requeued', reason: failure, pushes };
       return { outcome: 'refused', reason: failure, trial: run, conflict: [] };
     }
     // The landing boundary (GY-1927): a hold recorded while the trial ran refuses the push, so nothing
