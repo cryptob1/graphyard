@@ -11,7 +11,7 @@ import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
 import { masterCredential, planeRequest, setupSteps } from './setup-from-zero.js';
@@ -359,14 +359,15 @@ const loopbackHosts = ['127.0.0.1', 'localhost', '[::1]'];
  * what left a bare `tailscale serve` waiting). Never `tailscale funnel`: nothing is made public. Null
  * for a server not on loopback (already reachable at its own address) or a host without Tailscale.
  */
-export function tailnetShare(server: string, tailnet: Tailnet | null): { command: string[]; url: string } | null {
+export function tailnetShare(server: string, tailnet: Tailnet | null, socket: string | null = null): { command: string[]; url: string } | null {
   let url: URL;
   try { url = new URL(server); } catch { return null; }
   if (url.protocol !== 'http:' || !loopbackHosts.includes(url.hostname)) return null;
   const host = tailnet?.dnsName?.replace(/\.$/, '') || tailnet?.ip;
   if (!host) return null;
   const port = url.port || '80';
-  return { command: ['tailscale', 'serve', '--bg', `--http=${port}`, `http://127.0.0.1:${port}`], url: `http://${host}${port === '80' ? '' : `:${port}`}` };
+  // GY-3486: to the install's serve socket once its server opened one: only tailscaled reaches it, so the server trusts Tailscale's login header there.
+  return { command: ['tailscale', 'serve', '--bg', `--http=${port}`, socket ? `unix:${socket}` : `http://127.0.0.1:${port}`], url: `http://${host}${port === '80' ? '' : `:${port}`}` };
 }
 /** GY-3294: the one instruction a host without a running Tailscale gets; up carries on locally. */
 export const tailscaleMissingNote = 'Tailscale is not running here, so this install stays on this machine. To share it: install Tailscale (https://tailscale.com/download), sign in, and rerun graphyard up.';
@@ -536,7 +537,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     reached = true;
     const tailnet = await deps.tailnet?.().catch(() => null) ?? null;
     if (deps.tailnet && !tailnet) deps.emit({ kind: 'note', text: tailscaleMissingNote });
-    const share = tailnetShare(server, tailnet);
+    const socket = join(deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository)), 'compose', 'serve', 'serve.sock');
+    const share = tailnetShare(server, tailnet, existsSync(socket) ? socket : null);
     if (!share) return state.tailnetUrl ?? null;
     const shell = share.command.join(' ');
     if (!deps.applyTailnet) {

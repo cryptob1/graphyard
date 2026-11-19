@@ -91,7 +91,9 @@ export async function servedUrl(port: string): Promise<string | null> {
   let config: { TCP?: Record<string, { HTTPS?: boolean }>; Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }> };
   try { config = await tailscaleJson(['serve', 'status', '--json']) ?? {}; } catch { return null; }
   const targets = (proxy?: string) => { try { return new URL(proxy!).port === port; } catch { return false; } };
-  const urls = Object.entries(config.Web ?? {}).filter(([, web]) => Object.values(web?.Handlers ?? {}).some(handler => targets(handler?.Proxy))).map(([address]) => {
+  // GY-3486: up serves the install's serve socket on its own port number once the server opened one.
+  const socketOnPort = (address: string, proxy?: string) => !!proxy?.startsWith('unix:') && address.slice(address.lastIndexOf(':') + 1) === port;
+  const urls = Object.entries(config.Web ?? {}).filter(([address, web]) => Object.values(web?.Handlers ?? {}).some(handler => targets(handler?.Proxy) || socketOnPort(address, handler?.Proxy))).map(([address]) => {
     const https = !!config.TCP?.[address.slice(address.lastIndexOf(':') + 1)]?.HTTPS;
     return https ? `https://${address.replace(/:443$/, '')}` : `http://${address.replace(/:80$/, '')}`;
   });
