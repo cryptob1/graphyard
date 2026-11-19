@@ -27,7 +27,7 @@ import { cachedPasses, commitDependencies, dependencyKey, moduleFile, recordPass
 import { HostDroppedError, readShardHosts, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, splitLocalOnlyTests, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
-import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes, trialStartOwner } from './trial-load.js';
+import { diskFloorBytes, gateTrialKey, heatWaitSeconds, TrialHeatError, trialContainerFault, trialLoad, trialShardLanes, trialStartOwner } from './trial-load.js';
 import { nestedSandboxDenied, trialAppArmorFix } from './trial-apparmor.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -1120,7 +1120,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     catch (error) {
       const out = output(error);
       const ended = endedOf(error, out);
-      cpu.finish(stepLabel, cpuBefore, !!(error as { timedOut?: boolean }).timedOut || now() >= deadline || repositoryCheckFailure(out).timedOut || /Timed out waiting \d+ms from config\.webServer|file timed out|file timeout/i.test(out), line => entries.push(line));
+      const timedOut = !!(error as { timedOut?: boolean }).timedOut || now() >= deadline || repositoryCheckFailure(out).timedOut || /Timed out waiting \d+ms from config\.webServer|file timed out|file timeout/i.test(out);
+      cpu.finish(stepLabel, cpuBefore, timedOut, line => entries.push(line));
+      // GY-3535: a step that timed out while its containers waited over a minute for the CPU to cool measures the heat, not the head.
+      if (timedOut && heatWaitSeconds(out) > 60) { entries.push(`$ ${command} ${args.join(' ')}\n${out}`); throw new TrialHeatError(stepLabel, heatWaitSeconds(out)); }
       entries.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
       // GY-3332: a container start that gave up waiting on host pressure is no verdict on the head.
