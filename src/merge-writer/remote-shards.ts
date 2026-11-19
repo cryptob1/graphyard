@@ -25,16 +25,15 @@ export const realFreeCores = (reading: HostReading) => Math.max(0, reading.cores
 export const underHeatLimit = (reading: HostReading) => !reading.away && (reading.celsius === null || reading.celsius < reading.limit);
 
 /**
- * GY-3419: the words a test file names when it needs what a remote shard lacks — namespaces
- * (bwrap, unshare), the Docker socket, or the network: servers and sockets, requests, databases,
- * SSH, browsers, e2e machinery. A shard on an added host runs with no network and no Docker
- * socket, so such a file there would fail as a red verdict that measures neither the merge nor
- * the host. Naming any word keeps the file on this machine; over-marking only costs a host
- * shards, under-marking reads as a false failure.
- * GY-3536: a test importing the trial runner (merge-writer) or the sandboxed benchmarks needs
- * namespaces too, which a compute host's shard lacks.
+ * GY-3419: the words a test file names when it needs what a remote shard lacks — the Docker
+ * socket or the network: servers and sockets, requests, databases, SSH, browsers, e2e machinery.
+ * A shard on an added host runs with no network and no Docker socket, so such a file there would
+ * fail as a red verdict that measures neither the merge nor the host. Naming any word keeps the
+ * file on this machine; over-marking only costs a host shards, under-marking reads as a false failure.
+ * GY-3549: a shard may start nested sandboxes (bwrap, the trial runner), as a local trial can;
+ * the sandboxed benchmarks still stay here for their pinned interpreter.
  */
-export const localOnlyTestPattern = /bwrap|unshare|landlock|docker|compose|network|socket|ssh|scp|postgres|mysql|redis|database|withDatabase|server|listen|connect|fetch|http|url|browser|playwright|chromium|firefox|webkit|selenium|puppeteer|e2e|merge-writer|benchmarks|hard-math/i;
+export const localOnlyTestPattern = /docker|compose|network|socket|ssh|scp|postgres|mysql|redis|database|withDatabase|server|listen|connect|fetch|http|url|browser|playwright|chromium|firefox|webkit|selenium|puppeteer|e2e|benchmarks|hard-math/i;
 /** Whether a test file's text may run on a remote shard: it names none of the local-only words. */
 export const remoteableTestFile = (text: string) => !localOnlyTestPattern.test(text);
 

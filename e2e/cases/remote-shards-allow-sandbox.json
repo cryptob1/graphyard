@@ -1,0 +1,14 @@
+{
+  "id": "remote-shards-allow-sandbox",
+  "title": "A shard on a compute host may start nested sandboxes, so a sandbox test runs and passes there",
+  "description": "A merge trial with one ready compute host reached through graphyard-host-shim. tests/trial-runtime.test.ts, which runs a whole trial inside bubblewrap, is no longer local-only: its shard runs on the host, in a container with seccomp and system paths unconfined that keeps a read-only root, no capabilities, no new privileges, no network and its CPU, memory and process limits, and it passes.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": true,
+  "steps": [{
+    "kind": "command",
+    "name": "Run a trial whose one test file, tests/trial-runtime.test.ts, runs on the compute host",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/remote-shards-allow-sandbox.test.ts",
+    "timeoutSeconds": 900
+  }]
+}
