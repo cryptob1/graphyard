@@ -401,6 +401,8 @@ export const completeCommand: CliCommand = {
     // names files; every other item runs nothing.
     const { requestWorkerVerification } = await import('./worker-verification.js');
     const checked = await requestWorkerVerification(context, work, { mode: 'complete', head: body.head, epoch: body.epoch });
+    // GY-3537: the verification still waits for a slot; the head is recorded and the loop submits it.
+    if ('queued' in checked) { context.print('queued for verification; the loop submits it'); return; }
     const rerun = checked.rerun;
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }

@@ -87,4 +87,4 @@ export async function closePool(pool: pg.Pool, name: string, boundMs = poolClose
  * gets a connection while every other pool is exhausted behind slow queries.
  */
 export const leasePoolConnections = 4;
-export const leaseCommands: ReadonlySet<string> = new Set(['heartbeat', 'claim', 'submit', 'blocked', 'defer']);
+export const leaseCommands: ReadonlySet<string> = new Set(['heartbeat', 'claim', 'submit', 'blocked', 'defer', 'queue']);
