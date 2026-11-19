@@ -8,6 +8,7 @@ import pg from 'pg';
 import { freePort } from '../src/cli/test-isolation.js';
 import { cliChangesOf, installDatabaseUrl, liveEffects, renderPlan, runUpgrade, upgradePlan, type UpgradeInputs } from '../src/cli/upgrade.js';
 import { localPaths } from '../src/install/local-runtime.js';
+import { Store } from '../src/store.js';
 import type { InstallRecord } from '../src/install/secrets.js';
 import { checkoutRelease } from '../src/release.js';
 import { startPostgres } from './helpers/postgres.js';
@@ -26,6 +27,9 @@ async function localInstall() {
   const admin = new pg.Client({ connectionString: cluster.url });
   await admin.connect();
   try { await admin.query('CREATE DATABASE graphyard'); } finally { await admin.end(); }
+  const migrated = new URL(cluster.url); migrated.pathname = '/graphyard';
+  const store = new Store(migrated.href);
+  try { await store.init(); } finally { await store.close(); }
   const directory = await temporaryDirectory('upgrade-own-database'), paths = localPaths(directory);
   await mkdir(paths.postgres, { recursive: true });
   await writeFile(paths.passwordFile, `${password}\n`, { mode: 0o600 });
