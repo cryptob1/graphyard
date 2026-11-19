@@ -1,0 +1,16 @@
+{
+  "id": "heat-uses-average",
+  "title": "Heat limits act on the 2 min CPU average: master status shows the latest sample and the mean",
+  "description": "GY-3532: after two minutes of loop cycles over a fixture hwmon whose package holds 90-92C, master status shows the latest sample (92C) beside the 120 s mean (91C), and the waiting line names the mean: 'CPU averages 91C over 2 min; limit 85C'.",
+  "tags": ["dispatch"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "master status shows the latest CPU sample, the 120 s mean and a waiting line naming the mean",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/heat-uses-average-status.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
