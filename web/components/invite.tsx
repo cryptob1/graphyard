@@ -6,7 +6,7 @@ import type { Dashboard } from '../pages/dashboard';
 
 type Install = { url: string; name: string };
 type Teammate = { login: string; role: string; installs: string[] };
-type Access = { hostKey: string | null; tokenSaved: boolean; shareLink: unknown; installs: Install[]; teammates: Teammate[] };
+type Access = { hostKey: string | null; tokenSaved: boolean; shareLink: { state: string } | null; installs: Install[]; teammates: Teammate[] };
 
 /**
  * GY-3486: Invite, in the top bar for the operator's human session. One dialog names the people by
@@ -54,7 +54,7 @@ function InviteDialog({ api, onClose }: Pick<Dashboard, 'api'> & { onClose(): vo
     {close}
     <h2>Invite</h2>
     {!access ? <p>{error || 'Loading…'}</p> : <>
-      {!access.tokenSaved && !access.shareLink && <form onSubmit={event => { event.preventDefault(); void act(async () => {
+      {!access.tokenSaved && (!access.shareLink || access.shareLink.state === 'expired') && <form onSubmit={event => { event.preventDefault(); void act(async () => {
         demandKey(access.hostKey);
         setAccess(await api('team-access/tailscale-token', { sealed: await sealForHost(access.hostKey!, token) }));
         setToken('');

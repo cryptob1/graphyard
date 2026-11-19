@@ -1,5 +1,5 @@
 import { test, expect, type BrowserContext, type Page } from '@playwright/test';
-import { createServer, request } from 'node:http';
+import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -9,17 +9,11 @@ import { Engine } from '../src/engine';
 import { server } from '../src/server';
 import { settleHostLoops } from '../tests/helpers/team-access-hosts';
 import { fakeTailscale, onPath } from '../tests/helpers/fake-tailscale';
+import { viaSocket } from '../tests/helpers/serve-socket';
 
 test.use({ actionTimeout: 15_000 });
 
 type Reply = { status: number; body: any };
-/** A request as tailscaled makes it on an install's serve socket: Tailscale's own identity header, no bearer token. */
-const viaSocket = (socketPath: string, path: string, login: string, body?: unknown) => new Promise<Reply>((resolve, reject) => {
-  const req = request({ socketPath, path, method: body === undefined ? 'GET' : 'POST', headers: { Host: 'yard.tail-test.ts.net', 'Tailscale-User-Login': login, 'Content-Type': 'application/json' } }, res => {
-    let data = ''; res.setEncoding('utf8'); res.on('data', chunk => { data += chunk; }); res.on('end', () => resolve({ status: res.statusCode!, body: data ? JSON.parse(data) : null }));
-  });
-  req.on('error', reject); req.end(body === undefined ? undefined : JSON.stringify(body));
-});
 const call = async (url: string, path: string, token: string | null, body?: unknown, headers: Record<string, string> = {}): Promise<Reply> => {
   const response = await fetch(url + path, { method: body === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID(), ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
   return { status: response.status, body: await response.json().catch(() => null) };

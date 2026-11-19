@@ -83,7 +83,7 @@ export function server(engine: Engine, credentials: Credential[], options: Serve
       if (!(lane && confinedLaneProducer(lane)) && await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
         // GY-3486: on the serve socket only tailscaled reaches, its Tailscale-User-Login header names the person.
-        const login = viaTailscale.has(req) && !req.headers.authorization ? req.headers['tailscale-user-login'] : undefined;
+        const login = viaTailscale.has(req) && !String(req.headers.authorization ?? '').replace(/^Bearer\s*/, '') ? req.headers['tailscale-user-login'] : undefined;
         context.actor = typeof login === 'string' && login ? await tailscaleTeammate(services, login)
           : await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname, localRead(req));
         if (await dispatch([laneProducerScope, reporterScope, ...apiRoutes])) return;
