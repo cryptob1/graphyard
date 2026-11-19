@@ -35,10 +35,10 @@ for (const width of [390, 1280]) {
     await expect(line).not.toContainText('GY-');
     const figure = page.locator('[data-speed-figure]');
     await expect(figure).toHaveText('1.3 merges an hour (31 in the last 24 hours)');
-    // First and largest: nothing in the page's content sits above it or has bigger text.
+    // First and largest: nothing in the page's content (everything in .main but the shared top bar) sits above it or has bigger text.
     const { first, largest } = await page.evaluate(() => {
       const figure = document.querySelector('[data-speed-figure]')!, size = (el: Element) => parseFloat(getComputedStyle(el).fontSize);
-      const text = [...document.querySelectorAll('.main *')].filter(el => el !== figure && !figure.contains(el) && !el.closest('header') && [...el.childNodes].some(n => n.nodeType === 3 && n.textContent!.trim()) && (el as HTMLElement).offsetParent);
+      const text = [...document.querySelectorAll('.main *')].filter(el => el !== figure && !figure.contains(el) && !el.closest('.top-bar') && [...el.childNodes].some(n => n.nodeType === 3 && n.textContent!.trim()) && (el as HTMLElement).offsetParent);
       return { first: text.every(el => el.getBoundingClientRect().top >= figure.getBoundingClientRect().bottom - 1), largest: text.every(el => size(el) < size(figure)) };
     });
     expect({ first, largest }).toEqual({ first: true, largest: true });
