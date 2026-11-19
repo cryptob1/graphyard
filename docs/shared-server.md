@@ -31,7 +31,7 @@ The first install serves at `127.0.0.1:4310`, each next one takes the first free
 
 ## Signing in and inviting people
 
-Each install has its own sign-in; one signs you in to no other. Sign in with the one-time link `up` prints, or `graphyard login` for a fresh one. Invite someone with **Invite**: name their Tailscale logins, a role, and the installs on this machine (all ticked). One message carries the Tailscale share and each install's address; their Tailscale login is their sign-in there, with no other link. The dialog lists every teammate, each with Revoke. A viewer reads everything; a maintainer also files work. `graphyard invite NAME --role viewer|maintainer` still prints a single-use sign-in link that expires within 24 hours, for one install.
+Each install has its own sign-in; one signs you in to no other. Sign in with the one-time link `up` prints, or `graphyard login` for a fresh one. Invite someone with **Invite**: a name, a role and how long the link stays valid (1, 7 or 30 days). Invite gives one link on the install's Funnel address that opens once, on any device, with no Tailscale. The dialog lists every teammate, each with Revoke, which ends their session at once. A viewer reads everything; a maintainer also files work and types into the master. `graphyard invite NAME --role viewer|maintainer [--days N]` prints the same link.
 
 ## The missing desktop keyring
 

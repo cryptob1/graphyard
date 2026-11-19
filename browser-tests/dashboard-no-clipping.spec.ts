@@ -129,7 +129,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 800, height: 700 }
       // GY-3486: the Invite dialog from the top bar fits the window too.
       await page.getByRole('button', { name: 'Invite', exact: true }).click();
       const dialog = page.getByRole('dialog', { name: 'Invite' });
-      await expect(dialog.getByRole('group', { name: 'Installs on this machine' })).toBeVisible(settled);
+      await expect(dialog.getByRole('textbox', { name: 'Name' })).toBeVisible(settled);
       const box = await dialog.evaluate(node => { const at = node.getBoundingClientRect(); return { left: at.left, right: at.right, scrollWidth: node.scrollWidth, clientWidth: node.clientWidth, page: document.documentElement.scrollWidth - document.documentElement.clientWidth }; });
       expect.soft(box.left, 'Invite: the dialog starts inside the window').toBeGreaterThanOrEqual(0);
       expect.soft(box.right, 'Invite: the dialog ends inside the window').toBeLessThanOrEqual(viewport.width);
