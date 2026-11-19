@@ -173,7 +173,7 @@ async function readAccount(account: FleetAccount, runtime: FleetRuntime, probe: 
     if (runtime.launch.kind === 'pi' && !health.loggedIn) return { health, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null } };
     // A logged-in account that is not ready (its model is unavailable) is held like a logged-out one, with its reason (GY-3414).
     return { health, quota: { loggedIn: health.loggedIn && health.quota !== 'exhausted' ? health.healthy : health.loggedIn, state: health.loggedIn ? health.quota : 'unknown', usage: health.usage.map(entry => ({ window: entry.window, percent: entry.percent, resetsAt: entry.resetsAt })),
-      resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: (health.reason ?? (health.quota === 'unknown' && health.loggedIn ? health.note : null))?.slice(0, 500) ?? null, identity: health.identity } };
+      resetsAt: health.quota === 'exhausted' ? resets.at(-1) ?? null : null, reason: (health.reason ?? (health.quota === 'unknown' && health.loggedIn ? health.note : null))?.slice(0, 500) ?? null, identity: health.identity, ...health.key ? { key: health.key } : {} } };
   }
   if (!runtime.launch.loginFile) return unknown;
   const file = resolve(home, runtime.launch.loginFile), loggedIn = await access(file).then(() => true, () => false);
@@ -187,7 +187,7 @@ export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = D
   (account.quota.source === 'operator' || account.quota.state === 'exhausted' || !!account.quota.session && !account.quota.since || account.quota.loggedIn === false || smokeTestedKinds.includes(runtime.launch.kind) && (!account.smoke || smokeFailureDue(account, now)));
 
 /** Run a tiny request with precisely this account's launch login; narratives are never evidence. */
-export async function checkAccountLive(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, model: string | null = null, usage: QuotaObservation['usage'] = []): Promise<QuotaObservation> {
+export async function checkAccountLive(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, model: string | null = null, usage: QuotaObservation['usage'] = [], ownKey?: string): Promise<QuotaObservation> {
   const home = account.credential.home, key = home ?? `${account.credential.host}/${account.name}`;
   const pending = checksInFlight.get(key);
   if (pending) return pending;
@@ -201,10 +201,16 @@ export async function checkAccountLive(account: FleetAccount, runtime: FleetRunt
     const reason = result.ok ? null : (result.error || 'The live request failed').replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim().slice(0, 500);
     // A spent window's own reset, as the provider's usage endpoint answered it, wins over a time read from the refusal's text (GY-3495).
     const spent = usage.filter(window => window.percent >= (probe.ceilingPercent ?? defaultQuotaCeilingPercent) && !!window.resetsAt && Date.parse(window.resetsAt) > now).map(window => window.resetsAt!).sort().at(-1);
-    const reset = reason ? spent ?? runtimeResetTime(reason, runtime.launch.kind, now) : null;
+    // GY-3516: the account's own key read its windows with none spent, yet the run was refused for a limit: another
+    // login answered it (an OpenCode service shared across homes), so the refusal is a fault, never this account's hold.
+    const refused = reason && (runtimeAdapter(runtime.launch.kind)?.limitNotices ?? []).some(notice => notice.test(reason));
+    const foreign = !!refused && !!ownKey && usage.length > 0 && !spent;
+    const ok = result.ok || foreign;
+    const reset = reason && !ok ? spent ?? runtimeResetTime(reason, runtime.launch.kind, now) : null;
     const nextCheck = reset && Date.parse(reset) > now ? reset : new Date(now + accountCheckIntervalMs).toISOString();
-    const quota: QuotaObservation = { loggedIn: result.ok || !detectLoggedOut(reason ?? ''), state: result.ok ? 'available' : 'exhausted', usage, since: new Date(now).toISOString(),
-      resetsAt: result.ok ? null : nextCheck, reason, ...(result.ok ? {} : { session: reset && Date.parse(reset) > now ? 'named' as const : 'guessed' as const }) };
+    const quota: QuotaObservation = { loggedIn: ok || !detectLoggedOut(reason ?? ''), state: ok ? 'available' : 'exhausted', usage, since: new Date(now).toISOString(),
+      resetsAt: ok ? null : nextCheck, reason: foreign ? null : reason, ...(ok ? {} : { session: reset && Date.parse(reset) > now ? 'named' as const : 'guessed' as const }),
+      ...ownKey ? { key: ownKey } : {}, ...foreign ? { fault: `Live check answered with another account's limit; this account's own key (${ownKey}) reads ${usage.map(window => `${window.window} ${window.percent}%`).join(', ')}: ${reason}`.slice(0, 300) } : {} };
     if (home) recordHostAccountCheck(home, { key: account.credential.key ?? null, at: new Date(now).toISOString(), nextCheck, quota });
     return quota;
   })().finally(() => checksInFlight.delete(key));
@@ -237,7 +243,7 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
   const reading = await readAccount(account, runtime, { ...probe, ...(account.quota.loggedIn === false ? { cacheMs: 0 } : {}) }, allAccounts, model);
   const usage = lastGoodUsage(account, reading.quota, now);
   if (cached || signalled || needsSmoke(account, runtime, now) || reading.quota.state === 'exhausted')
-    return { ...reading, quota: windowHold(await checkAccountLive(account, runtime, probe, model, usage), ceiling, now) };
+    return { ...reading, quota: windowHold(await checkAccountLive(account, runtime, probe, model, usage, reading.quota.key), ceiling, now) };
   return { ...reading, quota: windowHold({ ...reading.quota, usage }, ceiling, now) };
 }
 
