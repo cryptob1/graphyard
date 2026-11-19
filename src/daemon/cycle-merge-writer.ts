@@ -5,7 +5,7 @@ export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, 
 // Concern: the control-plane merge executor's cycle step (GY-1524) — reconcile open intents, pick the next head, run one merge beside the cycle and record what it did.
 import { randomUUID } from 'node:crypto';
 import { availableParallelism } from 'node:os';
-import { batchGateBusySlots, busyTrialSlots } from './trial-slots.js';
+import { busyTrialSlots } from './trial-slots.js';
 import { trialSlotCount } from '../merge-writer/trial-load.js';
 import { trialAffordableFiles } from '../merge-writer/trial.js';
 import type { ChildRun } from '../child-runner.js';
@@ -1014,10 +1014,10 @@ export async function mergeWriterStep(cycle: Cycle) {
   const fullCap = Math.min(trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory)), standingLimit(cycle.config?.run.trialCap, cycle.now()) ?? Infinity);
   const parallel = trialCapNow(state, fullCap);
   if (state.cpuPressure) state.cpuPressure.trialCap = { now: parallel, full: fullCap };
-  const gateSlots = batchGateBusySlots(state);
+  // GY-3531: trialCap counts the merge writer's own trials; the batch gate keeps its heavy-job slot and first claim, never a merge slot.
   const busy = new Set([...live].flatMap(flight => flight.keys ?? [flight.key]));
   // GY-3437: at the launch limit no new trial starts; the cap still reads half, so status shows what returns once it cools.
-  if (busy.size + gateSlots < parallel && !cpuPressureHeld(state) && ![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.unconfirmed?.length
+  if (busy.size < parallel && !cpuPressureHeld(state) && ![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.unconfirmed?.length
     && !writer.inFlight?.revert && !replayed && !delivered) {
     const free = snapshot.work.filter(item => !busy.has(item.key) && !settledNow.has(item.key));
     const ledger = snapshotLedger(free);
@@ -1083,7 +1083,7 @@ export async function mergeWriterStep(cycle: Cycle) {
       const due = next?.candidate && !state.diskHeadroom && !reads.drain?.() && (reads.admit?.() ?? true) ? next : null;
       // GY-3120: the first `parallel` heads in queue order are trialled at once, each alone on the current tip; the flight is named by the first.
       // GY-3182: a new flight fills only the slots the running flights leave free.
-      const heads = runnable.map(entry => queue.due.find(work => work.id === entry.id)).filter((work): work is Work => !!work).slice(0, parallel - busy.size - gateSlots);
+      const heads = runnable.map(entry => queue.due.find(work => work.id === entry.id)).filter((work): work is Work => !!work).slice(0, parallel - busy.size);
       if (due?.candidate && heads.length) await startMergeFlight(cycle, reads, heads);
     }
   }
