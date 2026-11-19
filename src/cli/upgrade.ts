@@ -170,8 +170,8 @@ export async function installDatabaseUrl(directory: string | null, install: Inst
   return url.href;
 }
 
-async function databaseSchemaOf(url: string | null, databaseUrl: string | null = process.env.DATABASE_URL ?? null): Promise<number | null> {
-  if (databaseUrl) { const store = new Store(databaseUrl); try { return await store.schema(); } finally { await store.close(); } }
+async function databaseSchemaOf(url: string | null): Promise<number | null> {
+  if (process.env.DATABASE_URL) { const store = new Store(process.env.DATABASE_URL); try { return await store.schema(); } finally { await store.close(); } }
   if (!url) return null;
   try { const body = await (await fetch(`${url}/healthz`, { signal: AbortSignal.timeout(5_000) })).json() as { schema?: unknown }; return typeof body.schema === 'number' ? body.schema : null; }
   catch { return null; }
@@ -624,12 +624,13 @@ export const upgradeCommands = defineCommands([{
     const current = checkoutRelease(cliRoot);
     const target = resolveTarget(cliRoot, to);
     const install = directory ? await readInstallRecord(directory) : null;
-    const databaseUrl = await installDatabaseUrl(directory, install);
-    const inputs: UpgradeInputs = { cliRoot, repoRoot, current, target, cliChanges: cliChangesOf(cliRoot), databaseSchema: await databaseSchemaOf(url, databaseUrl), url, install, databaseUrl,
+    const inputs: UpgradeInputs = { cliRoot, repoRoot, current, target, cliChanges: cliChangesOf(cliRoot), databaseSchema: await databaseSchemaOf(url), url, install,
       backupFile: join(directory ?? join(repoRoot, '.graphyard'), 'backups', `before-${target.version}-${Date.now()}.json`) };
     const plan = upgradePlan(inputs);
     console.log(renderPlan(plan));
     if (flags.includes('--plan')) return;
+    // The plan needs no credential: the install's database is resolved only for a real upgrade.
+    const databaseUrl = inputs.databaseUrl = await installDatabaseUrl(directory, install);
     // Every precondition a later step needs is checked before the record and the checkout move.
     if (!databaseUrl) throw new Error('Set DATABASE_URL to the Graphyard database so the upgrade can back it up before the server migrates it; nothing was changed');
     if (!url) throw new Error('Set GRAPHYARD_URL so the upgrade can read /healthz after the redeploy; nothing was changed');
