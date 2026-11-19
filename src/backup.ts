@@ -122,8 +122,8 @@ const restoreChunkRows = 500, restoreChunkBytes = 8_000_000;
 
 /** Write a backup of the whole ledger to FILE (created, never overwritten) from one snapshot, a page of rows at a time. */
 export async function writeBackupFile(pool: pg.Pool, file: string) {
-  const db = await pool.connect();
   const out = await open(file, 'wx', 0o600);
+  const db = await pool.connect().catch(async error => { await out.close(); await rm(file, { force: true }); throw error; });
   try {
     await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     await db.query('SET LOCAL statement_timeout = 0');
