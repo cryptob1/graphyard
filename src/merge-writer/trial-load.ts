@@ -24,6 +24,16 @@ export const trialContainerCap = (cores = availableParallelism(), usable = cores
 export const cpuSensorNames = ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal'];
 /** GY-3376, GY-3416: a start waits while a CPU sensor reads the lower of this and 3C under its own critical (else max) temperature — a laptop at 95-98C against a 102C crit-3 was never held; this alone is the limit for a sensor that reports neither. */
 export const trialHotCelsius = 85;
+/** GY-3532: the heat rule compares the mean of the package samples over this window with the limit, once it holds `heatMinSamples`. */
+export const heatWindowMs = 120_000;
+export const heatMinSamples = 4;
+/** The [epoch ms, degrees] samples of the window as the heat rule reads them: the rounded mean with at least 4 samples, else the latest sample; null with none. */
+export function heatReading(samples: readonly (readonly [number, number])[]): { latest: number; mean: number | null; celsius: number } | null {
+  if (!samples.length) return null;
+  const latest = samples[samples.length - 1]![1];
+  const mean = samples.length >= heatMinSamples ? Math.round(samples.reduce((sum, [, value]) => sum + value, 0) / samples.length) : null;
+  return { latest, mean, celsius: mean ?? latest };
+}
 /** The CPU package sensor under `hwmon` in whole degrees (the hottest core where no package sensor exists); null where none is readable. */
 export async function cpuCelsius(hwmon = '/sys/class/hwmon'): Promise<number | null> {
   const read = (path: string) => readFile(path, 'utf8').then(text => text.trim(), () => '');

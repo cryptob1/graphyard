@@ -211,9 +211,9 @@ export const daemonStateSchema = z.object({
    */
   cpuPressure: z.object({ at: z.string(), avg60: z.number().min(0).max(100).nullable(), steal: z.number().min(0).max(100).nullable(),
     stat: z.object({ total: z.number().min(0), steal: z.number().min(0), idle: z.number().min(0).optional() }).strict().nullable().default(null),
-    /** GY-3373, GY-3426: the CPU package sensor in whole degrees, averaged over the last 60 s of `samples`; null where none is readable. */
+    /** GY-3373, GY-3426: the CPU package sensor in whole degrees, the 120 s mean of `samples` once it holds 4, else the latest (GY-3532); null where none is readable. */
     celsius: z.number().nullable().default(null),
-    /** GY-3426: the [epoch ms, degrees] readings of the last 60 s the average is taken over. */
+    /** GY-3426: the [epoch ms, degrees] readings of the last 120 s the mean is taken over. */
     samples: z.array(z.tuple([z.number(), z.number()])).default([]),
     /** GY-3401: the test parallelism a session launched now gets, and the merge writer's trial cap now and when cool. */
     testBudget: z.number().int().min(0).nullable().default(null),
