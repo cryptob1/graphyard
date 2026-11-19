@@ -163,7 +163,7 @@ export async function installDatabaseUrl(directory: string | null, install: Inst
   const compose = join(directory, 'compose');
   const line = (await readFile(join(compose, 'server.env'), 'utf8')).split('\n').find(entry => entry.startsWith('DATABASE_URL='));
   if (!line) return null;
-  const container = String(await run('docker', ['compose', '--project-directory', compose, 'ps', '--quiet', 'db'])).trim();
+  const container = String(await run('docker', ['compose', 'ps', '--quiet', 'db'], { cwd: compose })).trim();
   const address = String(await run('docker', ['inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}', container])).trim().split(' ')[0];
   const url = new URL(line.slice('DATABASE_URL='.length));
   url.hostname = address;
