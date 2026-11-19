@@ -246,6 +246,7 @@ export class HumanSignIn {
     const now = this.clock(), code = randomBytes(32).toString('base64url'), expiresAt = new Date(now + ttl);
     await this.store.pool.query(`INSERT INTO team_members (name, team, invited_by, invited_at) VALUES ($1, $2, $3, $4)
       ON CONFLICT (name) DO UPDATE SET team=EXCLUDED.team, invited_by=EXCLUDED.invited_by, invited_at=EXCLUDED.invited_at`, [name, team, issuer.id, new Date(now)]);
+    await this.store.pool.query('DELETE FROM team_invites WHERE expires_at <= $1', [new Date(now)]);
     await this.store.pool.query('INSERT INTO team_invites (code_hash, name, expires_at) VALUES ($1, $2, $3)', [digest(code), name, expiresAt]);
     return { code, principal: name, expiresAt: expiresAt.toISOString() };
   }
