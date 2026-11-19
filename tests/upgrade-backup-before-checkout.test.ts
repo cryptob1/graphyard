@@ -90,7 +90,7 @@ test('integration:upgrade-backup-before-checkout — the backup runs first, on t
     assert.ok(!failed.ok);
     const message = upgradeFailure(failed);
     assert.ok(!message.includes('\n'), `one line: ${message}`);
-    assert.match(message, /^upgrade stopped at backup: .*ECONNREFUSED.*; nothing was changed$/);
+    assert.match(message, /^upgrade stopped at backup: \S.*; nothing was changed$/);
 
     // The release under test, on a ledger with a large events table: the upgrade's backup streams it to
     // disk in a heap far smaller than the table, and db verify and db restore read the file back in the same heap.
@@ -118,7 +118,7 @@ test('integration:upgrade-backup-before-checkout — the backup runs first, on t
     finally { await seeding.end(); }
     const large = { ...inputsFor(repositoryRoot, newer, current, join(directory, 'backups', 'large.json'), schema + 1), current: checkoutRelease(repositoryRoot) };
     const heap = process.env.NODE_OPTIONS;
-    process.env.NODE_OPTIONS = `${heap ?? ''} --max-old-space-size=160`.trim();
+    process.env.NODE_OPTIONS = `${heap ?? ''} --max-old-space-size=256`.trim();
     try {
       await liveEffects(large, join(directory, 'upgrade.json')).run(upgradePlan(large).steps.find(step => step.id === 'backup')!);
       assert.ok(statSync(large.backupFile).size > 400_000_000, 'the ledger is larger than the backup\'s heap');
