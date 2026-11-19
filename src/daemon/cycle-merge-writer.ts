@@ -5,7 +5,7 @@ export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, 
 // Concern: the control-plane merge executor's cycle step (GY-1524) — reconcile open intents, pick the next head, run one merge beside the cycle and record what it did.
 import { randomUUID } from 'node:crypto';
 import { availableParallelism } from 'node:os';
-import { busyTrialSlots } from './trial-slots.js';
+import { batchGateBusySlots, busyTrialSlots } from './trial-slots.js';
 import { trialSlotCount } from '../merge-writer/trial-load.js';
 import { trialAffordableFiles } from '../merge-writer/trial.js';
 import type { ChildRun } from '../child-runner.js';
@@ -1011,10 +1011,11 @@ export async function mergeWriterStep(cycle: Cycle) {
   // to settle; the heads they carry are out of the queue and their open intents out of the reconcile.
   // GY-3401: at the CPU temperature limit, half the cap; the figures ride the CPU reading to master status and the Workers page.
   // GY-3446: a temporary trialCap the master set lowers it until it expires.
-  const fullCap = Math.min(trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory)), standingLimit(cycle.config?.run.trialCap, cycle.now()) ?? Infinity);
-  const parallel = trialCapNow(state, fullCap);
-  if (state.cpuPressure) state.cpuPressure.trialCap = { now: parallel, full: fullCap };
-  // GY-3531: trialCap counts the merge writer's own trials; the batch gate keeps its heavy-job slot and first claim, never a merge slot.
+  // GY-3531: the batch gate's run takes a host slot (CPU and memory) but never one of trialCap, which counts the merge writer's own trials.
+  const hostCap = trialSlotCount(reads.cores ?? availableParallelism(), reads.parallel ?? 1, await trialAffordableFiles(reads.memory));
+  const fullCap = Math.min(hostCap, standingLimit(cycle.config?.run.trialCap, cycle.now()) ?? Infinity);
+  if (state.cpuPressure) state.cpuPressure.trialCap = { now: trialCapNow(state, fullCap), full: fullCap };
+  const parallel = Math.min(trialCapNow(state, fullCap), trialCapNow(state, hostCap) - batchGateBusySlots(state));
   const busy = new Set([...live].flatMap(flight => flight.keys ?? [flight.key]));
   // GY-3437: at the launch limit no new trial starts; the cap still reads half, so status shows what returns once it cools.
   if (busy.size < parallel && !cpuPressureHeld(state) && ![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.unconfirmed?.length

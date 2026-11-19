@@ -42,7 +42,7 @@ async function world() {
   const work = [queued(1), queued(2)];
   const started: string[] = [];
   const reads = {
-    baseBranch: 'main', now: () => start, cores: 8, parallel: 1, fetch: async () => tip,
+    baseBranch: 'main', now: () => start, cores: 8, parallel: 4, fetch: async () => tip,
     merge: async (head: string) => ({ mergeSha: sha(`merge:${head}`), files: ['src/app.ts'] }),
     // Each merge trial stays running, so the test sees what runs at once.
     trial: async (mergeSha: string) => { started.push(mergeSha); return new Promise<MergeTrialRun>(() => {}); },
