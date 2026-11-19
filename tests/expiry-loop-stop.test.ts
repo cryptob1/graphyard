@@ -48,7 +48,7 @@ async function diedAfter(work: Work, lasted: number, exit: string) {
   return reload(work);
 }
 
-test('integration:expiry-loop-stop: three consecutive claims expiring within 5 minutes stop dispatch with one blocker naming the last exit reason', async () => {
+test('integration:expiry-loop-stop — three consecutive claims expiring within 5 minutes stop dispatch with one blocker naming the last exit reason', async () => {
   // Two short deaths, then a submitted attempt: the count resets, so two more deaths do not stop it.
   let reset = await filed('reset-by-submission');
   reset = await diedAfter(reset, minutes(2), 'exit 1');
