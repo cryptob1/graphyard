@@ -1,4 +1,7 @@
-import { createHash } from 'node:crypto';
+import { createHash, type Hash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
+import { open, readFile, rm } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import { z } from 'zod';
 import type pg from 'pg';
 import { advisoryLocks, ledgerOrder, ledgerSeeded, ledgerSequences, ledgerTables } from './store.js';
@@ -37,11 +40,11 @@ export const backupSchema = z.object({
 export type Backup = z.infer<typeof backupSchema>;
 
 /** Stable bytes over everything but the digest itself, so a tampered or truncated file cannot restore. */
+const canonical = (value: unknown): string =>
+  Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
+  : value !== null && typeof value === 'object' ? `{${Object.keys(value as object).sort().map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(',')}}`
+  : JSON.stringify(value) ?? 'null';
 export const backupDigest = (backup: Omit<Backup, 'digest'>) => {
-  const canonical = (value: unknown): string =>
-    Array.isArray(value) ? `[${value.map(canonical).join(',')}]`
-    : value !== null && typeof value === 'object' ? `{${Object.keys(value as object).sort().map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(',')}}`
-    : JSON.stringify(value) ?? 'null';
   const { digest: _omitted, ...rest } = backup as Backup; void _omitted;
   return `sha256:${createHash('sha256').update(canonical(rest)).digest('hex')}`;
 };
@@ -92,6 +95,140 @@ export function verifyBackup(input: unknown): Backup {
   return backup;
 }
 
+/*
+ * GY-3538: the backup file, streamed. The same graphyard-backup-v1 document and digest as
+ * createBackup, laid out one row per line, so neither the backup, its verification nor its restore
+ * holds the ledger in memory, and a ledger of many gigabytes backs up and restores:
+ *
+ *   {"format":…,"takenAt":…,"graphyardVersion":…,"schemaVersion":…,"sequences":[…],"tables":[
+ *   {"name":"events","rows":[
+ *   ROW
+ *   ,ROW
+ *   ]}
+ *   ,{"name":"…","rows":[
+ *   ]}
+ *   ],"digest":"sha256:…"}
+ *
+ * The digest hashes the canonical form createBackup's digest hashes, row by row. A file older
+ * releases wrote, one line, is read whole as before.
+ */
+const tablesOpen = '"tables":[';
+type Header = Omit<Backup, 'tables' | 'digest'>;
+const headerSchema = backupSchema.omit({ tables: true, digest: true });
+/** The canonical bytes before the tables and after them, in the digest's sorted key order. */
+const digestHead = (header: Header) => `{"format":${JSON.stringify(header.format)},"graphyardVersion":${JSON.stringify(header.graphyardVersion)},"schemaVersion":${header.schemaVersion},"sequences":${canonical(header.sequences)},"tables":[`;
+const digestTail = (header: Header) => `],"takenAt":${JSON.stringify(header.takenAt)}}`;
+/** Rows a restore inserts per statement, and the bytes that close a chunk early. */
+const restoreChunkRows = 500, restoreChunkBytes = 8_000_000;
+
+/** Write a backup of the whole ledger to FILE (created, never overwritten) from one snapshot, a page of rows at a time. */
+export async function writeBackupFile(pool: pg.Pool, file: string) {
+  const db = await pool.connect();
+  const out = await open(file, 'wx', 0o600);
+  try {
+    await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    await db.query('SET LOCAL statement_timeout = 0');
+    await db.query('SELECT pg_advisory_xact_lock_shared($1)', [advisoryLocks.backup]);
+    const current = Number((await db.query('SELECT COALESCE(MAX(version),0) AS version FROM graphyard_schema')).rows[0].version);
+    if (current !== schemaVersion) throw new Error(`Database schema generation ${current} differs from this release (${schemaVersion}); run the migration first, then back up`);
+    const takenAt = (await db.query('SELECT clock_timestamp() AS now')).rows[0].now.toISOString();
+    const sequences: Backup['sequences'] = [];
+    for (const { table, column } of ledgerSequences) {
+      const sequence = (await db.query('SELECT pg_get_serial_sequence($1,$2) AS name', [table, column])).rows[0].name as string;
+      const state = (await db.query(`SELECT last_value, is_called FROM ${sequence}`)).rows[0];
+      sequences.push({ name: sequence, value: Number(state.last_value), called: state.is_called });
+    }
+    const header: Header = { format: backupFormat, takenAt, graphyardVersion: releaseInfo().version, schemaVersion, sequences };
+    const hash = createHash('sha256').update(digestHead(header));
+    await out.write(`${JSON.stringify(header).slice(0, -1)},${tablesOpen}\n`);
+    const rows: Record<string, number> = {};
+    for (const [index, name] of ledgerTables.entries()) {
+      const start = `${index ? ',' : ''}{"name":${JSON.stringify(name)},"rows":[`;
+      hash.update(start); await out.write(`${start}\n`);
+      await db.query(`DECLARE backup_rows NO SCROLL CURSOR FOR SELECT row_to_json(t) AS row FROM ${name} t ORDER BY ${ledgerOrder[name]}`);
+      let count = 0;
+      for (;;) {
+        const page = (await db.query('FETCH 200 FROM backup_rows')).rows;
+        if (!page.length) break;
+        let lines = '';
+        for (const { row } of page) { const lead = count++ ? ',' : ''; hash.update(lead + canonical(row)); lines += `${lead}${JSON.stringify(row)}\n`; }
+        await out.write(lines);
+      }
+      await db.query('CLOSE backup_rows');
+      hash.update(']}'); await out.write(']}\n');
+      rows[name] = count;
+    }
+    await db.query('COMMIT');
+    const digest = `sha256:${hash.update(digestTail(header)).digest('hex')}`;
+    await out.write(`],"digest":${JSON.stringify(digest)}}\n`);
+    await out.close();
+    return { takenAt, schema: schemaVersion, digest, rows };
+  } catch (error) {
+    await db.query('ROLLBACK').catch(() => {});
+    await out.close().catch(() => {}); await rm(file, { force: true });
+    throw error;
+  } finally { db.release(); }
+}
+
+type Chunk = { name: string; rows: unknown[] };
+/** The file's header and its tables' rows in chunks (every table at least one, possibly empty), digest-checked at the end when `hash` is given. */
+async function* streamedChunks(file: string, hash?: Hash): AsyncGenerator<Chunk, Header & { digest: string }> {
+  const lines = createInterface({ input: createReadStream(file, 'utf8'), crlfDelay: Infinity });
+  let header: Header | null = null, name: string | null = null, rows: unknown[] = [], bytes = 0, count = 0;
+  try {
+    for await (const line of lines) {
+      if (!header) {
+        const { tables: _tables, ...rest } = JSON.parse(`${line}]}`); void _tables;
+        header = headerSchema.parse(rest);
+        hash?.update(digestHead(header));
+      } else if (line.startsWith('],"digest":')) {
+        const digest = String(JSON.parse(`{${line.slice(2)}`).digest);
+        if (hash && `sha256:${hash.update(digestTail(header)).digest('hex')}` !== digest) throw new Error('Backup digest does not match its contents; the file is corrupt or was edited');
+        return { ...header, digest };
+      } else if (line === ']}') {
+        hash?.update(']}');
+        yield { name: name!, rows }; name = null; rows = []; bytes = 0;
+      } else if (name === null) {
+        const start = /^(,?)\{"name":("[a-z_]+"),"rows":\[$/.exec(line);
+        if (!start) throw new Error('Backup file is not a backup Graphyard wrote; the file is corrupt or truncated');
+        hash?.update(line); name = tableName.parse(JSON.parse(start[2])); count = 0;
+      } else {
+        const row = z.record(z.string(), z.unknown()).parse(JSON.parse(line.startsWith(',') ? line.slice(1) : line));
+        hash?.update(`${count++ ? ',' : ''}${canonical(row)}`);
+        rows.push(row); bytes += line.length;
+        if (rows.length >= restoreChunkRows || bytes >= restoreChunkBytes) { yield { name, rows }; rows = []; bytes = 0; }
+      }
+    }
+  } finally { lines.close(); }
+  throw new Error('Backup file ends before its digest; the file is truncated');
+}
+
+const streamed = async (file: string) => {
+  const lines = createInterface({ input: createReadStream(file, 'utf8'), crlfDelay: Infinity });
+  try { for await (const line of lines) return line.endsWith(tablesOpen); return false; } finally { lines.close(); }
+};
+
+/** Verify a backup file without touching any database or holding it in memory: its digest, generation and table list, and each table's row count. */
+export async function verifyBackupFile(file: string) {
+  if (!await streamed(file)) { const backup = verifyBackup(JSON.parse(await readFile(file, 'utf8'))); return { ...backup, rows: Object.fromEntries(backup.tables.map(t => [t.name, t.rows.length])) }; }
+  const chunks = streamedChunks(file, createHash('sha256')), rows: Record<string, number> = {}, seen: string[] = [];
+  for (let next = await chunks.next(); ; next = await chunks.next()) {
+    if (next.done) {
+      if (next.value.schemaVersion > schemaVersion) throw new Error(`Backup was taken at schema generation ${next.value.schemaVersion}, newer than this release supports (${schemaVersion}); restore it with the release that took it`);
+      return { ...next.value, rows };
+    }
+    if (!(next.value.name in rows)) { if (seen.includes(next.value.name)) throw new Error('Backup lists a table twice'); seen.push(next.value.name); rows[next.value.name] = 0; }
+    rows[next.value.name] += next.value.rows.length;
+  }
+}
+
+/** Restore a backup file into an empty, migrated database: verified first, then read again a chunk at a time. */
+export async function restoreBackupFile(pool: pg.Pool, file: string) {
+  if (!await streamed(file)) return restoreBackup(pool, JSON.parse(await readFile(file, 'utf8')));
+  const verified = await verifyBackupFile(file);
+  return restoreFrom(pool, { ...verified, tableNames: Object.keys(verified.rows), chunks: () => streamedChunks(file) });
+}
+
 /** How many times a restore runs when live traffic deadlocks it (40P01) before the deadlock is reported. */
 const restoreDeadlockAttempts = 5;
 
@@ -110,6 +247,13 @@ const restoreDeadlockAttempts = 5;
  */
 export async function restoreBackup(pool: pg.Pool, input: unknown) {
   const backup = verifyBackup(input);
+  return restoreFrom(pool, { ...backup, tableNames: backup.tables.map(table => table.name), async *chunks() {
+    for (const table of backup.tables) for (let at = 0; at === 0 || at < table.rows.length; at += restoreChunkRows) yield { name: table.name, rows: table.rows.slice(at, at + restoreChunkRows) };
+  } });
+}
+
+type RestoreSource = Header & { tableNames: string[]; chunks(): AsyncIterable<Chunk> };
+async function restoreFrom(pool: pg.Pool, backup: RestoreSource) {
   const db = await pool.connect();
   const restored: Record<string, number> = {};
   const restore = async () => {
@@ -133,14 +277,13 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
       const count = Number((await db.query(`SELECT count(*) AS n FROM ${name}`)).rows[0].n);
       if (count) throw new Error(`Restore requires an empty database: ${name} already holds ${count} row(s). Restoring over live state resurrects expired ownership and discards later evidence`);
     }
-    for (const table of backup.tables) {
-      if (table.name === 'graphyard_schema' || retiredTables.some(name => name === table.name)) continue;
-      if (ledgerSeeded.includes(table.name)) await db.query(`DELETE FROM ${table.name}`);
-      // Chunked so a large ledger does not become one enormous parameter.
-      for (let at = 0; at < table.rows.length; at += 500) {
-        await db.query(`INSERT INTO ${table.name} SELECT * FROM json_populate_recordset(NULL::${table.name}, $1::json)`, [JSON.stringify(table.rows.slice(at, at + 500))]);
-      }
-      restored[table.name] = table.rows.length;
+    for (const key of Object.keys(restored)) delete restored[key];
+    // Chunked so a large ledger does not become one enormous parameter.
+    for await (const { name, rows } of backup.chunks()) {
+      if (name === 'graphyard_schema' || retiredTables.some(retired => retired === name)) continue;
+      if (!(name in restored)) { restored[name] = 0; if (ledgerSeeded.includes(name)) await db.query(`DELETE FROM ${name}`); }
+      if (rows.length) await db.query(`INSERT INTO ${name} SELECT * FROM json_populate_recordset(NULL::${name}, $1::json)`, [JSON.stringify(rows)]);
+      restored[name] += rows.length;
     }
     for (const sequence of backup.sequences) {
       if (!/^(?:public\.)?[a-z_]+_seq$/.test(sequence.name)) throw new Error(`Backup names an unexpected sequence ${sequence.name}`);
@@ -153,8 +296,8 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
     // rollback, so counting calls would stop at the third run, not the fifth the guide promises (GY-794).
     let attempts = 0;
     await retryDeadlocks(() => { attempts++; return restore(); }, () => attempts < restoreDeadlockAttempts, () => db.query('ROLLBACK'));
-    const missing = ledgerTables.filter(name => name !== 'graphyard_schema' && !backup.tables.some(t => t.name === name));
-    return { restored, takenAt: backup.takenAt, fromVersion: backup.graphyardVersion, fromSchema: backup.schemaVersion, toSchema: schemaVersion, tablesLeftEmpty: missing, tablesRetired: backup.tables.filter(table => retiredTables.some(name => name === table.name)).map(table => table.name) };
+    const missing = ledgerTables.filter(name => name !== 'graphyard_schema' && !backup.tableNames.includes(name));
+    return { restored, takenAt: backup.takenAt, fromVersion: backup.graphyardVersion, fromSchema: backup.schemaVersion, toSchema: schemaVersion, tablesLeftEmpty: missing, tablesRetired: backup.tableNames.filter(table => retiredTables.some(name => name === table)) };
   } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error; }
   finally { db.release(); }
 }

@@ -6,7 +6,7 @@ import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from 'n
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createBackup } from '../backup.js';
+import { writeBackupFile } from '../backup.js';
 import { Store } from '../store.js';
 import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, graphyardUpstreamUrl, graphyardVerifiedRef, imageRepository, installationRoot, releaseIdentityPath, type Release } from '../release.js';
 import { repositoryFromRemote } from '../onboarding.js';
@@ -100,7 +100,7 @@ export const upgradeFailure = (result: Extract<UpgradeResult, { ok: false }>) =>
 
 async function backupTo(databaseUrl: string, file: string) {
   const store = new Store(databaseUrl);
-  try { const backup = await createBackup(store.pool); await mkdir(resolve(file, '..'), { recursive: true }); await writeFile(file, JSON.stringify(backup), { flag: 'wx', mode: 0o600 }); }
+  try { await mkdir(resolve(file, '..'), { recursive: true }); await writeBackupFile(store.pool, file); }
   finally { await store.close(); }
 }
 
