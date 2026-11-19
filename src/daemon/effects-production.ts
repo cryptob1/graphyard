@@ -124,7 +124,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const failed = failedRequiredProofs(verification.record);
     if (failed.length) return refused(`complete refused: required proofs failed: ${JSON.stringify(failed)}`);
     await mutate(`work/${work.id}/resubmit`, { head, verification: { head: verification.record.head, ran: verification.record.ran } }, key);
-    return { submitted: true, detail: `${work.key}: the loop submitted the finished head ${head.slice(0, 12)} the blocker named, its verification re-run and passed; no worker session and no worker slot was spent` };
+    return { submitted: true, detail: `${work.key}: the loop submitted the finished head ${head.slice(0, 12)} after its verification ran and passed; no worker session and no worker slot was spent` };
   };
   const askHumanProof: DaemonEffects['askHumanProof'] = (work, proof) => mutate(`work/${work.id}/human-proof-request`, { proof, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha,
     ...(work.preview?.state === 'running' && work.preview.sha === work.candidate!.sha ? { url: `${current().url}${work.preview.path}/` } : {}) }, `human-proof:${work.id}:${proof}:${work.candidate!.sha}:${work.policyRevision}`);
