@@ -197,7 +197,7 @@ export const teamAccessRoutes = defineRoutes('team-access', [
   } },
 ]);
 
-export const noShareGuidance = 'Tailscale access is missing from this message: paste a Tailscale API token above, then invite again.';
+const noShareGuidance = 'Tailscale access is missing from this message: paste a Tailscale API token above, then invite again.';
 /**
  * GY-3486: Invite from the top bar. Each Tailscale login becomes a teammate row on the chosen installs
  * of this machine (here at once, the others through the machine's roster at their loop's next pass),

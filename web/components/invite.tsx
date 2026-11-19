@@ -65,7 +65,7 @@ function InviteDialog({ api, onClose }: Pick<Dashboard, 'api'> & { onClose(): vo
       </form>}
       <form onSubmit={event => { event.preventDefault(); void invite(event.currentTarget); }}>
         <label>Tailscale logins<input name="logins" required placeholder="ana@example.com, bo@example.com"/></label>
-        <label>Role<select name="role" defaultValue="viewer"><option value="viewer">Viewer</option><option value="maintainer">Maintainer</option></select></label>
+        <label htmlFor="invite-role">Role</label><select id="invite-role" name="role" defaultValue="viewer"><option value="viewer">Viewer</option><option value="maintainer">Maintainer</option></select>
         <fieldset><legend>Installs on this machine</legend>
           {access.installs.map(install => <label key={install.url} className="check"><input type="checkbox" name="installs" value={install.url} defaultChecked/>{install.name} {install.url && <span className="mono">{install.url}</span>}</label>)}
         </fieldset>
@@ -73,7 +73,7 @@ function InviteDialog({ api, onClose }: Pick<Dashboard, 'api'> & { onClose(): vo
       </form>
       {error && <p role="alert" className="amber">{error}</p>}
       {message && (message.text
-        ? <div role="status"><label>Invitation message<textarea readOnly rows={7} value={message.text}/></label> <CopyButton text={message.text} label="Copy"/></div>
+        ? <div role="status"><label htmlFor="invitation-message">Invitation message</label><textarea id="invitation-message" readOnly rows={7} value={message.text}/> <CopyButton text={message.text} label="Copy"/></div>
         : <p className="amber" role="status">{message.missing}</p>)}
       <h3>Teammates</h3>
       {access.teammates.length ? <ul aria-label="Teammates" className="teammates">{access.teammates.map(teammate => <li key={teammate.login}>
