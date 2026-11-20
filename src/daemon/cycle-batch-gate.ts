@@ -439,7 +439,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       } catch (error) {
         // The stop killed the gate's children, so the failure is no outcome: nothing is written or logged.
         if (stopped.has(cycle.state)) return;
-        // The failed run's outcome is the record's last (GY-3141): write it beside the batch left standing for the next loop.
+        // The failed run's outcome is the record's last (GY-3141); its batch is settled, so the next cycle runs afresh (GY-3567).
         await mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) })).catch(() => undefined);
         note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`);
       }
