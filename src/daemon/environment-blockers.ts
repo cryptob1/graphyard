@@ -10,7 +10,7 @@ export interface EnvironmentReadings {
   /** The commit the served CLI release holds, and the commit the server runs. */
   cliCommit: string | null;
   serverCommit: string | null;
-  /** Whether a worktree path can be written (a path that is gone is recreated by the next attempt). */
+  /** Whether a worktree path, or the nearest directory above it that exists, can be written. */
   writable: (path: string) => boolean | Promise<boolean>;
 }
 

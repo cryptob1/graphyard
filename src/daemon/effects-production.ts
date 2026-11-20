@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { accessSync, constants, type Dirent } from 'node:fs';
 import { workerVerificationPump, moveBranchToHead } from './worker-verification.js';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -232,7 +232,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         slotsFree: !readHeavyDrain(slots) && heldSlots(slots).filter(entry => entry.slot < declarationSlot).length < heavyJobLimit(slots),
         cliCommit: servedCliRelease(installDirectory(installIdFor(current().repository)))?.commit ?? null,
         serverCommit: readDeployRecord(deployRecordPath(root))?.tip ?? null,
-        writable: path => { try { accessSync(path, constants.W_OK); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT'; } },
+        // The nearest path that exists: a lock file a read-only volume refused never exists itself.
+        writable: function writable(path: string): boolean {
+          try { accessSync(path, constants.W_OK); return true; }
+          catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' && dirname(path) !== path && writable(dirname(path)); }
+        },
       };
     },
     unblock: (work, reason) => asOperatorAgent(`work/${work.id}/unblock`, { expectedRevision: work.revision, reason }, `environment-unblock:${work.id}:${work.revision}`),
