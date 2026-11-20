@@ -47,6 +47,7 @@ import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
 import { cpuPressureStep, cpuWaiting, implementationWaiting, sessionUsageStep } from './cpu-pressure.js';
+import { causeCleared, environmentCause } from './environment-blockers.js';
 import { batchGateRunning } from './trial-slots.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
@@ -503,15 +504,43 @@ async function closeStep(cycle: Cycle) {
     await note(cycle, `cli-releases:${state.cycle}`, 'reclaim', null, 'done', `Removed ${releases.removed.length} CLI release copies (${Math.round(releases.bytes / 1e6)} MB) nothing serves or runs: ${releases.removed.join(', ')}`);
   }
   if (releases?.left.length) cycle.log(`[graphyard-master] CLI release copies left in place: ${releases.left.join('; ')}`);
+  // GY-3553: a served CLI release whose commit stamp names another commit than it holds is restamped.
+  const restamped = await cycle.effects.repairCliStamp?.().catch(error => { cycle.log(`[graphyard-master] the CLI release stamp check failed: ${message(error)}`); return null; });
+  if (restamped) await note(cycle, `cli-stamp:${restamped.commit}`, 'reclaim', null, 'done', `Restored the CLI release commit stamp ${restamped.file} to ${restamped.commit.slice(0, 12)}, the commit checked out in it (was ${restamped.was?.slice(0, 12) ?? 'missing'})`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
   // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new
   // launches while it is saturated — before anything of this cycle starts one.
   await cpuPressureStep(cycle);
+  await environmentBlockersStep(cycle);
   // GY-3438: and every agent session's use against its CPU and memory caps.
   sessionUsageStep(cycle);
   // GY-3407: every host is read for the Workers page; one that does not answer reads away until it does.
   if (cycle.effects.hostReadings) cycle.state.hosts = await cycle.effects.hostReadings(cycle.state.hosts).catch(error => { cycle.log(`[graphyard-master] the host readings failed: ${message(error)}`); return cycle.state.hosts; });
+}
+
+/**
+ * GY-3553: a blocker whose cause is the host — a heavy-job slot or heat wait, a host verification
+ * timeout, a CLI/server commit mismatch, an unwritable worktree — is re-checked every cycle and
+ * cleared once that cause is gone, with the cleared cause as the unblock's reason on the item's
+ * history; the item is dispatched again as any ready item. A blocker naming a person or the change stays.
+ */
+async function environmentBlockersStep(cycle: Cycle) {
+  const { effects, state } = cycle;
+  if (!effects.unblock || !effects.environmentReadings) return;
+  const blocked = cycle.snapshot.work.flatMap(item => {
+    const cause = item.stage !== 'done' && item.blocker && !item.lease ? environmentCause(item.blocker) : null;
+    return cause ? [{ item, cause }] : [];
+  });
+  if (!blocked.length) return;
+  const readings = { ...await effects.environmentReadings(), heatClear: cpuWaiting(state) === null };
+  for (const { item, cause } of blocked) {
+    const key = `environment-unblock:${item.id}:${item.blockedAt ?? item.revision}`;
+    if (state.actions[key]?.state === 'done' || !await causeCleared(cause, item, readings)) continue;
+    const reason = `The loop cleared the blocker: the ${cause} has cleared`;
+    try { await effects.unblock(item, reason); await note(cycle, key, 'blocker', item.key, 'done', `${item.key}: ${reason}`); }
+    catch (error) { await note(cycle, key, 'blocker', item.key, 'failed', `Could not clear ${item.key}'s blocker (${cause} cleared): ${message(error)}`); }
+  }
 }
 
 /**
