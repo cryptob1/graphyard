@@ -226,7 +226,7 @@ export const daemonStateSchema = z.object({
   sessions: z.array(z.object({ unit: z.string().max(200), name: z.string().max(200).optional(), at: z.string(), usec: z.number().min(0), cpu: z.number().min(0).nullable(), cpuShare: z.number().min(0),
     memory: z.number().min(0), memoryShare: z.number().min(0), overSince: z.string().nullable() }).strict()).default([]),
   /** GY-3407: every host as the last cycle read it — this machine first, then each added host (src/hosts.ts); an unanswering host reads away. */
-  hosts: z.array(z.object({ host: z.string().max(300), local: z.boolean().optional(), away: z.boolean(), reason: z.string().max(1000).optional(),
+  hosts: z.array(z.object({ host: z.string().max(300), local: z.boolean().optional(), at: z.string().optional(), away: z.boolean(), update: z.boolean().optional(), reason: z.string().max(1000).optional(),
     cores: z.number().nullable(), celsius: z.number().nullable(), steal: z.number().nullable(), runs: z.number().nullable(),
     stat: z.object({ total: z.number().min(0), steal: z.number().min(0) }).strict().nullable().optional() }).strict()).default([]),
   /** GY-3190: the UTC day being tallied, its counts so far, and the latest day's report. */

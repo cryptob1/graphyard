@@ -10,7 +10,7 @@ import { basename, dirname, join } from 'node:path';
 import { homedir, hostname, tmpdir } from 'node:os';
 import type { ChildRun } from '../child-runner.js';
 import { shellQuote } from '../shell-quote.js';
-import { outdatedShimReason, probeHost, readHosts, sshTarget } from '../hosts.js';
+import { probeHost, readHosts, sshTarget, type HostReading as HostProbe } from '../hosts.js';
 import { trialContainerFault, trialHotCelsius } from './trial-load.js';
 
 /** One host's reading: cores, cores busy (1-minute load), the share of CPU stolen, and its hottest CPU sensor against the heat limit. */
@@ -243,8 +243,12 @@ export function readRemoteShardRuns(root: string): RemoteShardRun[] {
   try { const runs = JSON.parse(readFileSync(remoteShardRecordPath(root), 'utf8')); return Array.isArray(runs) ? runs : []; } catch { return []; }
 }
 
-/** Master status's remote shard line over the last 20 trials, or null before any trial ran with hosts. */
-export function remoteShardSummary(runs: readonly RemoteShardRun[]) {
+/**
+ * Master status's remote shard line over the last 20 trials, or null before any trial ran with hosts.
+ * GY-3517: given the loop's latest probes, each host's state is that probe's, with when it was read,
+ * never the last trial's — a host updated or re-added since reads its fresh result.
+ */
+export function remoteShardSummary(runs: readonly RemoteShardRun[], probes?: readonly HostProbe[]) {
   if (!runs.length) return null;
   const shards = runs.reduce((sum, run) => sum + run.shards, 0), remote = runs.reduce((sum, run) => sum + run.remote, 0);
   const walls = runs.map(run => run.wallMs).sort((a, b) => a - b), latest = runs.at(-1)!;
@@ -255,11 +259,11 @@ export function remoteShardSummary(runs: readonly RemoteShardRun[]) {
     trialWallSeconds: { median: Math.round(walls[Math.floor((walls.length - 1) / 2)]! / 1000), latest: Math.round(latest.wallMs / 1000) },
     queuedWhileHostIdle: runs.reduce((sum, run) => sum + run.queuedWhileIdle, 0),
     peakCelsius: { host: latest.host, celsius: peaks.length ? Math.max(...peaks) : null },
-    hosts: latest.hosts.map(host => ({ ...host, state: host.away ? 'away' : 'ready' })),
+    hosts: probes ? probes.filter(probe => !probe.local).map(probe => ({ name: probe.host, away: probe.away, ...(probe.reason ? { reason: probe.reason } : {}), celsius: probe.celsius, readAt: probe.at ?? null, state: probe.away ? 'away' : 'ready' }))
+      : latest.hosts.map(host => ({ ...host, state: host.away ? 'away' : 'ready' })),
   };
 }
 
-
-/** GY-3476: one attention line for each host the latest trial left away because its shim is older than this release. */
-export const outdatedShimAttention = (runs: readonly RemoteShardRun[]) => (runs.at(-1)?.hosts ?? []).filter(host => host.away && host.reason === outdatedShimReason(host.name)).map(host =>
-  ({ subject: `host ${host.name}`, text: `${host.name} takes no trial shards: its graphyard-host-shim is older than this release`, next: `Run graphyard host prepare and, with sudo on ${host.name}, the script it prints` }));
+/** GY-3476, GY-3517: one attention line for each host the latest probe reads away because its shim lacks a verb trials use; it clears on the first probe that reads it ready. */
+export const outdatedShimAttention = (probes: readonly Pick<HostProbe, 'host' | 'away' | 'update'>[]) => probes.filter(probe => probe.away && probe.update).map(probe =>
+  ({ subject: `host ${probe.host}`, text: `${probe.host} takes no trial shards: its graphyard-host-shim is older than this release`, next: `Run graphyard host prepare and, with sudo on ${probe.host}, the script it prints` }));
