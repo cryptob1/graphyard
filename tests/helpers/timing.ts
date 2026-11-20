@@ -58,7 +58,8 @@ export async function steadyState(read: () => Promise<unknown>, options: { warmu
 export async function interleavedSteadyState<K extends string>(reads: Record<K, () => Promise<unknown>>, options: { warmup: number; samples: number; clock?: () => number }): Promise<Record<K, SteadyState>> {
   const clock = options.clock ?? (() => performance.now());
   const names = Object.keys(reads) as K[];
-  const timed = Object.fromEntries(names.map(name => [name, { warmup: [], samples: [] }])) as Record<K, SteadyState>;
+  const timed = {} as Record<K, SteadyState>;
+  for (const name of names) timed[name] = { warmup: [], samples: [] };
   for (let round = 0; round < options.warmup + options.samples; round++) {
     for (const name of names) {
       const started = clock(); await reads[name]();
