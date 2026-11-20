@@ -8,7 +8,7 @@ import { runTrial } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { shardHosts, shardRepository } from './helpers/shard-hosts.js';
 
-// GY-3419: test files that need namespaces (bwrap), the Docker socket or the network are local-only:
+// GY-3419: test files that need the Docker socket or the network are local-only (GY-3549: bwrap may run remotely):
 // a shard on an added host runs with no network and no Docker socket, so such a file there would
 // fail as a red verdict that measures neither the merge nor the host. With a remote host registered,
 // placement always keeps them on this machine; every other file may still go remote.
@@ -82,18 +82,18 @@ process.exit(failed ? 1 : 0);
   } finally { if (previous === undefined) delete process.env.GRAPHYARD_TRIAL_IMAGE; else process.env.GRAPHYARD_TRIAL_IMAGE = previous; }
 });
 
-test(`${proof} — the marking covers every current test file that uses bwrap, docker or the network`, async () => {
-  // The generous reading of the criterion's own words: any test file naming bwrap, Docker, or the
+test(`${proof} — the marking covers every current test file that uses docker or the network`, async () => {
+  // The generous reading of the criterion's own words: any test file naming Docker, or the
   // machinery of the network — servers, sockets, requests, databases, SSH, browsers, e2e — must be
   // marked local-only, or a shard sent to a host would fail it there.
-  const uses = /bwrap|unshare|docker|compose|network|socket|ssh|postgres|mysql|redis|database|withDatabase|server|listen|connect|fetch|http|browser|playwright|e2e/i;
+  const uses = /docker|compose|network|socket|ssh|postgres|mysql|redis|database|withDatabase|server|listen|connect|fetch|http|browser|playwright|e2e/i;
   let marked = 0, total = 0;
   for (const [directory, pattern] of [['tests', /\.test\.ts$/], ['browser-tests', /\.spec\.ts$/]] as const) {
     for (const name of await readdir(new URL(`../${directory}`, import.meta.url).pathname)) {
       if (!pattern.test(name)) continue;
       total++;
       const text = await readFile(join(new URL(`../${directory}`, import.meta.url).pathname, name), 'utf8');
-      if (!localOnlyTestPattern.test(text)) assert.ok(!uses.test(text), `${directory}/${name} uses bwrap, docker or the network, so it must be marked local-only`);
+      if (!localOnlyTestPattern.test(text)) assert.ok(!uses.test(text), `${directory}/${name} uses docker or the network, so it must be marked local-only`);
       else marked++;
     }
   }

@@ -3,7 +3,7 @@ import { activeLease, demand, type Principal } from '../model.js';
 import { lockedWork } from '../store/locked-read.js';
 import { save } from '../store.js';
 import type { Services } from './routes.js';
-import { dispatchWorkerVerification } from './worker-verification-queue.js';
+import { dispatchWorkerVerification, VerificationStillWaiting } from './worker-verification-queue.js';
 import type { WorkerCheckResult } from '../merge-writer/worker-check.js';
 
 const schema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/), epoch: z.number().int().positive(),
@@ -27,7 +27,16 @@ export async function workerVerification(services: Services, actor: Principal, i
   const job = { host: workspace!.host, branch: workspace!.branch, work, input, baseBranch: services.engine.baseBranch };
   // GY-3283: a declared check's run is the worker's own feedback, not proof: answered, never recorded.
   if (input.mode === 'check') return dispatchWorkerVerification<WorkerCheckResult>(services, job);
-  const result = await dispatchWorkerVerification(services, job);
+  let result;
+  try { result = await dispatchWorkerVerification(services, job); }
+  catch (error) {
+    // GY-3537: complete's verification still waits for a slot when the request's time runs out: the
+    // head is recorded as finished and queued, the worker's attempt ends with no blocker, and the
+    // loop runs the verification and submits the head once a slot frees.
+    if (!(error instanceof VerificationStillWaiting) || input.mode !== 'complete') throw error;
+    await services.engine.execute(actor, 'queue', work.id, { epoch: input.epoch, head: input.head }, `queue:${work.id}:${input.epoch}:${input.head}`);
+    return { queued: true };
+  }
   demand(result.record.head === input.head, 'Verification returned a different head', 409);
   await services.engine.store.transaction(async (db, now) => {
     const current = (await lockedWork(db, [id])).find(entry => entry.id === work.id)!;

@@ -148,6 +148,6 @@ test(`${proof} — over the second host's key a plain shell command, a read outs
   assert.equal(dockerEveryCall(docker).length, calls, 'no Docker call was made for a refused request');
   assert.equal((await dockerCreates(docker)).length, creates, 'and no container was created');
   const shards = await dockerCreates(docker);
-  assert.ok(shards.length > 0 && shards.every(create => create.includes('--network=none') && !create.join(' ').includes('unconfined')), 'the shards the second host did run had no network and kept their confinement');
+  assert.ok(shards.length > 0 && shards.every(create => create.includes('--network=none') && create.includes('--cap-drop=ALL') && !create.join(' ').includes('apparmor=unconfined')), 'the shards the second host did run had no network and kept their confinement');
   assert.equal(execFileSync('id', ['-u'], { encoding: 'utf8' }).trim() === '0', false, 'the host user is not root');
 });

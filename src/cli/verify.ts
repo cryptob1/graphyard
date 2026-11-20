@@ -285,7 +285,7 @@ export const verifyCommand: CliCommand = {
     const { values } = parseArgs({ args: context.args, options: { preserves: { type: 'string', multiple: true } }, allowPositionals: false });
     const preserves = (values.preserves ?? []).flatMap(value => value.split(',')).map(value => value.trim()).filter(Boolean);
     const { requestWorkerVerification } = await import('./worker-verification.js');
-    const { record } = await requestWorkerVerification(context, work, { mode: 'verify', preserves });
+    const { record } = await requestWorkerVerification(context, work, { mode: 'verify', preserves }) as import('./worker-verification.js').WorkerVerificationResult;
     context.print(record);
     if (record.ran.some(entry => (entry.result !== 'pass' && !leftToCiRun(entry)) || entry.unexercised)) process.exitCode = 1;
   },
