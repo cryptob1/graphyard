@@ -5,8 +5,8 @@ import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 
 /**
  * GY-3094: the registry reported claude-a exhausted with no usage, no reset and no hold, and a master
- * took that at face value. An account reads exhausted only on evidence that still holds — a usage
- * window at the ceiling, an operator's mark, a session's report or a recorded hold — and the report
+ * took that at face value. An account reads exhausted only on evidence that still holds — its own
+ * refused live request or an operator's mark (GY-3555) — and the report
  * names it with its reset; anything else reads unknown and stays selectable.
  */
 
@@ -30,16 +30,13 @@ const find = (registry: AgentRegistry, name: string) => registry.accounts.find(a
 test('unit:exhausted-names-its-evidence — the registry reports an account exhausted only with evidence, naming it and its reset; one with none reads unknown and stays selectable', () => {
   const registry = registryOf(['claude-a', 'claude-b', 'claude-c', 'claude-d']);
   const resetsAt = iso(5 * hour);
-  // A usage window at the ceiling, as the probe read it.
-  fold(registry, 'claude-b', { loggedIn: true, state: 'exhausted', usage: [{ window: '7d', percent: 100, resetsAt }], resetsAt, reason: null });
+  // The account's own live request, refused by its provider (GY-3555: a usage window at the ceiling is no hold).
+  fold(registry, 'claude-b', { loggedIn: true, state: 'exhausted', usage: [{ window: '7d', percent: 100, resetsAt }], resetsAt, reason: `You've hit your weekly limit`, since: iso(0), session: 'named' });
   assert.equal(view(registry, 'claude-b').quota, 'exhausted');
-  assert.equal(view(registry, 'claude-b').evidence, `usage 7d window at 100% until ${resetsAt}; resets ${resetsAt}`);
+  assert.equal(view(registry, 'claude-b').evidence, `You've hit your weekly limit; resets ${resetsAt}`);
   // An operator's mark.
   const marked = applyRegistryMutation(registry, 'account.quota', { name: 'claude-c', quota: { state: 'exhausted', resetsAt }, reason: 'plan cut off' }, { actor: 'operator', at: iso(0) }).registry;
   assert.equal(view(marked, 'claude-c').evidence, `marked exhausted by an operator: plan cut off; resets ${resetsAt}`);
-  // A session's report of a hold.
-  fold(registry, 'claude-d', { loggedIn: true, state: 'exhausted', usage: [], resetsAt, reason: `You've hit your weekly limit`, session: 'named' });
-  assert.equal(view(registry, 'claude-d').evidence, `a session reported it spent: You've hit your weekly limit; resets ${resetsAt}`);
 
   // The incident: exhausted recorded with no usage, no reset and no hold reads unknown and is selectable.
   find(registry, 'claude-a').quota = { ...find(registry, 'claude-a').quota, loggedIn: true, state: 'exhausted', usage: [], resetsAt: null, reason: null, source: 'probe', observedAt: iso(-hour) };
@@ -49,9 +46,6 @@ test('unit:exhausted-names-its-evidence — the registry reports an account exha
   assert.equal(a.eligible, true, a.ineligible ?? '');
   const choice = chooseSession(registry, { role: 'master', host: HOST }, now);
   assert.equal(choice.account?.name, 'claude-a', choice.reason);
-  // An exhausted reading whose reset has passed holds nothing either.
-  assert.equal(view(registry, 'claude-b', Date.parse(resetsAt) + 60_000).quota, 'unknown');
-  assert.equal(view(registry, 'claude-b', Date.parse(resetsAt) + 60_000).eligible, true);
 });
 
 test('unit:empty-quota-read-is-unknown — a provider read that fails or returns no windows does not make an account with no hold exhausted, and a hold whose reset has passed clears at the next reading', () => {
@@ -63,19 +57,20 @@ test('unit:empty-quota-read-is-unknown — a provider read that fails or returns
   assert.equal(find(registry, 'claude-a').quota.state, 'unknown');
   assert.equal(accountIneligibility(registry, find(registry, 'claude-a'), now, HOST), null);
 
-  // A session's hold stands until its reset, then the next reading, however empty, clears it.
+  // A refused live request stands through any reading that made no request; the next passing live request clears it (GY-3555).
   const resetsAt = iso(hour);
-  fold(registry, 'claude-a', { loggedIn: true, state: 'exhausted', usage: [], resetsAt, reason: 'weekly limit', session: 'named' });
+  fold(registry, 'claude-a', { loggedIn: true, state: 'exhausted', usage: [], resetsAt, reason: 'weekly limit', since: iso(0), session: 'named' });
   fold(registry, 'claude-a', { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null }, now + 60_000);
   assert.equal(find(registry, 'claude-a').quota.state, 'exhausted');
   const after = Date.parse(resetsAt) + 60_000;
-  fold(registry, 'claude-a', { loggedIn: true, state: 'unknown', usage: [], resetsAt: null, reason: null }, after);
-  assert.equal(find(registry, 'claude-a').quota.state, 'unknown');
+  fold(registry, 'claude-a', { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null, since: new Date(after).toISOString() }, after);
+  assert.equal(find(registry, 'claude-a').quota.state, 'available');
   assert.equal(accountIneligibility(registry, find(registry, 'claude-a'), after, HOST), null);
 
-  // So does an operator's mark whose reset has passed.
+  // An operator's mark whose reset has passed holds nothing, and a newer live request replaces it.
   const marked = applyRegistryMutation(registry, 'account.quota', { name: 'claude-a', quota: { state: 'exhausted', resetsAt }, reason: 'plan cut off' }, { actor: 'operator', at: iso(0) }).registry;
-  foldObservations(marked, { host: HOST, observations: [{ account: 'claude-a', quota: { loggedIn: true, state: 'exhausted', usage: [], resetsAt: null, reason: null } }] }, { actor: 'executor', at: new Date(after).toISOString() });
-  assert.equal(find(marked, 'claude-a').quota.state, 'unknown');
+  assert.equal(accountIneligibility(marked, find(marked, 'claude-a'), after, HOST), null);
+  foldObservations(marked, { host: HOST, observations: [{ account: 'claude-a', quota: { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null, since: new Date(after).toISOString() } }] }, { actor: 'executor', at: new Date(after).toISOString() });
+  assert.equal(find(marked, 'claude-a').quota.state, 'available');
   assert.equal(find(marked, 'claude-a').quota.source, 'probe');
 });

@@ -30,7 +30,7 @@ function registryOf(accounts: { name: string; home?: string | null }[]): AgentRe
   }, { actor: 'operator', at: new Date(spentAt - 3_600_000).toISOString() }).registry;
 }
 const observe = (registry: AgentRegistry, observations: { account: string; state: 'available' | 'exhausted' | 'unknown'; resetsAt?: string | null; reason?: string | null; identity?: string | null }[], at: number) =>
-  foldObservations(registry, { host: HOST, observations: observations.map(({ account, state, resetsAt = null, reason = null, identity }) => ({ account, quota: { loggedIn: true, state, usage: [], resetsAt, reason, ...identity === undefined ? {} : { identity } } })) },
+  foldObservations(registry, { host: HOST, observations: observations.map(({ account, state, resetsAt = null, reason = null, identity }) => ({ account, quota: { loggedIn: true, state, usage: [], resetsAt, reason, ...state === 'exhausted' ? { since: new Date(at).toISOString() } : {}, ...identity === undefined ? {} : { identity } } })) },
     { actor: 'executor', at: new Date(at).toISOString() });
 
 test('unit:shared-identity-exhaustion-is-local — matching identities do not spread an exhaustion to an unchecked account', async () => {

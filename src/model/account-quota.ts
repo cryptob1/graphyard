@@ -20,7 +20,7 @@ export function exhaustionEvidence(quota: Pick<ObservedQuota, 'state' | 'usage' 
   if (quota.state !== 'exhausted') return null;
   // A refusal that named no reset is held for one check interval, which is not its reset (GY-3302).
   const resets = !quota.resetsAt ? 'reset unknown' : quota.session === 'guessed' ? `reset unknown, held until ${quota.resetsAt}` : `resets ${quota.resetsAt}`;
-  if (quota.since) return `the live request failed${quota.reason ? `: ${quota.reason}` : ''}; ${resets}`;
+  if (quota.since) return `${quota.reason ?? 'the live request was refused'}; ${resets}`;
   if (quota.source === 'operator' && (!quota.resetsAt || Date.parse(quota.resetsAt) > now)) return `marked exhausted by an operator${quota.reason ? `: ${quota.reason}` : ''}; ${quota.resetsAt ? resets : 'awaiting a live check'}`;
   return null;
 }

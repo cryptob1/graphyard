@@ -44,7 +44,7 @@ test('unit:agents-page-account-status-chips — the Agents page lists every regi
   const document = registry([{ name: 'worker', accounts: names.filter(name => name !== 'role-less'), concurrency: 8 }], names, { disabled: { enabled: false } });
   for (const name of names) foldObservation(find(document, name), available, { actor: 'coordinator', at: iso(-minute) });
   const resetsAt = iso(2 * day + 23 * hour + 27 * minute);
-  foldObservation(find(document, 'spent'), { loggedIn: true, state: 'exhausted', usage: [{ window: '7d', percent: 100, resetsAt }], resetsAt, reason: 'weekly window spent' }, { actor: 'coordinator', at: iso(-minute) });
+  foldObservation(find(document, 'spent'), { loggedIn: true, state: 'exhausted', usage: [{ window: '7d', percent: 100, resetsAt }], resetsAt, reason: 'weekly window spent', since: iso(-minute) }, { actor: 'coordinator', at: iso(-minute) });
   find(document, 'smoke-fails').smoke = { result: 'fail', reason: 'the model refused the smoke prompt', at: iso(-10 * minute), by: 'coordinator' };
   document.sessions = [
     session('00000000-0000-4000-8000-000000009781', 'worker', 'launch-fails', 'GY-977', iso(-20 * minute), iso(-19 * minute), 'worker run for GY-977 failed to start: cursor-agent: command not found'),
@@ -87,7 +87,7 @@ test('unit:agents-page-account-status-chips — the Agents page lists every regi
   assert.notEqual(accountStatus(view.accounts.find(entry => entry.name === 'spent')!, view, Date.parse(resetsAt) + minute).chip, 'spent');
   assert.equal(accountStatus(view.accounts.find(entry => entry.name === 'launch-fails')!, view, now + 2 * hour).chip, 'idle');
   // Only the first reason that applies: a disabled account that is also spent reads disabled.
-  foldObservation(find(document, 'disabled'), { loggedIn: true, state: 'exhausted', usage: [], resetsAt, reason: null }, { actor: 'coordinator', at: iso(-minute) });
+  foldObservation(find(document, 'disabled'), { loggedIn: true, state: 'exhausted', usage: [], resetsAt, reason: null, since: iso(-minute) }, { actor: 'coordinator', at: iso(-minute) });
   assert.equal(accountStatus(fleetView(document, now).accounts.find(entry => entry.name === 'disabled')!, view, now).chip, 'disabled');
 });
 
@@ -100,7 +100,7 @@ test('unit:agents-page-role-launchability — the Agents page states per role wh
   for (const name of names) foldObservation(find(document, name), available, { actor: 'coordinator', at: iso(-minute) });
   const early = iso(2 * day + 23 * hour), late = iso(3 * day);
   for (const [name, resetsAt] of [['opencode-a', late], ['opencode-b', early], ['opencode-c', late]] as const)
-    foldObservation(find(document, name), { loggedIn: true, state: 'exhausted', usage: [], resetsAt, reason: 'weekly limit' }, { actor: 'coordinator', at: iso(-minute) });
+    foldObservation(find(document, name), { loggedIn: true, state: 'exhausted', usage: [], resetsAt, reason: 'weekly limit', since: iso(-minute) }, { actor: 'coordinator', at: iso(-minute) });
   // cursor-a: two runs in a row ended without a result, so the registry holds it from worker for an hour.
   recordRunOutcome(document, { account: 'cursor-a', role: 'worker' }, 'no-result', 'the run ended without a result', iso(-2 * minute));
   recordRunOutcome(document, { account: 'cursor-a', role: 'worker' }, 'no-result', 'the run ended without a result', iso(-minute));
@@ -117,7 +117,7 @@ test('unit:agents-page-role-launchability — the Agents page states per role wh
   assert.equal(workers.nextAt, held, 'the earliest time any account frees up: the hold ends before any quota resets');
   // Once the hold is over and cursor-a is spent too, the earliest reset is next.
   recordRunOutcome(document, { account: 'cursor-a', role: 'worker' }, 'result', 'judged', iso(0));
-  foldObservation(find(document, 'cursor-a'), { loggedIn: true, state: 'exhausted', usage: [], resetsAt: late, reason: 'weekly limit' }, { actor: 'coordinator', at: iso(0) });
+  foldObservation(find(document, 'cursor-a'), { loggedIn: true, state: 'exhausted', usage: [], resetsAt: late, reason: 'weekly limit', since: iso(0) }, { actor: 'coordinator', at: iso(0) });
   const spent = roleLaunch(fleetView(document, now).roles.find(entry => entry.role === 'worker')!, fleetView(document, now), now);
   assert.equal(spent.nextAt, early);
   assert.match(spent.text, new RegExp(`next: opencode-b ${whenText(early, now).replace(/[()]/g, '\\$&')}$`));
@@ -128,7 +128,7 @@ test('unit:agents-page-role-launchability — the Agents page states per role wh
   assert.equal(reviewers.text, 'Reviewers: none can launch — at its concurrency limit (1 of 1 live); next: claude-b when one of its sessions ends');
 
   // A role with an eligible account launches now, on the account the registry's own choice takes.
-  foldObservation(find(document, 'opencode-b'), available, { actor: 'coordinator', at: iso(0) });
+  foldObservation(find(document, 'opencode-b'), { ...available, since: iso(0) }, { actor: 'coordinator', at: iso(0) });
   const recovered = fleetView(document, now);
   const ready = roleLaunch(recovered.roles.find(entry => entry.role === 'worker')!, recovered, now);
   assert.deepEqual([ready.canLaunch, ready.account, ready.text], [true, 'opencode-b', 'Workers: can launch now — next: opencode-b now']);
