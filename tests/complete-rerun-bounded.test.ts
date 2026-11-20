@@ -35,6 +35,18 @@ test('unit:complete-rerun-runs-only-failing-files — the rerun runs just the tr
   assert.equal(existsSync(join(root, 'other.ran')), false, 'the rerun ran a file the trial did not fail');
   assert.equal(existsSync(join(root, 'third.ran')), false, 'the rerun ran a file the trial did not fail');
   assert.deepEqual(result, { flaked: [], baseFailures: [] });
+
+  // GY-3551: the bound covers the whole rerun — its retry and base run included — never each run
+  // afresh, so a slow failing file cannot stretch complete to three bounds.
+  const slow = await repository({ 'slow.test.mjs': `import { test } from 'node:test';\ntest('slow', async () => { await new Promise(done => setTimeout(done, 2_500)); throw new Error('fails'); });\n` });
+  const bound = rerunBound.ms;
+  rerunBound.ms = 4_000;
+  try {
+    const begun = Date.now();
+    const slowResult = await completionRerun(slow, { id: 'id-1', key: 'GY-1', mergeLedger: refused('tests/slow.test.mjs') } as never);
+    assert.ok(Date.now() - begun < 4_000 + 1_500, `the rerun and its retry took ${Date.now() - begun}ms, past the 4 s bound`);
+    assert.match(slowResult.note?.note ?? '', /exceeded 4 s and was killed/);
+  } finally { rerunBound.ms = bound; }
 });
 
 test('unit:complete-rerun-killed-at-bound — a rerun that never exits is killed with its process group at the bound and submits with the note naming the bound (GY-2980)', async () => {
