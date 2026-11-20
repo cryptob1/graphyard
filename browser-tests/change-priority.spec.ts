@@ -49,5 +49,11 @@ test('e2e:change-priority — row and item controls persist and show attributed 
     expect((await f.store.workDocument(legacy.id))!.priority).toBe(4);
     expect((await f.ok(`events?work=${legacy.id}`)).filter((event: any) => event.kind === 'priority')).toHaveLength(0);
     expect((await f.call(`work/${item.id}/priority`, { priority: 0, source: 'dashboard' }, f.tokens.worker)).status).toBe(403);
-  } finally { await f.close(); }
+  } finally {
+    // The Work page keeps polling /api while the test ends; the proxy's in-flight fetch must not
+    // outlive the server it targets (GY-3555 rework: this spec alone closed the fixture server
+    // under a live route, the one teardown the suite's other specs avoid — see expiry-loop-stop).
+    await page.unrouteAll({ behavior: 'ignoreErrors' });
+    await f.close();
+  }
 });

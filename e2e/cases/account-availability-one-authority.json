@@ -1,0 +1,12 @@
+{
+  "id": "account-availability-one-authority",
+  "title": "Each account is available, held until the provider's reset, or broken, as its own live request decided",
+  "description": "Recorded outputs of this week's false holds (Z.ai fixture text, a wrong-key and shared-plan usage reading, a Claude JSON fragment, Claude's weekly-limit message) set quota only through each account's own live request: a passing request makes it available whatever usage, notices or worker text said; a refusal holds it until the reset the provider stated, in its words; any other failure is broken. A held account is checked again within the hour and at its reset, and a master's mark is replaced only by a newer live check. On the served dashboard at 1280 px and 390 px, the Workers page lists each account in one line: available, held until <time> with the provider's words, or broken, with when it was last checked live, and nothing scrolls sideways.",
+  "tags": ["accounts", "quota", "dashboard"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "only each account's own live request sets its quota", "run": "node --import tsx tests/helpers/run-tests.ts tests/account-availability-one-authority.test.ts", "timeoutSeconds": 300 },
+    { "kind": "command", "name": "the Workers page lists each account's availability in one line at 1280 and 390 px", "run": "npm run test:browser -- browser-tests/account-availability-one-authority.spec.ts", "timeoutSeconds": 420 }
+  ]
+}

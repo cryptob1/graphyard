@@ -36,7 +36,7 @@ function registry(): AgentRegistry {
   }, { actor: 'coordinator', at: at(-6 * hour) }).registry;
   const resetsAt = at(3 * 24 * hour + 2 * hour);
   for (const account of document.accounts) foldObservation(account, spent.includes(account.name)
-    ? { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 4 }, { window: '7d', percent: 100, resetsAt }].map(entry => ({ resetsAt: null, ...entry })), resetsAt, reason: 'weekly window spent' }
+    ? { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 4 }, { window: '7d', percent: 100, resetsAt }].map(entry => ({ resetsAt: null, ...entry })), resetsAt, reason: 'weekly window spent', since: at(-5 * minute) }
     : { loggedIn: true, state: 'available', usage: account.runtime === 'claude' || account.runtime === 'codex' ? [{ window: '5h', percent: 31, resetsAt: at(2 * hour) }, { window: '7d', percent: 58, resetsAt: at(4 * 24 * hour) }] : [], resetsAt: null, reason: null },
   { actor: 'coordinator', at: at(-5 * minute) });
   document.accounts.find(account => account.name === 'cursor-a')!.smoke = { result: 'fail', reason: 'the model refused the smoke prompt', at: at(-10 * minute), by: 'coordinator' };

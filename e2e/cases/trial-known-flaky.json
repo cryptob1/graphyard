@@ -1,0 +1,13 @@
+{
+  "id": "trial-known-flaky",
+  "title": "A merge trial that fails only on a test with an open flaky item merges the candidate",
+  "description": "Run the real loop cycle against a real temporary Postgres control plane and a scratch bare Git remote: with an open \"Flaky check on main\" item for a test, a candidate whose merge trial fails only that test merges instead of being sent back, and the flaky item gains a note naming the candidate.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Merge a candidate whose trial fails only on a known-flaky test through the real loop",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/pipeline-trial-known-flaky.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
