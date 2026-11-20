@@ -718,3 +718,16 @@ test('unit:e2e-http-step-waits — a GET step with waitSeconds asks again until 
   assert.equal(unsettled.cases[0].outcome, 'fail'); assert.match(unsettled.cases[0].failingStep!.reason, /delivery\.mergeSha.*\(still, after waiting 1 s\)/);
   assert.match(refusal('e2e/cases/post-wait.json', { id: 'post-wait', title: 'A waiting POST', target: 'uat', required: true, steps: [{ kind: 'http', method: 'POST', path: '/api/work', status: 200, waitSeconds: 5 }] }) ?? '', /only a GET step waits/);
 });
+
+test('integration:e2e-cases — the shipped catalog loads and every case parses; one-step-invite is the one-link invite check GY-3486 bound', async () => {
+  // GY-3548: the batch gate verifies e2e:one-step-invite, so the case must ship and run the one-link check.
+  const shipped = await loadCases(root);
+  assert.ok(shipped.length > 0, 'e2e/cases/ ships cases');
+  const invite = shipped.find(entry => entry.definition.id === 'one-step-invite');
+  assert.ok(invite, 'e2e/cases/one-step-invite.json ships');
+  assert.match(invite.definition.description ?? "", /GY-3486/);
+  assert.match(invite.definition.description ?? "", /one-link invite/);
+  const oneLink = shipped.find(entry => entry.definition.id === 'one-link-invite')!;
+  assert.deepEqual(invite.definition.steps.map(step => (step as { run?: string }).run), oneLink.definition.steps.map(step => (step as { run?: string }).run));
+  assert.match((invite.definition.steps[0] as { run: string }).run, /tests\/one-link-invite\.test\.ts/);
+});
