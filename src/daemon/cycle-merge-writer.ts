@@ -27,7 +27,7 @@ import { slotsDirectoryVariable, testMergeLabel, waitStep, withHeavyJob } from '
 import { adoptTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
-import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterionProofs, pushPassedTrial, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { cpuPressureHeld, trialCapNow } from './cpu-pressure.js';
@@ -1023,6 +1023,22 @@ export async function mergeWriterStep(cycle: Cycle) {
   if (state.cpuPressure) state.cpuPressure.trialCap = { now: trialCapNow(state, fullCap), full: fullCap };
   const parallel = Math.min(trialCapNow(state, fullCap), trialCapNow(state, hostCap) - batchGateBusySlots(state));
   const busy = new Set([...live].flatMap(flight => flight.keys ?? [flight.key]));
+  // Pushing a completed trial takes no trial slot, even while every slot is occupied.
+  if (![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.inFlight?.revert && !writer.unconfirmed?.length && !replayed) {
+    const ledger = snapshotLedger(snapshot.work);
+    for (const item of snapshot.work) {
+      if (busy.has(item.key) || settledNow.has(item.key) || !awaitsMerge(item, ledger, now())) continue;
+      const record = attemptRecorder(writer, reads.record, randomUUID(), at);
+      try {
+        if (!await pushPassedTrial({ ...reads, record }, item)) continue;
+      } catch (error) { if (writer.unconfirmed?.length) await effects.persist(state); throw error; }
+      writer.lastMergeAt = at();
+      writer.queue = writer.queue.filter(entry => entry.key !== item.key);
+      performed.push(storeAction(state, mergeWriterActionKey(item.key, item.candidate!.sha), { kind: 'merge', work: item.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
+        detail: `Merged ${item.key} on its completed trial while other trials continue` }));
+      changed = true; delivered = true;
+    }
+  }
   // GY-3437: at the launch limit no new trial starts; the cap still reads half, so status shows what returns once it cools.
   if (busy.size < parallel && !cpuPressureHeld(state) && ![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.unconfirmed?.length
     && !writer.inFlight?.revert && !replayed && !delivered) {

@@ -30,6 +30,8 @@ export type MergeReconciled = z.infer<typeof mergeReconciledSchema>;
 export type MergeLedgerPreview = z.infer<typeof previewVerdictSchema>;
 /** The newest trial the fold kept: the head it tried, the merge commit, each proof's counts, its build verdict and test-file count (GY-2091), and the preview's verdict (GY-1718). */
 export interface MergeLedgerTrial { head: string; mergeSha: string; proofs: Record<string, { executed: number; failed: number }>;
+  /** Base tip of a complete passing verdict; omitted for failed or incomplete trials. */
+  passedBaseTip?: string;
   build?: 'pass' | 'fail'; testFiles?: number; preview?: MergeLedgerPreview | null }
 /** GY-2963: the trial's newest reported step, with the instant it began. */
 export interface MergeLedgerStep { step: string; at: string }

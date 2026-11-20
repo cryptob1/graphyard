@@ -33,9 +33,10 @@ const item = (key: string, ageMinutes: number): Work => {
 
 
 const pass: MergeTrialRun = { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['src/app.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } };
-async function world() {
+async function world(verdict = pass) {
   const slow = item('GY-1', 30), ready = item('GY-2', 20), work = [slow];
   const state = emptyDaemonState(config), events: { kind: string; payload: unknown; work: string }[] = [];
+  let held: string | null = null;
   let tip = base, release!: (run: MergeTrialRun) => void, running = false;
   const trials: string[] = [], pushes: string[] = [];
   const record = async (target: Pick<Work, 'id' | 'key'>, event: MergeRecordEvent) => {
@@ -60,7 +61,7 @@ async function world() {
     },
     holds: async commit => commit === tip,
     push: async (commit, expected) => { if (tip !== expected) return 'rejected'; pushes.push(commit); tip = commit; return 'pushed'; },
-    hold: async () => null, record,
+    hold: async () => held, record,
   };
   const step = () => mergeWriterStep({ state, effects: { mergeWriter: reads, persist: async () => {}, rework: async () => {} }, now: () => start, snapshot: { work }, performed: [] } as unknown as Cycle);
   await step();
@@ -69,8 +70,8 @@ async function world() {
   work.push(ready);
   const head = ready.candidate!.sha, mergeSha = sha(`merge:${head}`);
   await record(ready, { kind: 'intent', head, baseTip: base, mergeSha, risk: 'normal', at: iso(start) });
-  await record(ready, { kind: 'trial', head, baseTip: base, mergeSha, outcome: 'verdict', build: pass.build, tests: pass.tests, files: pass.files, proofs: pass.proofs, durationMs: 1 });
-  return { ready, slow, state, step, trials, pushes, mergeSha, running: () => running, move: () => { tip = sha('moved'); }, close: async () => { release(pass); await mergeWriterIdle(state); } };
+  await record(ready, { kind: 'trial', head, baseTip: base, mergeSha, outcome: 'verdict', build: verdict.build, tests: verdict.tests, files: verdict.files, proofs: verdict.proofs, durationMs: 1, attempts: [] });
+  return { ready, slow, state, step, trials, pushes, mergeSha, hold: () => { held = "review pending"; }, running: () => running, move: () => { tip = sha('moved'); }, close: async () => { release(pass); await mergeWriterIdle(state); } };
 }
 
 test('integration:push-passed-trials-at-once — a passed queued candidate pushes in one cycle while the only trial slot is occupied', async () => {
@@ -104,4 +105,17 @@ test('e2e:push-passed-trials-at-once — master status shows the passed candidat
     assert.equal(mergeWriterSummary(w.state.mergeWriter, start).inFlight?.key, w.slow.key);
     assert.ok(w.running());
   } finally { await w.close(); }
+});
+
+
+test('integration:push-passed-trials-at-once — failed verdicts and landing holds never push beside a running trial', async () => {
+  for (const verdict of [{ ...pass, build: 'fail' as const }, { ...pass, tests: { passed: 0, failed: ['src/app.ts'], files: 1 } }, pass]) {
+    const w = await world(verdict);
+    try {
+      if (verdict === pass) w.hold();
+      await w.step();
+      assert.deepEqual(w.pushes, []);
+      assert.ok(w.running());
+    } finally { await w.close(); }
+  }
 });
