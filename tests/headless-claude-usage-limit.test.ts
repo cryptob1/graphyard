@@ -1,4 +1,4 @@
-import { after, before, mock, test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -9,9 +9,7 @@ import { spawnHeadless, startHeadlessSession } from '../src/headless-session.js'
 // GY-3389: a spent Claude account ends a headless run at once with its usage-credits result; the
 // account is held and the same dispatch starts the item on the next account, with no launch failure.
 let workers: HeadlessWorkers;
-// The reset Z.AI names is a date: the clock is fixed after it, as in the incident that filed this,
-// so the hold keeps the reset the notice itself named at any hour the test runs (GY-3561).
-before(async () => { mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T12:00:00Z') }); workers = await headlessWorkers('headless-claude-usage-limit'); });
+before(async () => { workers = await headlessWorkers('headless-claude-usage-limit'); });
 after(async () => { await workers.stop(); });
 
 test('e2e:headless-claude-usage-limit — a headless claude usage-credits result holds its account and the same dispatch moves on', async () => {
@@ -74,4 +72,27 @@ test('e2e:headless-claude-usage-limit — a headless opencode reviewer on a spen
   assert.match(holds[0]!.reason, /Limit Exhausted/);
   assert.equal(holds[0]!.resetsAt, zaiReset);
   assert.deepEqual(moves.map(move => move.split(':')[0]), ['limit']);
+});
+
+// GY-3561: the incident that filed this item — the wall clock had passed the reset the notice names,
+// and the exhaustion record dropped the reset the account's own event carried. The record keeps it.
+const staleReset = new Date(Math.floor(Date.now() / 1000) * 1000 - 7_200_000).toISOString();
+const staleWall = new Date(Date.parse(staleReset) + 8 * 3_600_000).toISOString().slice(0, 19).replace('T', ' ');
+const staleQuota = JSON.stringify({ type: 'provider.quota', message: `Weekly/Monthly Limit Exhausted. Your limit will reset at ${staleWall}`, status: 429 });
+
+test('e2e:headless-claude-usage-limit — a headless opencode worker exiting on the Z.AI quota line after its named reset has passed keeps that reset on the record', async () => {
+  await workers.configure([{ name: 'opencode-spent', kind: 'opencode', printed: staleQuota }, { name: 'next-stale', kind: 'codex', wait: true }]);
+  const work = await workers.readyItem('GY-9675');
+  const launched = await workers.dispatch(work);
+  assert.equal(launched.runtime, 'codex');
+  assert.equal(launched.epoch, 2);
+  const item = await workers.stored(work.id);
+  const spent = item.capacity?.exhaustions?.find(entry => entry.epoch === 1);
+  assert.equal(spent?.account, 'opencode-spent');
+  assert.equal(spent?.resetsAt, staleReset, 'the record keeps the reset its own event named, though the clock is past it');
+  assert.equal((await workers.registry.snapshot(workers.hostId)).accounts.find(entry => entry.name === 'opencode-spent')?.eligible, false, 'the spent account is held');
+  assert.equal(item.blocker, null);
+  assert.ok(!item.sessions!.some(session => /exited at once/.test(session.outcome ?? '')), 'no launch failure is recorded');
+  await writeFile(join(workers.homes.get('next-stale')!, 'release'), '');
+  await workers.submitted(work.id, 2);
 });

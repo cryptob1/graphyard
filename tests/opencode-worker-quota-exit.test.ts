@@ -1,4 +1,4 @@
-import { after, before, mock, test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -7,9 +7,7 @@ import { headlessWorkers, type HeadlessWorkers } from './helpers/headless-worker
 // GY-3427: an OpenCode worker on a spent Z.AI plan exits at once printing its JSON error event, the
 // provider.quota 429 (code 1310) nested in it; GY-3420 lost two epochs because the account stayed eligible.
 let workers: HeadlessWorkers;
-// The reset Z.AI names is a date: the clock is fixed after it, as in the incident that filed this,
-// so the hold keeps the reset the notice itself named at any hour the test runs (GY-3561).
-before(async () => { mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T12:00:00Z') }); workers = await headlessWorkers('opencode-worker-quota-exit'); });
+before(async () => { workers = await headlessWorkers('opencode-worker-quota-exit'); });
 after(async () => { await workers.stop(); });
 
 const reset = new Date(Math.floor(Date.now() / 1000) * 1000 + 86_400_000).toISOString();
