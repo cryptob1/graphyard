@@ -11,7 +11,7 @@ import { Store } from '../src/store.js';
 import { observeAccount } from '../src/fleet.js';
 import { hostAccountsVariable } from '../src/host-accounts.js';
 import { registryCommand } from '../src/cli/master-registry.js';
-import { proposedRuntimes, utcClock, type AgentRegistry, type FleetView } from '../src/model/registry.js';
+import { proposedRuntimes, type AgentRegistry, type FleetView } from '../src/model/registry.js';
 import type { Principal } from '../src/model.js';
 
 // GY-3495 e2e: three Z.AI keys read through a stub quota endpoint, the real control plane and `master registry`.
@@ -79,10 +79,8 @@ test('e2e:zai-usage-read — master registry shows each Z.AI key\'s own allowanc
     { window: '5h', percent: 1, resetsAt: minute(3_600_000) }, { window: '7d', percent: 96, resetsAt: weeklyReset }], 'its own 5h and weekly windows, no monthly one');
 
   const credit = account('zai-credit');
-  const sentence = `weekly allowance 100% used, back ${utcClock(creditReset)}`;
   assert.deepEqual(credit.usage.map(({ window, percent, resetsAt }) => ({ window, percent, resetsAt })), [{ window: '7d', percent: 100, resetsAt: creditReset }]);
-  assert.equal(credit.eligible, false);
-  assert.equal(credit.ineligible, `zai-credit quota is exhausted: ${sentence}`, 'held until its own reset, in words');
+  assert.equal(credit.eligible, true, 'its own live request passed, so its 100% reading holds nothing (GY-3555)');
 
   const empty = account('zai-empty');
   assert.equal(empty.quota, 'unknown');

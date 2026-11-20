@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { access, readdir, realpath, stat } from 'node:fs/promises';
 import { launchRecipe } from './harness.js';
 import { isMiseShim, onSearchPath, realRuntimeBinary } from './runtime-binary.js';
-import { runtimeAdapter, cursorLoginFile, accountHomeEnvironment } from './master/runtimes.js';
+import { runtimeAdapter, runtimeAdapters, providerUsageErrors, cursorLoginFile, accountHomeEnvironment } from './master/runtimes.js';
 import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -16,7 +16,7 @@ import { masterConfinementVariable } from './master/confinement.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import { fleetOrder, roleUnsupported } from './model/worker-preference.js';
 import type { SmokeResult } from './runner/pi.js';
-import { accountIneligibility, lastGoodUsage, windowHold, deriveAccountPlan, fleetRoles, liveSessions, roleLimit, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
+import { accountIneligibility, lastGoodUsage, deriveAccountPlan, fleetRoles, liveSessions, roleLimit, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, roleRuntimeKinds, roleRuntimeRefusal, smokeFailureDue, smokeTestedKinds, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
 import { hostAccountCheck, recordHostAccountCheck, clearEndedHostAccountSessions, clearHostAccountSession, hostAccountSessions, registerHostAccountSession } from './host-accounts.js';
 export { exhaustionTail, outOfCreditsScreen } from './exhaustion-screen.js';
 
@@ -180,13 +180,22 @@ async function readAccount(account: FleetAccount, runtime: FleetRuntime, probe: 
   return { health: null, quota: { loggedIn, state: 'unknown', usage: [], resetsAt: null, reason: loggedIn ? null : `${account.name} is not logged in: ${file} does not exist${runtime.launch.login ? `; log in with: ${runtime.launch.login.replaceAll('{home}', home)}` : ''}` } };
 }
 
+const liveLimitNotices = () => [...providerUsageErrors, ...runtimeAdapters().flatMap(adapter => adapter.limitNotices ?? [])];
 /** One request per home in flight, shared across roles and registry revisions. */
 const checksInFlight = new Map<string, Promise<QuotaObservation>>();
+/** A held, broken or available account is checked live again within this interval, and a hold at its stated reset if sooner. */
 export const accountCheckIntervalMs = 30 * 60_000;
+/** When a live result is due to be checked again: within the interval, or at the hold's stated reset if sooner. */
+export const nextLiveCheck = (quota: Pick<QuotaObservation, 'since' | 'resetsAt'>) =>
+  Math.min(Date.parse(quota.since!) + accountCheckIntervalMs, quota.resetsAt ? Date.parse(quota.resetsAt) : Infinity);
 export const needsSmoke = (account: FleetAccount, runtime: FleetRuntime, now = Date.now()) => account.enabled &&
-  (account.quota.source === 'operator' || account.quota.state === 'exhausted' || !!account.quota.session && !account.quota.since || account.quota.loggedIn === false || smokeTestedKinds.includes(runtime.launch.kind) && (!account.smoke || smokeFailureDue(account, now)));
+  (account.quota.source === 'operator' || account.quota.state === 'exhausted' || account.quota.state === 'broken' || !!account.quota.session && !account.quota.since || account.quota.loggedIn === false || smokeTestedKinds.includes(runtime.launch.kind) && (!account.smoke || smokeFailureDue(account, now)));
 
-/** Run a tiny request with precisely this account's launch login; narratives are never evidence. */
+/**
+ * The one authority on an account's availability (GY-3555): a tiny request with precisely this account's launch login.
+ * It passes (available), the provider refuses it with a limit notice (exhausted, until the reset that notice states), or
+ * it fails otherwise (broken). Usage readings, worker output and notices only schedule it; nothing else sets quota.
+ */
 export async function checkAccountLive(account: FleetAccount, runtime: FleetRuntime, probe: FleetProbe = {}, model: string | null = null, usage: QuotaObservation['usage'] = [], ownKey?: string): Promise<QuotaObservation> {
   const home = account.credential.home, key = home ?? `${account.credential.host}/${account.name}`;
   const pending = checksInFlight.get(key);
@@ -199,19 +208,15 @@ export async function checkAccountLive(account: FleetAccount, runtime: FleetRunt
     try { result = await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs })))(target); }
     catch (error) { result = { ok: false, error: String(error) }; }
     const reason = result.ok ? null : (result.error || 'The live request failed').replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim().slice(0, 500);
-    // A spent window's own reset, as the provider's usage endpoint answered it, wins over a time read from the refusal's text (GY-3495).
-    const spent = usage.filter(window => window.percent >= (probe.ceilingPercent ?? defaultQuotaCeilingPercent) && !!window.resetsAt && Date.parse(window.resetsAt) > now).map(window => window.resetsAt!).sort().at(-1);
-    // GY-3516: the account's own key read its windows with none spent, yet the run was refused for a limit: another
-    // login answered it (an OpenCode service shared across homes), so the refusal is a fault, never this account's hold.
-    const refused = reason && (runtimeAdapter(runtime.launch.kind)?.limitNotices ?? []).some(notice => notice.test(reason));
-    const foreign = !!refused && !!ownKey && usage.length > 0 && !spent;
-    const ok = result.ok || foreign;
-    const reset = reason && !ok ? spent ?? runtimeResetTime(reason, runtime.launch.kind, now) : null;
-    const nextCheck = reset && Date.parse(reset) > now ? reset : new Date(now + accountCheckIntervalMs).toISOString();
-    const quota: QuotaObservation = { loggedIn: ok || !detectLoggedOut(reason ?? ''), state: ok ? 'available' : 'exhausted', usage, since: new Date(now).toISOString(),
-      resetsAt: ok ? null : nextCheck, reason: foreign ? null : reason, ...(ok ? {} : { session: reset && Date.parse(reset) > now ? 'named' as const : 'guessed' as const }),
-      ...ownKey ? { key: ownKey } : {}, ...foreign ? { fault: `Live check answered with another account's limit; this account's own key (${ownKey}) reads ${usage.map(window => `${window.window} ${window.percent}%`).join(', ')}: ${reason}`.slice(0, 300) } : {} };
-    if (home) recordHostAccountCheck(home, { key: account.credential.key ?? null, at: new Date(now).toISOString(), nextCheck, quota });
+    // The answer to a one-word prompt is the provider's alone, never an agent's prose, so any runtime's limit notice reads as one.
+    const limited = !!reason && liveLimitNotices().some(notice => notice.test(reason));
+    const stated = limited ? runtimeResetTime(reason, runtime.launch.kind, now) : null;
+    const reset = stated && Date.parse(stated) > now ? stated : null;
+    const since = new Date(now).toISOString();
+    // A refusal that names no reset is held for one check interval, shown as reset unknown.
+    const quota: QuotaObservation = { loggedIn: result.ok || !detectLoggedOut(reason ?? ''), state: result.ok ? 'available' : limited ? 'exhausted' : 'broken', usage, since,
+      resetsAt: limited ? reset ?? new Date(now + accountCheckIntervalMs).toISOString() : null, reason, ...(limited ? { session: reset ? 'named' as const : 'guessed' as const } : {}), ...ownKey ? { key: ownKey } : {} };
+    if (home) recordHostAccountCheck(home, { key: account.credential.key ?? null, at: since, nextCheck: new Date(nextLiveCheck(quota)).toISOString(), quota });
     return quota;
   })().finally(() => checksInFlight.delete(key));
   checksInFlight.set(key, running);
@@ -226,7 +231,7 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
   if (home && await readdir(home).then(entries => !entries.length && !!process.env[masterConfinementVariable], (error: NodeJS.ErrnoException) => error.code === 'EACCES'))
     return { quota: cached?.quota ?? { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
 
-  if (!home && account.quota.since && (account.quota.state === 'available' ? Date.parse(account.quota.since) + accountCheckIntervalMs > now : account.quota.resetsAt && Date.parse(account.quota.resetsAt) > now)) {
+  if (!home && account.quota.since && nextLiveCheck(account.quota) > now) {
     const { source: _source, observedAt: _at, observedBy: _by, ...quota } = account.quota;
     return { quota, health: null };
   }
@@ -238,13 +243,15 @@ export async function observeAccount(account: FleetAccount, runtime: FleetRuntim
   if (cached && !signalled && Date.parse(cached.nextCheck) > now) {
     if (cached.quota.state !== 'available') return { quota: cached.quota, health: null };
     const reading = await readAccount(account, runtime, probe, allAccounts, model);
-    return { ...reading, quota: windowHold({ ...cached.quota, usage: lastGoodUsage(account, reading.quota, now), identity: reading.quota.identity }, ceiling, now) };
+    return { ...reading, quota: { ...cached.quota, usage: lastGoodUsage(account, reading.quota, now), identity: reading.quota.identity } };
   }
   const reading = await readAccount(account, runtime, { ...probe, ...(account.quota.loggedIn === false ? { cacheMs: 0 } : {}) }, allAccounts, model);
   const usage = lastGoodUsage(account, reading.quota, now);
-  if (cached || signalled || needsSmoke(account, runtime, now) || reading.quota.state === 'exhausted')
-    return { ...reading, quota: windowHold(await checkAccountLive(account, runtime, probe, model, usage, reading.quota.key), ceiling, now) };
-  return { ...reading, quota: windowHold({ ...reading.quota, usage }, ceiling, now) };
+  // A usage window at its ceiling, or a reading of exhausted, only asks for the live request; it never holds by itself.
+  const spent = reading.quota.state === 'exhausted' || usage.some(window => window.percent >= ceiling && !!window.resetsAt && Date.parse(window.resetsAt) > now);
+  if (cached || signalled || spent || needsSmoke(account, runtime, now))
+    return { ...reading, quota: await checkAccountLive(account, runtime, probe, model, usage, reading.quota.key) };
+  return { ...reading, quota: { ...reading.quota, usage } };
 }
 
 /**

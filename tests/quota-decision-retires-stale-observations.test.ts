@@ -40,8 +40,8 @@ test('unit:quota-decision-retires-stale-observations — an exhaustion observed 
   fold({ ...reported.quota }, decided + 90_000, { result: 'pass', reason: 'smoke ok' });
   assert.equal(quota().state, 'available', 'nor does a smoke test, nor a report of the pending hold');
 
-  // An ordinary probe moves the reading on; the decision still stands against the old observation.
-  fold({ loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null }, decided + 120_000);
+  // A newer live check moves the reading on (GY-3555: a reading that made no request never replaces the mark); the decision still stands against the old observation.
+  fold({ loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null, since: iso(decided + 120_000) }, decided + 120_000);
   assert.equal(quota().source, 'probe');
   fold(replayed, decided + 150_000);
   assert.equal(quota().state, 'available', 'after a probe replaced the operator reading');
