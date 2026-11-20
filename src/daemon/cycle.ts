@@ -597,6 +597,7 @@ async function untrustedCheckoutRoles(cycle: Cycle, registry: CheckoutTrustFleet
  * profile, each head nothing can carry forward back to a worker, the reviewer and producer
  * sessions the dispatcher owes, and the master session when absent.
  */
+const refusalsLogged = new WeakMap<DaemonState, Set<string>>();
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
   // GY-3285: the install runs as many workers as its registry's worker role allows; the loop adds
@@ -619,7 +620,19 @@ async function dispatchStep(cycle: Cycle) {
   const health = profileHealth(config.workers, credentials, herdr.agents, state, clock, snapshot.work);
   const taken = cycle.reservedProfiles;
   const hot = new Set(hotspots(open, clock).map(entry => entry.file));
-  const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
+  // GY-3539: each exclusive-resource refusal is one log line naming the item, the resource and its holder.
+  // A refusal standing from the last cycle is not logged again.
+  const before = refusalsLogged.get(state) ?? new Set<string>(), standing = new Set<string>();
+  refusalsLogged.set(state, standing);
+  const refused = (item: Work, resource: string, holder: string) => {
+    const line = `${item.key} waits: exclusive resource ${resource} is held by ${holder}`;
+    if (!before.has(line) && !standing.has(line)) cycle.log(`[graphyard-master] cycle ${state.cycle}: ${line}`);
+    standing.add(line);
+  };
+  const claimable = dispatchSort(open.filter(item => {
+    try { assertDispatchable(item, snapshot.work, snapshot.now); return true; }
+    catch (error) { if (message(error).startsWith('Dispatch blocked by exclusive resources')) for (const held of resourceConflicts(item, snapshot.work, clock)) refused(item, held.resource, held.key); return false; }
+  }), hot, clock);
   const launched: Work[] = [];
   let offers = registry && !state.diskHeadroom ? await runtimeCanaries(cycle, registry.runtimes) : [];
   // GY-3149: a freed worker slot goes to the highest-priority waiting item. An item whose launch last waited
@@ -662,7 +675,8 @@ async function dispatchStep(cycle: Cycle) {
   ].filter((hold): hold is string => !!hold);
   if (!holds.length) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
-    if (launched.some(other => sharedResources(item, other).length)) continue;
+    const holder = launched.find(other => sharedResources(item, other).length);
+    if (holder) { refused(item, sharedResources(item, holder)[0]!, holder.key); continue; }
     // GY-3104: a third equal failure holds the item for the master's decision.
     if (failureHeld(state.failureRuns[item.id])) continue;
     const incident = state.actions[earlyExitKey(item)];
@@ -743,7 +757,7 @@ async function releaseBacklog(cycle: Cycle, allowed: number) {
   for (const item of candidates) {
     // A yard repair (GY-3102) is released past the pipeline cap.
     if (slots <= 0 && !item.yardRepair) continue;
-    // An item sharing an exclusive resource (a file path included) with one in flight or released waits until that one lands.
+    // An item sharing an exclusive resource with one in flight or released waits until that one lands.
     if (resourceConflicts(item, snapshot.work, clock).length || snapshot.work.some(other => other.id !== item.id && other.stage !== 'done' && other.ready && sharedResources(item, other).length)) continue;
     const key = `release:${item.id}:${item.revision}`, inPipeline = snapshot.work.filter(entry => entry.stage !== 'done' && (entry.ready || inFlight(entry, clock))).length;
     try {
