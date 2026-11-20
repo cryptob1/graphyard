@@ -12,6 +12,7 @@ import { server } from '../src/server.js';
 import { workerVerificationPump } from '../src/daemon/worker-verification.js';
 import { runWorkerVerification } from '../src/merge-writer/worker-verification.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
+import { verificationQueue } from '../src/server/worker-verification-queue.js';
 import { completeCommand } from '../src/cli/complete.js';
 import type { CliContext } from '../src/cli/context.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
@@ -74,6 +75,7 @@ test('integration:reuse-required', () => assert.equal(answer, 42));
 
 test('integration:worker-verification-request-reuse — identical repeats share one host verification; changed inputs and stale epochs do not', async t => {
   const f = await fixture(t);
+  const waitMs = verificationQueue.waitMs; verificationQueue.waitMs = 5_000; t.after(() => { verificationQueue.waitMs = waitMs; });
   const first = f.start(), repeat = f.start();
   await until(async () => (await f.pending()).length >= 1, 'request queued');
   await delay(100); // Let the repeat reach the server.
@@ -102,6 +104,19 @@ test('integration:worker-verification-request-reuse — identical repeats share 
   assert.ok(![same.id, other.id].includes(next.id));
   await f.api('worker-verifications/finish', { id: next.id, result: f.result });
   assert.deepEqual((await again).value, f.result);
+  // A caller whose time runs out while the host runs its verification leaves it running; the repeat joins it.
+  verificationQueue.waitMs = 300;
+  const timedOut = f.start();
+  await until(async () => (await f.pending()).length === 1, 'the verification queues');
+  const [running] = await f.api('worker-verifications/take', { host: 'test' });
+  assert.match(String((await timedOut).error), /504.*timed out/);
+  verificationQueue.waitMs = 5_000;
+  const rejoined = f.start();
+  await delay(100);
+  assert.deepEqual((await f.pending()).map(entry => entry.state), ['running'], 'the repeat joins the running verification');
+  assert.deepEqual(await f.api('worker-verifications/take', { host: 'test' }), []);
+  await f.api('worker-verifications/finish', { id: running.id, result: f.result });
+  assert.deepEqual((await rejoined).value, f.result);
 });
 
 test('e2e:worker-verification-request-reuse — an interrupted complete and its repeat run one host verification and submit through unchanged gates', { timeout: 240_000 }, async t => {
