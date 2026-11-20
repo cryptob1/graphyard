@@ -53,7 +53,7 @@ SELECT p_id, p_number, d.document->>'key', d.document->>'stage', ${number("d.doc
   CASE WHEN d.document->'observation'->'merged' = 'true'::jsonb THEN 'merged' ELSE d.document->'observation'->>'prState' END,
   ${dueAt}, graphyard_timestamptz(COALESCE(d.document->'delivery'->>'mergedAt', d.document->'observation'->>'mergedAt')), s.settled, x.summary,
   CASE WHEN s.settled THEN ${coordinationTrimSql('x.summary', 0)} END,
-  jsonb_build_object('lease', d.document->'lease', 'resources', COALESCE(d.document->'exclusiveResources', '[]'::jsonb) || COALESCE(d.document->'plannedFiles', '[]'::jsonb),
+  jsonb_build_object('lease', d.document->'lease', 'resources', COALESCE(d.document->'exclusiveResources', '[]'::jsonb),
     'files', COALESCE(d.document->'observation'->'files', '[]'::jsonb),
     'candidate', d.document->'candidate' IS NOT NULL AND d.document->'candidate' <> 'null'::jsonb,
     'submission', d.document->'submission', 'reworkRequested', d.document->'reworkRequested',

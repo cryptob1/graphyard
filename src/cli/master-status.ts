@@ -10,6 +10,7 @@ import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/st
 import { standingStepFailures, workerGrowthKey, masterLaunchKey, masterLaunchBackoffAfter } from '../daemon/cycle.js';
 import { fetchRefusalKey, gateStallKey } from '../daemon/cycle-batch-gate.js';
 import { cpuPerMergedItem, implementationWaiting } from '../daemon/cpu-pressure.js';
+import { heatReading } from '../merge-writer/trial-load.js';
 import { overloadAlarm, overloaded, sessionFigures } from '../session-share.js';
 import { profileHealth, repeatedLaunchFailures } from '../daemon/sessions.js';
 import { workersAllowed } from '../master/worker-pool.js';
@@ -245,6 +246,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // waiting line while launches are held; GY-3401: each new session's test budget and the trial cap.
     cpuPressure: state?.cpuPressure
       ? { at: state.cpuPressure.at, avg60: state.cpuPressure.avg60, steal: state.cpuPressure.steal, celsius: state.cpuPressure.celsius,
+        // GY-3532: the latest package sample beside the 120 s mean the heat rule compares (null under 4 samples).
+        ...((heat) => ({ latestCelsius: heat?.latest ?? null, meanCelsius: heat?.mean ?? null }))(heatReading(state.cpuPressure.samples)),
         waiting: implementationWaiting(state), testBudget: state.cpuPressure.testBudget, trialCap: state.cpuPressure.trialCap }
       : null,
     // GY-3438: every live agent session with its CPU and memory use beside its fair share, as the loop last read its cgroup.

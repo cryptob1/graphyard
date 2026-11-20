@@ -1,6 +1,5 @@
-import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { createBackup, databaseFenced, fenceDatabase, ledgerCounts, restoreBackup, verifyBackup } from '../backup.js';
+import { databaseFenced, fenceDatabase, ledgerCounts, restoreBackupFile, verifyBackupFile, writeBackupFile } from '../backup.js';
 import { Store } from '../store.js';
 import { releaseInfo, schemaVersion } from '../release.js';
 import { defineCommands } from './registry.js';
@@ -31,15 +30,15 @@ export const dbCommands = defineCommands([
         if (id === 'migrate') { await store.init(); return print({ migrated: true, schema: await store.schema(), release: releaseInfo() }); }
         if (id === 'status') return print({ schema: await store.schema(), expectedSchema: schemaVersion, release: releaseInfo(), counts: await ledgerCounts(store.pool) });
         if (id === 'backup' && args.length === 1) {
-          const backup = await createBackup(store.pool);
-          await writeFile(resolve(args[0]), JSON.stringify(backup), { flag: 'wx', mode: 0o600 });
-          return print({ file: args[0], takenAt: backup.takenAt, schema: backup.schemaVersion, digest: backup.digest, rows: Object.fromEntries(backup.tables.map(t => [t.name, t.rows.length])), note: 'Treat the file like the database: it holds private artifacts, evidence and credential hashes' });
+          const backup = await writeBackupFile(store.pool, resolve(args[0]));
+          return print({ file: args[0], ...backup, note: 'Treat the file like the database: it holds private artifacts, evidence and credential hashes' });
         }
-        if (id === 'verify' && args.length === 1) { const backup = verifyBackup(JSON.parse(await readFile(resolve(args[0]), 'utf8'))); return print({ file: args[0], valid: true, takenAt: backup.takenAt, graphyardVersion: backup.graphyardVersion, schema: backup.schemaVersion, rows: Object.fromEntries(backup.tables.map(t => [t.name, t.rows.length])) }); }
+        if (id === 'verify' && args.length === 1) { const backup = await verifyBackupFile(resolve(args[0])); return print({ file: args[0], valid: true, takenAt: backup.takenAt, graphyardVersion: backup.graphyardVersion, schema: backup.schemaVersion, rows: backup.rows }); }
         if (id === 'restore' && args.length === 1) {
-          const backup = verifyBackup(JSON.parse(await readFile(resolve(args[0]), 'utf8')));
+          const file = resolve(args[0]);
+          await verifyBackupFile(file);
           await store.init();
-          const result = await restoreBackup(store.pool, backup);
+          const result = await restoreBackupFile(store.pool, file);
           return print({ ...result, counts: await ledgerCounts(store.pool) });
         }
         if (id === 'fence' && (args.length === 0 || args.length === 1 && args[0] === '--release')) {
