@@ -1,7 +1,7 @@
 {
   "id": "zai-usage-read",
   "title": "Each Z.AI account reads its own key's allowance and reset",
-  "description": "A stub Z.AI quota endpoint answers three keys: weekly tokens at 96% (beside a 5-hour window and the monthly tool-call limit), credit at 100% with its own reset, and no limits. Through the real control plane, master registry shows each account's own windows and resets, no monthly window, the credit account held until its own reset in one sentence, and the no-limits account as 'this key reports no allowance' with no windows copied from another.",
+  "description": "A stub Z.AI quota endpoint answers three keys: weekly tokens at 96% (beside a 5-hour window and the monthly tool-call limit), credit at 100% with its own reset, and no limits. Through the real control plane, master registry shows each account's own windows and resets, no monthly window, the credit account still eligible because its own live request passes (a usage reading never holds it), and the no-limits account as 'this key reports no allowance' with no windows copied from another.",
   "tags": ["accounts", "quota"],
   "target": "any",
   "required": false,
