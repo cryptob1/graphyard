@@ -16,9 +16,27 @@ import { table } from './index.js';
 import { renewHeartbeat } from './heartbeat.js';
 import { authorizeOperatorCommand } from './shared.js';
 import type { Ctx } from './types.js';
+import { gitRunnerFor } from '../../merge-writer/local-observation.js';
+import { pathScope } from '../../model/documentation-glob.js';
 
 /** The commands whose work only a gate observes later: a submitted item is woken after any other. */
 const noWake = new Set<Command>(['heartbeat', 'release', 'claim', 'workspace', 'priority']);
+
+/**
+ * GY-3539: an exclusive resource that names a path holds other items only when it is a file or
+ * directory on the base branch; a path the base lacks (such as e2e/TIMINGS.md) is dropped and never blocks.
+ * A plain name (staging, deploy) is a declared resource and is kept.
+ */
+async function resourcesOnBase(engine: Engine, names: string[]) {
+  if (engine.gitRunner === undefined) engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
+  const kept: string[] = [];
+  for (const name of names) {
+    if (!name.includes('/') && !/\.[a-z0-9]{1,5}$/.test(name)) { kept.push(name); continue; }
+    const path = pathScope(name).path.replace(/\/$/, '');
+    if (engine.gitRunner && (await engine.gitRunner(['cat-file', '-e', `refs/remotes/origin/${engine.baseBranch}:${path}`])).status === 0) kept.push(name);
+  }
+  return kept;
+}
 
 /**
  * Run one command: validate it, prepare what must happen outside the transaction, then in one
@@ -31,6 +49,7 @@ export async function runCommand(engine: Engine, actor: Principal, command: Comm
   demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const data: any = commands[command].parse(input);
+  if (data.exclusiveResources?.length) data.exclusiveResources = await resourcesOnBase(engine, data.exclusiveResources);
   const receiptInput = { command, id, data };
   const entry = table[command];
   if (command === 'heartbeat' && actor.role !== 'operator-agent') return renewHeartbeat(engine, actor, id, key, data, receiptInput);

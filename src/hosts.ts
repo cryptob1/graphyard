@@ -17,6 +17,8 @@ import { configHome } from './install/secrets.js';
 import { cpuSensorNames } from './merge-writer/trial-load.js';
 import { cpuStatTotals, stealPercent } from './daemon/cpu-pressure.js';
 import { hostProbeScript, hostShimDigest, hostShimScript } from './host-shim.js';
+import { trialAppArmorProfilePath, trialAppArmorProfileText } from './merge-writer/trial-apparmor.js';
+import { shellQuote } from './install/transport.js';
 
 export interface HostRecord { target: string; addedAt: string }
 export interface HostReading { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null; stat?: { total: number; steal: number } | null }
@@ -49,6 +51,10 @@ id "$user" >/dev/null 2>&1 || useradd --create-home --shell /bin/sh "$user"
 gpasswd -d "$user" docker >/dev/null 2>&1 || true
 grep -q "^$user:" /etc/subuid || usermod --add-subuids 300000-365535 --add-subgids 300000-365535 "$user"
 loginctl enable-linger "$user"
+# Shards start nested sandboxes; where the host enforces AppArmor, Docker runs them under this profile (GY-3549).
+if [ "$(cat /sys/module/apparmor/parameters/enabled 2>/dev/null)" = Y ]; then
+  printf %s ${shellQuote(trialAppArmorProfileText)} > ${trialAppArmorProfilePath} && apparmor_parser -r -W ${trialAppArmorProfilePath}
+fi
 cat > /usr/local/bin/graphyard-host-shim <<'GRAPHYARD_SHIM'
 ${hostShimScript}GRAPHYARD_SHIM
 chmod 755 /usr/local/bin/graphyard-host-shim

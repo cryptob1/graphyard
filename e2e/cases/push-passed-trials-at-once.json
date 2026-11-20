@@ -1,0 +1,13 @@
+{
+  "id": "push-passed-trials-at-once",
+  "title": "Passed candidates merge while another trial runs",
+  "description": "Run the merge loop with its only trial slot occupied and a passed candidate queued; master status shows that candidate delivered before the running trial finishes.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "master status shows delivery beside the running trial",
+    "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:push-passed-trials-at-once tests/push-passed-trials-at-once.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

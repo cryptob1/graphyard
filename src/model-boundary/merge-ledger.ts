@@ -21,6 +21,11 @@ export const previewVerdictSchema = z.object({
 /** `merge.trial`: the trial of `head` on `mergeSha`, with each `unit:`/`integration:` proof's executed and failed cases, its build verdict and test-file count (GY-2091), and its preview when it had one. */
 export const mergeTrialSchema = z.object({ head: sha, mergeSha: sha, proofs: proofCounts, build: z.enum(['pass', 'fail']).optional(),
   tests: z.object({ files: z.number().int().min(0) }).passthrough().optional() }).passthrough();
+const passingTrialSchema = mergeTrialSchema.extend({
+  outcome: z.literal('verdict'), baseTip: sha, build: z.literal('pass'),
+  tests: z.object({ files: z.number().int().positive(), passed: z.number().int(), failed: z.array(z.unknown()).length(0) }),
+  e2e: z.array(z.object({ executed: z.number().positive(), failed: z.literal(0), missing: z.literal(false).optional() })).optional(),
+}).refine(trial => trial.tests.passed === trial.tests.files && Object.values(trial.proofs).every(counts => counts.executed > 0 && counts.failed === 0));
 /** `merge.trial-step`: the trial of `head` reported `step` at `at` (GY-2963). */
 export const mergeTrialStepSchema = z.object({ head: sha, step: z.string().min(1).max(100), at: instant }).strict();
 /**
@@ -90,7 +95,9 @@ export function foldMergeLedger(events: readonly MergeLedgerEvent[]): Record<str
       const state = trial && find(event, byHead, trial.head);
       if (!trial || !state) continue;
       const preview = previewVerdictSchema.safeParse((event.payload as { preview?: unknown }).preview);
-      state.trial = { head: trial.head, mergeSha: trial.mergeSha, proofs: Object.fromEntries(Object.entries(trial.proofs).map(([proof, counts]) => [proof, { executed: counts.executed, failed: counts.failed }])),
+      const passing = passingTrialSchema.safeParse(event.payload);
+      state.trial = { head: trial.head, mergeSha: trial.mergeSha,
+        ...(passing.success && (!preview.success || preview.data.result === 'pass') ? { passedBaseTip: passing.data.baseTip } : {}), proofs: Object.fromEntries(Object.entries(trial.proofs).map(([proof, counts]) => [proof, { executed: counts.executed, failed: counts.failed }])),
         ...(trial.build ? { build: trial.build } : {}), ...(trial.tests ? { testFiles: trial.tests.files } : {}), ...(preview.success ? { preview: preview.data } : {}) };
       const flaked = trialFlakedSchema.safeParse((event.payload as { flaked?: unknown }).flaked);
       if (flaked.success) state.flakes = [...(state.flakes ?? []).filter(flake => flake.mergeSha !== trial.mergeSha), { head: trial.head, mergeSha: trial.mergeSha, ...flaked.data }].slice(-mergeLedgerFlakeLimit);

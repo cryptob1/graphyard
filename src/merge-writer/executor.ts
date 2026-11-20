@@ -932,6 +932,21 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
   }
 }
 
+/** Land a completed trial on its exact base without occupying a trial slot. A moved base stays on the normal path. */
+export async function pushPassedTrial(ports: MergePorts, item: Work): Promise<boolean> {
+  const state = item.mergeLedger, head = item.candidate?.sha.toLowerCase();
+  if (!state || !head || state.head !== head || !state.mergeSha || !state.baseTip
+    || (state.state !== 'intent' && !keptTrialAheadOfReview(item.candidate, state))
+    || state.trial?.head !== head || state.trial.mergeSha !== state.mergeSha || state.trial.passedBaseTip !== state.baseTip) return false;
+  if (await ports.fetch() !== state.baseTip || await ports.hold?.(item)) return false;
+  // A kept review verdict has a refused intent; reopen it before recording its push.
+  if (state.state === 'refused') await ports.record(item, { kind: 'intent', head, baseTip: state.baseTip, mergeSha: state.mergeSha, risk: riskOf(item).risk, at: new Date(ports.now()).toISOString() });
+  if (await ports.push(state.mergeSha, state.baseTip) !== 'pushed') return false;
+  await ports.record(item, { kind: 'pushed', mergeSha: state.mergeSha, pushedAt: new Date(ports.now()).toISOString() });
+  await ports.record(item, { kind: 'reconciled', mergeSha: state.mergeSha, observedTip: await ports.fetch() });
+  return true;
+}
+
 /** What one queued head came to: its merge outcome, or the error that left it queued. */
 export type HeadResult = { work: Work; outcome: MergeOutcome } | { work: Work; error: unknown };
 
