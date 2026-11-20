@@ -17,7 +17,7 @@ import type { DaemonEffects } from '../../src/daemon/effects.js';
 import { emptyDaemonState, type DaemonState } from '../../src/daemon/state.js';
 import { deployOnce, deployRecordPath, type DeployWatchPorts } from '../../src/deploy-watch.js';
 import { Engine } from '../../src/engine.js';
-import { mergeCandidateHold, mergeOpeningHold, runMergeTrial, trialAheadOfReviewPrefix } from '../../src/merge-writer/executor.js';
+import { mergeCandidateHold, mergeOpeningHold, openFlakyItem, runMergeTrial, trialAheadOfReviewPrefix } from '../../src/merge-writer/executor.js';
 import { gitRunnerFor } from '../../src/merge-writer/local-observation.js';
 import { masterConfigSchema, type MasterConfig } from '../../src/master.js';
 import type { Principal, Work } from '../../src/model.js';
@@ -178,6 +178,8 @@ export function loopReads(where: Where, options: { gate: boolean }): MergeWriter
     try { return await reads.trial(mergeSha, ...rest); } finally { entry.endedAt = Date.now(); }
   };
   return { ...reads, trial,
+    flaky: async check => openFlakyItem(await where.snapshot(), check),
+    note: (item, text, key) => post(where.url, coordinatorToken, `work/${item.id}/request`, { type: 'note', reason: text }, key),
     createWork: (input, key) => {
       where.filings?.push({ key, gate: readGateRecord(gateRecordPath(where.checkout)) });
       return post(where.url, adminToken, 'work', input, key);
