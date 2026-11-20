@@ -6,7 +6,7 @@ export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, 
 import { randomUUID } from 'node:crypto';
 import { availableParallelism } from 'node:os';
 import { batchGateBusySlots, busyTrialSlots } from './trial-slots.js';
-import { trialSlotCount } from '../merge-writer/trial-load.js';
+import { trialHeatFault, trialSlotCount } from '../merge-writer/trial-load.js';
 import { trialAffordableFiles } from '../merge-writer/trial.js';
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master/profiles.js';
@@ -899,6 +899,12 @@ export async function mergeWriterStep(cycle: Cycle) {
             // GY-3328: the host lacks the trial image and could not provision it: no verdict on the head, one attention line until a trial runs again.
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
             storeAction(state, trialImageKey, { kind: 'attention', work: null, principal: null, state: 'failed', detail: trialImageMissingFault(error)!.slice(0, 1900), attempts: (state.actions[trialImageKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
+          } else if (trialHeatFault(error)) {
+            // GY-3535: heat slowed the trial, not the head: queued again with no rework; the third heat failure (the control plane then holds the head) raises one attention line.
+            const heatKey = `trial-heat:${itemKey}:${head}`, heated = (state.actions[heatKey]?.attempts ?? 0) + 1;
+            action('failed', `Merge of ${itemKey} head ${head}: trial slowed by heat, retried; no rework (${message(error)})`);
+            performed.push(storeAction(state, heatKey, heated < 3 ? { kind: 'merge', work: itemKey, principal: null, state: 'done', detail: `${itemKey}: trial slowed by heat, retried`, attempts: heated, epoch: null, cycle: state.cycle, at: at() }
+              : { kind: 'attention', work: itemKey, principal: null, state: 'failed', detail: `${itemKey}: three merge trials failed while the CPU was too hot; cool the host, then unblock ${itemKey}.`, attempts: heated, epoch: null, cycle: state.cycle, at: at() }));
           } else if (trialOverloadFault(error)) {
             action('failed', `Merge of ${itemKey} head ${head} stopped on ${message(error)}; no rework; the same head retries until three overloaded trials raise a blocker to the master`);
             const attentionKey = `trial-overload:${itemKey}:${head}`;

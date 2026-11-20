@@ -8,23 +8,23 @@ import { runTrial } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { shardHosts, shardRepository } from './helpers/shard-hosts.js';
 
-// GY-3536: a compute host's shard has no sandbox permission, so tests that import the trial runner
-// or the sandboxed benchmarks fail there. They stay on this machine.
+// GY-3536: tests that import the sandboxed benchmarks stay on this machine. GY-3549: a compute host's
+// shard may start nested sandboxes, so tests importing the trial runner may run there.
 
 const proof = 'unit:trial-sandbox-tests-stay-local';
 const repo = new URL('..', import.meta.url).pathname;
-const sandboxed = ['tests/trial-runtime.test.ts', 'tests/hard-math-negative.test.ts'];
+const sandboxed = ['tests/hard-math-negative.test.ts'];
 const reading = (name: string, cores: number): HostReading => ({ name, cores, busy: 0, steal: 0, celsius: 60, limit: 92, away: false });
 
-test(`${proof} — tests that import the trial runner or the benchmarks are local-only; other files are placed as before`, async () => {
+test(`${proof} — tests that import the benchmarks are local-only, the trial runner's may go remote; other files are placed as before`, async () => {
   for (const file of sandboxed) assert.equal(remoteableTestFile(await readFile(join(repo, file), 'utf8')), false, `${file} stays local`);
-  assert.equal(remoteableTestFile("import { mergeQueue } from '../src/merge-writer/queue.js';\n"), false);
+  assert.equal(remoteableTestFile(await readFile(join(repo, 'tests/trial-runtime.test.ts'), 'utf8')), true, 'tests/trial-runtime.test.ts may run on a host');
   assert.equal(remoteableTestFile("import { pinnedPython } from '../benchmarks/hard-math/python.js';\n"), false);
   assert.equal(remoteableTestFile('test("adds numbers", () => equal(1 + 1, 2))\n'), true);
   assert.equal(remoteableTestFile('import { docker } from "docker"\n'), false);
 });
 
-test(`${proof} — a trial with a ready compute host runs the two sandbox files on this machine and reports them passing`, { timeout: 120_000 }, async () => {
+test(`${proof} — a trial with a ready compute host runs the benchmark file on this machine and reports them passing`, { timeout: 120_000 }, async () => {
   const image = 'graphyard-trial:sandbox-local-fixture';
   const hosts = await shardHosts('sandbox-local-trial', ['box'], { [image]: `sha256:${'35a6'.repeat(16)}` });
   const pure = Array.from({ length: 4 }, (_, index) => `tests/plain-${index}.test.ts`);

@@ -1,4 +1,4 @@
-import { trialCpuMonitor } from './trial-cpu.js';
+import { trialCpuMonitor, trialOverloadPrefix } from './trial-cpu.js';
 // Concern: GY-3189 — what a trial container start waits for: one machine-wide count of running
 // containers, the hottest CPU sensor and the disk floor. Merge trials, the batch gate and workers'
 // verification runs share the launcher (trial-container.ts); trials also divide their CPU lanes.
@@ -76,6 +76,18 @@ export async function trialLoad(root: string, who: keyof typeof trialStartOrder,
 export const trialSlots = (home = homedir()) => join(home, '.gy', 'trial-slots');
 
 const launcherLine = 'graphyard trial container: ', waitingLine = `${launcherLine}waiting`, startingLine = `${launcherLine}starting`;
+/** GY-3535: the line a launcher prints when a heat wait ends, followed by its seconds. */
+const heatLine = `${waitingLine}: a CPU sensor held this start `;
+/** GY-3535: the seconds every container start in `output` waited for the CPU to cool, summed. */
+export const heatWaitSeconds = (output: string) => [...output.matchAll(new RegExp(`${heatLine}(\\d+)s`, 'g'))].reduce((sum, match) => sum + Number(match[1]), 0);
+/** GY-3535: a step that failed or timed out after its containers waited over a minute on heat: the host's overload, so the same head is trialled again, never reworked. */
+export class TrialHeatError extends Error {
+  constructor(step: string, seconds: number) {
+    super(`${trialOverloadPrefix} trial slowed by heat: ${step} failed after its containers waited ${seconds}s for the CPU to cool`);
+    this.name = 'TrialHeatError';
+  }
+}
+export const trialHeatFault = (error: unknown) => error instanceof Error && error.message.startsWith(`${trialOverloadPrefix} trial slowed by heat`);
 /** The words a launcher that gave up waiting ends with: `Trial-host fault: …`, the trial's own host-fault prefix. */
 const faultLine = `${launcherLine}Trial-host fault: `;
 /** The launcher's Python: `admit()` returns once a container may start, holding its slot in the fd it returns. */
@@ -170,9 +182,17 @@ def admit():
     queued = None
     said = None
     began = time.time()
+    hot_since = None
     try:
         while True:
             why, floor = pressure()
+            # GY-3535: a heat wait says how long it held the start when it ends and every 30s, so a trial killed mid-wait can still tell heat from the head.
+            hot = why is not None and why.startswith('a CPU sensor')
+            if hot and hot_since is None:
+                hot_since = time.time()
+            elif hot_since is not None and (not hot or time.time() - hot_since >= 30):
+                print('${heatLine}' + str(int(time.time() - hot_since)) + 's', file=sys.stderr, flush=True)
+                hot_since = time.time() if hot else None
             slot = None if why else take_slot()
             if floor and why != said:
                 with open(note, 'w') as file:

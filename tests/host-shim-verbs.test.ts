@@ -12,7 +12,7 @@ import { dockerCreates, shardHosts, shardRepository, type ShardHostsFixture } fr
 // GY-3412 AC-6: Graphyard uses a host's compute and can reach nothing else. This machine's key runs only
 // graphyard-host-shim as the unprivileged gy-compute user; the shim answers its fixed verbs with
 // validated arguments and refuses everything else; a shard container runs without the network, under
-// CPU, memory and process limits, with Docker's default seccomp and system paths and only its run directory.
+// CPU, memory and process limits and only its run directory; seccomp and system paths are unconfined for nested sandboxes (GY-3549).
 
 const proof = 'integration:host-shim-verbs';
 const image = 'graphyard-trial:shim-fixture';
@@ -49,7 +49,7 @@ test(`${proof} — a plain shell command, another user's files, docker run with 
   assert.match(shim('probe').stdout, /^cores \d+$/m);
 });
 
-test(`${proof} — a shard runs through the trial launcher in its run directory alone, with no network, CPU, memory and process limits, Docker's default seccomp and system paths, and reaches no private address, the tailnet or the host`, { timeout: 60_000 }, async () => {
+test(`${proof} — a shard runs through the trial launcher in its run directory alone, with no network, CPU, memory and process limits, and reaches no private address, the tailnet or the host`, { timeout: 60_000 }, async () => {
   const listening: Server = await new Promise(resolve => { const server = createServer(socket => socket.end('host answered\n')).listen(0, '127.0.0.1', () => resolve(server)); });
   const port = (listening.address() as { port: number }).port;
   const { root, sha } = await shardRepository('host-shim-verbs-repo', ['tests/a.test.ts']);
@@ -71,7 +71,8 @@ socket.on('error', error => done(error.code)); socket.on('timeout', () => done('
     assert.match(words, /--cpus=\d+ /);
     assert.ok(Number(/--cpus=(\d+)/.exec(words)![1]) <= Number(/^cores (\d+)$/m.exec(shim('probe').stdout)![1]), 'CPUs are clamped to the host\'s cores');
     assert.match(words, /--memory=\d+m /);
-    assert.doesNotMatch(words, /unconfined|docker\.sock,|privileged|--network=(?!none)/, 'never seccomp, system paths or AppArmor unconfined, never the Docker socket or a network');
+    assert.doesNotMatch(words, /apparmor=unconfined|docker\.sock,|privileged|--network=(?!none)/, 'never AppArmor unconfined, never the Docker socket or a network');
+    for (const flag of ['--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined']) assert.ok(words.includes(flag), `GY-3549 nested sandboxes: ${flag}`);
     assert.match(words, new RegExp(`--host unix:///run/user/${process.getuid!()}/docker\\.sock`), 'the user\'s rootless Docker');
     const mounts = create!.filter((_, index) => create![index - 1] === '--mount');
     assert.equal(mounts.length, 1, words);

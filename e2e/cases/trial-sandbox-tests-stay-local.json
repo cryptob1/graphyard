@@ -1,13 +1,13 @@
 {
   "id": "trial-sandbox-tests-stay-local",
-  "title": "A trial with a ready compute host keeps tests that need the sandbox on this machine and reports them passing",
-  "description": "GY-3536: tests/trial-runtime.test.ts and tests/hard-math-negative.test.ts import the trial runner or the sandboxed benchmarks; on a compute host's shard there is no sandbox permission and they fail. A merge trial with a ready host runs those two files here, where they pass, while plain files still go to the host.",
+  "title": "A trial with a ready compute host keeps the benchmark tests on this machine and reports them passing",
+  "description": "GY-3536: tests/hard-math-negative.test.ts imports the sandboxed benchmarks and stays local. A merge trial with a ready host runs it here, where it passes, while plain files still go to the host. Since GY-3549 tests importing the trial runner may run on a host.",
   "tags": ["trial"],
   "target": "any",
   "required": false,
   "steps": [{
     "kind": "command",
-    "name": "Run a trial with a ready compute host and the two sandbox test files",
+    "name": "Run a trial with a ready compute host and the benchmark test file",
     "run": "node --import tsx tests/helpers/run-tests.ts tests/trial-sandbox-tests-stay-local.test.ts",
     "timeoutSeconds": 600
   }]
