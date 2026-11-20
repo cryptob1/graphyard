@@ -143,6 +143,8 @@ export function UsageBars({ plan }: { plan: FleetPlan | null }) {
  * ineligible reason as one short phrase (GY-3482) — `raw` keeps the full text for the cell's title.
  */
 export function whyText(account: FleetAccountView, status: AccountStatus, fleet: Pick<FleetView, 'sessions'>, now: number): { text: string; raw: string } {
+  // GY-3516: a probe that read another account's limit is a fault shown on the account, whatever its status.
+  if (account.fault) return { text: 'Live check answered with another account\'s limit', raw: account.fault };
   if (status.chip === 'idle' || (status.chip === 'spent' && status.until && account.quota === 'exhausted')) return { text: '', raw: '' };
   if (status.chip === 'working') {
     const full = account.maxSessions !== null && account.liveSessions.length >= account.maxSessions;
@@ -193,7 +195,7 @@ export function AccountsTable({ fleet, now }: { fleet: FleetView; now: number })
     <tr key={account.name} data-account-row={account.name} data-status={status.chip} data-plan={plan?.name} hidden={hidden}>
       <th scope="row" data-label="Account">{account.name}</th>
       <td data-label="Status"><StatusChip status={status}/></td>
-      {(() => { const why = whyText(account, status, fleet, now); return <td data-label="Why" className="why" title={why.raw || undefined}>{why.text || <span className="muted">—</span>}</td>; })()}
+      {(() => { const why = whyText(account, status, fleet, now); return <td data-label="Why" className={account.fault ? 'why amber' : 'why'} data-fault={account.fault ? '' : undefined} title={why.raw || undefined}>{why.text || <span className="muted">—</span>}</td>; })()}
       <td data-label="Back">{status.until ? <time dateTime={status.until} title={status.until}>{localTime(status.until)} <small>{countdown(status.until, now)}</small></time> : '—'}</td>
       <td data-label="Usage">{shared ? <span className="muted" title={`shared with ${plan!.name}, shown above`}>plan</span> : <UsageBars plan={plan}/>}</td>
       <td data-label="Roles">{account.roles.map(entry => entry.role).join(', ') || '—'}</td>

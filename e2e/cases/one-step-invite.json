@@ -1,0 +1,16 @@
+{
+  "id": "one-step-invite",
+  "title": "Invite gives one link that signs a person in once from any device",
+  "description": "The invite check GY-3486 bound, now covering the one-link invite flow that replaced the Tailscale-login invite: it runs the same check as one-link-invite. Invite returns exactly one link on the Funnel address; opening it signs the person in once and a second open is refused; a teammate's session is short and renews with use; revoking a maintainer closes their Master page at once; and a command typed into the master session stays confined.",
+  "tags": ["team-access", "dashboard", "authentication"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "One-link invite, Funnel, revoke, typed list and master confinement",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/one-link-invite.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

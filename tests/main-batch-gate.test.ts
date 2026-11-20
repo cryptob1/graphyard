@@ -30,7 +30,7 @@ function item(key: string, proofs: string[]): Work {
 }
 
 /** An origin whose main holds a verified base and three merges (GY-1, GY-2, GY-3), and the coordinator checkout. */
-async function fixture(label: string, broken: string | null = null) {
+async function fixture(label: string, broken: string | null = null, deleteEarlierCase = false) {
   const base = await temporaryDirectory(label);
   const origin = join(base, 'origin.git'), pusher = join(base, 'pusher'), coordinator = join(base, 'coordinator');
   git(base, 'init', '-q', '--bare', '-b', 'main', origin);
@@ -47,6 +47,7 @@ async function fixture(label: string, broken: string | null = null) {
   for (const n of [1, 2, 3]) {
     git(pusher, 'checkout', '-q', '-b', `item-${n}`);
     await write({ [`src/f${n}.ts`]: `GY-${n}` === broken ? 'broken\n' : 'ok\n' });
+    if (deleteEarlierCase && n === 3) git(pusher, 'rm', 'e2e/cases/case-1.json');
     git(pusher, 'commit', '-q', '-m', `change ${n}`);
     git(pusher, 'checkout', '-q', 'main');
     git(pusher, 'merge', '-q', '--no-ff', '-m', `Merge GY-${n}: change ${n}`, `item-${n}`);
@@ -142,6 +143,19 @@ test('integration:main-batch-gate — at rollout the served commit is the first 
   assert.equal(await deployOnce(file, ports, () => {}, 'owner/other'), 'deployed', 'a record gating another repository never pins this one');
 });
 
+test('e2e:gate-skips-deleted-bound-cases — a later merge deletes an earlier binding and the batch verifies', async () => {
+  const { coordinator, verified, tip, work } = await fixture('gate-deleted-bound-case', null, true);
+  const loop = reads(coordinator);
+  const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
+  const record = bootstrapGate(repository, verified);
+  const outcome = await runGate(batchGatePorts({ ...loop.value, git: loop.value.git! }, work), record);
+  assert.equal(outcome.outcome, 'verified');
+  assert.equal(record.verified, tip);
+  assert.deepEqual(loop.trials[0]!.proofs.sort(), ['e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:graphyard-feature-map', 'e2e:smoke']);
+  assert.equal(record.notes!.length, 1);
+  assert.match(record.notes![0]!, /case-1.*GY-1/);
+});
+
 test('integration:batch-gate-survives-restart — a batch in flight when the loop restarts is adopted and finished by the next loop on the same candidate tip, without a new run of its finished steps or a fetch, and a merge that lands meanwhile is verified by the following batch', async () => {
   const { base, coordinator, verified, tip, work } = await fixture('batch-gate-restart', 'GY-2');
   // Rollout: the deploy record's commit is the first verified one, so the first gate cuts verified..tip.
@@ -222,7 +236,7 @@ function gatePorts(landings: ServeLanding[], fails: (commit: string, check: stri
     fetch: async () => reverted.length ? `${'f'.repeat(39)}${reverted.length}` : tip,
     landings: async () => landings,
     files: async () => ['src/a.ts'],
-    catalog: async () => [],
+    catalog: async () => ['create-work-item', 'smoke', ...landings.flatMap(landing => landing.item!.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))))],
     core: async () => ['create-work-item', 'smoke'],
     run: async (commit, checks) => {
       runs.push({ commit, checks: [...checks] });

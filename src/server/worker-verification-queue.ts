@@ -24,13 +24,22 @@ function queue(services: Services) {
   if (!pending) { pending = new Map(); queues.set(services, pending); }
   return pending;
 }
+/** How long a request waits for its verification; a field so a test can shorten it. */
+export const verificationQueue = { waitMs: workerVerificationTimeoutMs };
+/** GY-3537: the request's time ran out while its verification had not started: no host took it, or its last line is a wait for a slot. */
+export class VerificationStillWaiting extends Refusal {}
+const waitLine = /^waiting\b|^graphyard: .*\bwait(s|ing)\b/;
+const stillWaiting = (pending: Pending) => !pending.executor || waitLine.test(pending.lines.at(-1) ?? '');
 export async function dispatchWorkerVerification<Result extends WorkerVerificationResult | WorkerCheckResult = WorkerVerificationResult>(services: Services, job: Omit<WorkerVerificationJob, 'id'>): Promise<Result> {
   const pending = queue(services), id = randomUUID();
   let timer: NodeJS.Timeout;
   try {
     return await new Promise<Result>((resolve, reject) => {
-      timer = setTimeout(() => reject(new Refusal('Host worker verification timed out', 504)), workerVerificationTimeoutMs);
-      pending.set(id, { job: { ...job, id }, requestedAt: Date.now(), lines: [], resolve: resolve as Pending['resolve'], reject });
+      const entry: Pending = { job: { ...job, id }, requestedAt: Date.now(), lines: [], resolve: resolve as Pending['resolve'], reject };
+      timer = setTimeout(() => reject(stillWaiting(entry)
+        ? new VerificationStillWaiting('Host worker verification is still waiting for a slot', 504)
+        : new Refusal('Host worker verification timed out', 504)), verificationQueue.waitMs);
+      pending.set(id, entry);
     });
   } finally { clearTimeout(timer!); pending.delete(id); }
 }

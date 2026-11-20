@@ -6,7 +6,7 @@ export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, 
 import { randomUUID } from 'node:crypto';
 import { availableParallelism } from 'node:os';
 import { batchGateBusySlots, busyTrialSlots } from './trial-slots.js';
-import { trialSlotCount } from '../merge-writer/trial-load.js';
+import { trialHeatFault, trialSlotCount } from '../merge-writer/trial-load.js';
 import { trialAffordableFiles } from '../merge-writer/trial.js';
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master/profiles.js';
@@ -27,7 +27,7 @@ import { slotsDirectoryVariable, testMergeLabel, waitStep, withHeavyJob } from '
 import { adoptTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
-import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterionProofs, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterionProofs, pushPassedTrial, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { cpuPressureHeld, trialCapNow } from './cpu-pressure.js';
@@ -899,6 +899,12 @@ export async function mergeWriterStep(cycle: Cycle) {
             // GY-3328: the host lacks the trial image and could not provision it: no verdict on the head, one attention line until a trial runs again.
             action('failed', `Merge of ${itemKey} head ${head} stopped on a trial-host fault (${message(error)}); the head is not refused to rework and stays queued`);
             storeAction(state, trialImageKey, { kind: 'attention', work: null, principal: null, state: 'failed', detail: trialImageMissingFault(error)!.slice(0, 1900), attempts: (state.actions[trialImageKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
+          } else if (trialHeatFault(error)) {
+            // GY-3535: heat slowed the trial, not the head: queued again with no rework; the third heat failure (the control plane then holds the head) raises one attention line.
+            const heatKey = `trial-heat:${itemKey}:${head}`, heated = (state.actions[heatKey]?.attempts ?? 0) + 1;
+            action('failed', `Merge of ${itemKey} head ${head}: trial slowed by heat, retried; no rework (${message(error)})`);
+            performed.push(storeAction(state, heatKey, heated < 3 ? { kind: 'merge', work: itemKey, principal: null, state: 'done', detail: `${itemKey}: trial slowed by heat, retried`, attempts: heated, epoch: null, cycle: state.cycle, at: at() }
+              : { kind: 'attention', work: itemKey, principal: null, state: 'failed', detail: `${itemKey}: three merge trials failed while the CPU was too hot; cool the host, then unblock ${itemKey}.`, attempts: heated, epoch: null, cycle: state.cycle, at: at() }));
           } else if (trialOverloadFault(error)) {
             action('failed', `Merge of ${itemKey} head ${head} stopped on ${message(error)}; no rework; the same head retries until three overloaded trials raise a blocker to the master`);
             const attentionKey = `trial-overload:${itemKey}:${head}`;
@@ -1017,6 +1023,22 @@ export async function mergeWriterStep(cycle: Cycle) {
   if (state.cpuPressure) state.cpuPressure.trialCap = { now: trialCapNow(state, fullCap), full: fullCap };
   const parallel = Math.min(trialCapNow(state, fullCap), trialCapNow(state, hostCap) - batchGateBusySlots(state));
   const busy = new Set([...live].flatMap(flight => flight.keys ?? [flight.key]));
+  // Pushing a completed trial takes no trial slot, even while every slot is occupied.
+  if (![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.inFlight?.revert && !writer.unconfirmed?.length && !replayed) {
+    const ledger = snapshotLedger(snapshot.work);
+    for (const item of snapshot.work) {
+      if (busy.has(item.key) || settledNow.has(item.key) || !awaitsMerge(item, ledger, now())) continue;
+      const record = attemptRecorder(writer, reads.record, randomUUID(), at);
+      try {
+        if (!await pushPassedTrial({ ...reads, record }, item)) continue;
+      } catch (error) { if (writer.unconfirmed?.length) await effects.persist(state); throw error; }
+      writer.lastMergeAt = at();
+      writer.queue = writer.queue.filter(entry => entry.key !== item.key);
+      performed.push(storeAction(state, mergeWriterActionKey(item.key, item.candidate!.sha), { kind: 'merge', work: item.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
+        detail: `Merged ${item.key} on its completed trial` }));
+      changed = true; delivered = true;
+    }
+  }
   // GY-3437: at the launch limit no new trial starts; the cap still reads half, so status shows what returns once it cools.
   if (busy.size < parallel && !cpuPressureHeld(state) && ![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.unconfirmed?.length
     && !writer.inFlight?.revert && !replayed && !delivered) {
