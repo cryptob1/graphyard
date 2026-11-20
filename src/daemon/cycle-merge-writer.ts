@@ -24,10 +24,10 @@ import { itemPreviewStep, type ItemPreviewPorts, type LivePreview } from '../mer
 import type { PreviewCaseRun } from '../merge-writer/served-previews.js';
 import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '../merge-writer/serve-revert.js';
 import { slotsDirectoryVariable, testMergeLabel, waitStep, withHeavyJob } from '../master/verification-slots.js';
-import { adoptTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
+import { adoptTrialRun, finishedTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
 import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
-import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterionProofs, pushPassedTrial, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterionProofs, pushPassedTrial, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import { cpuPressureHeld, trialCapNow } from './cpu-pressure.js';
@@ -686,6 +686,17 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
 /** A full 40-hex sha, the only serve record this step acts on. */
 const fullServeSha = (sha: string) => /^[0-9a-f]{40}$/i.test(sha);
 
+/** GY-3564: every detached trial run a flight awaits, by directory, with how to settle it from its files when its completion is lost. */
+const awaitedRuns = new WeakMap<DaemonState, Map<string, (finished: { run: MergeTrialRun } | { error: Error }) => void>>();
+function awaitRun(state: DaemonState, handle: TrialRunHandle, ...watch: Parameters<TrialRunHandle['trial']>): Promise<MergeTrialRun> {
+  let runs = awaitedRuns.get(state);
+  if (!runs) awaitedRuns.set(state, runs = new Map());
+  let collect!: (finished: { run: MergeTrialRun } | { error: Error }) => void;
+  const collected = new Promise<MergeTrialRun>((resolve, reject) => { collect = finished => { handle.detach(); if ('run' in finished) resolve(finished.run); else reject(finished.error); }; });
+  runs.set(handle.directory, collect);
+  return Promise.race([handle.trial(...watch), collected]).finally(() => runs.delete(handle.directory));
+}
+
 /**
  * GY-3159: the merge flights' trial port. A trial whose reads launch detached runs launches one and
  * persists its directory on the head's in-flight entry — before its verdict can land — so the
@@ -700,7 +711,7 @@ function mergeFlightTrials(reads: MergeWriterReads, state: DaemonState, persist:
     share = Math.max(1, busyTrialSlots(state));
     const handle = adopted?.get(item.key);
     if (handle) {
-      if (handle.mergeSha === mergeSha) return handle.trial(onStep, onTiming, signal);
+      if (handle.mergeSha === mergeSha) return awaitRun(state, handle, onStep, onTiming, signal);
       handle.cancel(`the base tip moved under ${item.key}'s landing, so the adopted trial of ${handle.mergeSha.slice(0, 12)} no longer names its merge commit`);
     }
     if (!launch) return reads.trial(mergeSha, files, item, baseTip, onStep, onTiming, heads, share, signal, timeoutMs);
@@ -711,7 +722,7 @@ function mergeFlightTrials(reads: MergeWriterReads, state: DaemonState, persist:
     // The run's directory is persisted on the in-flight entry before its verdict can land, so a restart after it adopts the run.
     const entry = state.mergeWriter.inFlights?.find(candidate => candidate.key === item.key);
     if (entry) { entry.run = { directory: launched.directory, mergeSha }; await persist().catch(() => {}); }
-    return launched.trial(onStep, onTiming, signal);
+    return awaitRun(state, launched, onStep, onTiming, signal);
   }) };
 }
 
@@ -865,6 +876,11 @@ export async function mergeWriterStep(cycle: Cycle) {
   for (const flight of live) if (!flight.settled) for (const running of flight.trials ?? []) {
     const stale = running.heads.map(({ key, head }) => carriedHeadStale(snapshot.work, key, head)).find(Boolean);
     if (stale && !running.controller.signal.aborted) running.controller.abort(new TrialCancelledError(stale));
+  }
+  // GY-3564: a trial whose run has finished settles from its files, even when its completion never reached the flight.
+  for (const [directory, collect] of awaitedRuns.get(state) ?? []) {
+    const finished = await finishedTrialRun(directory);
+    if (finished) collect(finished);
   }
   // GY-3182: each flight settles on its own, while the others run on.
   const settled = [...live].filter(flight => flight.settled);
