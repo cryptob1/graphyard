@@ -12,9 +12,11 @@ let workers: HeadlessWorkers;
 before(async () => { mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T12:00:00Z') }); workers = await headlessWorkers('opencode-worker-quota-exit'); });
 after(async () => { await workers.stop(); });
 
-const body = JSON.stringify({ error: { code: '1310', message: 'Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15' } });
+const reset = new Date(Math.floor(Date.now() / 1000) * 1000 + 86_400_000).toISOString();
+const wall = new Date(Date.parse(reset) + 8 * 3_600_000).toISOString().slice(0, 19).replace('T', ' ');
+const body = JSON.stringify({ error: { code: '1310', message: `Weekly/Monthly Limit Exhausted. Your limit will reset at ${wall}` } });
 const event = JSON.stringify({ type: 'error', timestamp: 1763300000000, sessionID: 'ses_1a2b3c4d5e6feEZJI8NT7US4xBq',
-  error: { type: 'provider.quota', message: 'Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15', status: 429, response: { body } } });
+  error: { type: 'provider.quota', message: `Weekly/Monthly Limit Exhausted. Your limit will reset at ${wall}`, status: 429, response: { body } } });
 
 test('integration:opencode-worker-quota-exit — the Z.AI quota error event holds the account until its reset and the item runs on another account', async () => {
   await workers.configure([{ name: 'opencode-spent', kind: 'opencode', printed: event }, { name: 'next-account', kind: 'codex', wait: true }]);
@@ -25,7 +27,7 @@ test('integration:opencode-worker-quota-exit — the Z.AI quota error event hold
   const item = await workers.stored(work.id);
   const spent = item.capacity?.exhaustions?.find(entry => entry.epoch === 1);
   assert.equal(spent?.account, 'opencode-spent');
-  assert.equal(spent?.resetsAt, '2026-11-20T04:49:15.000Z', 'held until the reset Z.AI named, in Beijing time');
+  assert.equal(spent?.resetsAt, reset, 'held until the reset Z.AI named, in Beijing time');
   assert.equal((await workers.registry.snapshot(workers.hostId)).accounts.find(entry => entry.name === 'opencode-spent')?.eligible, false, 'the spent account is held');
   assert.ok(!item.sessions!.some(session => /exited at once/.test(session.outcome ?? '')), 'no launch failure is recorded');
   await writeFile(join(workers.homes.get('next-account')!, 'release'), '');
