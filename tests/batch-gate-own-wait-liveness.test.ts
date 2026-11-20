@@ -202,8 +202,11 @@ test('integration:batch-gate-own-wait-liveness — a batch adopted again before 
     run: async () => { throw new Error('the trial host is down'); }, revert: async () => { throw new Error('unused'); }, file: async () => ({ item: null }) };
   const record = bootstrapGate(repository, 'a'.repeat(40));
   record.inFlight = { tip: 'b'.repeat(40), startedAt: iso(now - 20 * minute), files: ['src/a.ts'], checks: ['build'], results: {}, seenAt: iso(now - 10 * minute) };
-  for (let cycle = 0; cycle < 3; cycle++) await assert.rejects(runGate(ports, record), /trial host is down/);
-  assert.equal(record.inFlight!.waitedMs, 10 * minute, 'three adoptions count the ten minutes once');
+  // Each loop stops mid-run, so the next adopts the batch as it was last checkpointed.
+  let saved = record.inFlight;
+  ports.checkpoint = async () => { saved = record.inFlight; };
+  for (let cycle = 0; cycle < 3; cycle++) { record.inFlight = saved; await assert.rejects(runGate(ports, record), /trial host is down/); }
+  assert.equal(saved!.waitedMs, 10 * minute, 'three adoptions count the ten minutes once');
 });
 
 test('integration:batch-gate-own-wait-liveness — a waiting container start names its owner, so a gate reads its own start\'s wait and no other\'s', { timeout: 60_000 }, async () => {

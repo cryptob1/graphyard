@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { bootstrapGate, catalogBudgetMs, catalogFits, diagnosticsIntervalMs, gateCauses, gateHoldAttention, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, timeoutHold, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
 import { appendReleaseNote, latestReleaseNote, readReleaseNotes, releaseNote, releaseNotesPath } from '../src/release-notes.js';
 import { RefusedResponse } from '../src/model/refusal.js';
-import { batchGateStep } from '../src/daemon/cycle-batch-gate.js';
+import { batchGateStep, noteBatchGateStopping } from '../src/daemon/cycle-batch-gate.js';
 import type { MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { deployOnce, deployRecordPath, type DeployWatchPorts } from '../src/deploy-watch.js';
@@ -176,10 +176,11 @@ test('integration:batch-gate-survives-restart — a batch in flight when the loo
     if (commit !== tip) return trial(commit, files, trialItem); // the diagnostics run on the verified commit
     onTip.push({ proofs });
     if (loops === 1 && proofs.length > 1) return trial(commit, files, trialItem); // the cut's one whole run
-    if (loops === 1) { await diagnostics; throw new Error('the loop restarted mid-gate'); } // the failing check's re-run
+    if (loops === 1) { await diagnostics; noteBatchGateStopping(firstCycle.state); throw new Error('the loop restarted mid-gate'); } // the failing check's re-run, killed by the stopping loop
     return trial(commit, files, { ...trialItem, criteria: [] }); // the next loop: the re-run passes, a flake
   };
-  const first = await batchGateStep(cycleWith(loop.value, work));
+  const firstCycle = cycleWith(loop.value, work);
+  const first = await batchGateStep(firstCycle);
   diagnostics = first!.diagnostics;
   await first!.gate;
   assert.equal(fetches, 1, 'the first loop fetched the tip it cut its batch on');
