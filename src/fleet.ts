@@ -1,11 +1,11 @@
-import { detectLoggedOut, runtimeLimitNotices, runtimeResetTime } from './master/runtime-prompt.js';
+import { detectLoggedOut, runtimeResetTime } from './master/runtime-prompt.js';
 import { foldObservations } from './model/registry-sessions.js';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { access, readdir, realpath, stat } from 'node:fs/promises';
 import { launchRecipe } from './harness.js';
 import { isMiseShim, onSearchPath, realRuntimeBinary } from './runtime-binary.js';
-import { runtimeAdapter, cursorLoginFile, accountHomeEnvironment } from './master/runtimes.js';
+import { runtimeAdapter, runtimeAdapters, providerUsageErrors, cursorLoginFile, accountHomeEnvironment } from './master/runtimes.js';
 import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -180,6 +180,7 @@ async function readAccount(account: FleetAccount, runtime: FleetRuntime, probe: 
   return { health: null, quota: { loggedIn, state: 'unknown', usage: [], resetsAt: null, reason: loggedIn ? null : `${account.name} is not logged in: ${file} does not exist${runtime.launch.login ? `; log in with: ${runtime.launch.login.replaceAll('{home}', home)}` : ''}` } };
 }
 
+const liveLimitNotices = () => [...providerUsageErrors, ...runtimeAdapters().flatMap(adapter => adapter.limitNotices ?? [])];
 /** One request per home in flight, shared across roles and registry revisions. */
 const checksInFlight = new Map<string, Promise<QuotaObservation>>();
 /** A held, broken or available account is checked live again within this interval, and a hold at its stated reset if sooner. */
@@ -207,7 +208,8 @@ export async function checkAccountLive(account: FleetAccount, runtime: FleetRunt
     try { result = await (probe.smoke ?? (target => smokeRegistryAccount(target, { timeoutMs: probe.smokeTimeoutMs })))(target); }
     catch (error) { result = { ok: false, error: String(error) }; }
     const reason = result.ok ? null : (result.error || 'The live request failed').replace(/[\u0000-\u001f\u007f\s]+/g, ' ').trim().slice(0, 500);
-    const limited = !!reason && runtimeLimitNotices(runtime.launch.kind).some(notice => notice.test(reason));
+    // The answer to a one-word prompt is the provider's alone, never an agent's prose, so any runtime's limit notice reads as one.
+    const limited = !!reason && liveLimitNotices().some(notice => notice.test(reason));
     const stated = limited ? runtimeResetTime(reason, runtime.launch.kind, now) : null;
     const reset = stated && Date.parse(stated) > now ? stated : null;
     const since = new Date(now).toISOString();

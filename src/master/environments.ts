@@ -10,7 +10,7 @@ import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
-import { type FleetClient, type FleetLaunchAccount, type FleetProbe, accountCheckIntervalMs, checkAccountLive, observeAccount, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
+import { type FleetClient, type FleetLaunchAccount, type FleetProbe, accountCheckIntervalMs, checkAccountLive, nextLiveCheck, observeAccount, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { externalCredential, loadStoredMasterConfig } from './config.js';
 import { atomicPrivateText, atomicPrivateWrite, readCredentialFile } from '../private-file.js';
@@ -233,7 +233,7 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
     ? (await observeAccount(recentPass ? account : { ...account, quota: { ...account.quota, state: 'exhausted' } }, runtime, { smoke: report?.smoke, now: () => now, quota: false, opencodeAuth: null, opencodeModels: null }, document!.accounts, model ?? undefined)).quota
     : await checkAccountLive(account, runtime, { smoke: report?.smoke, now: () => now }, model);
   await registry.observe({ host: config.hostId, observations: [{ account: environment, quota }] });
-  return { ...observed, available: quota.state === 'available', at: quota.since!, reason: quota.reason ?? 'The live request passed', resetsAt: quota.session === 'guessed' ? null : quota.resetsAt, until: quota.resetsAt ?? new Date(now).toISOString() };
+  return { ...observed, available: quota.state === 'available', at: quota.since!, reason: quota.reason ?? 'The live request passed', resetsAt: quota.session === 'guessed' ? null : quota.resetsAt, until: quota.state === 'broken' ? new Date(nextLiveCheck(quota)).toISOString() : quota.resetsAt ?? new Date(now).toISOString() };
 }
 /** Current exhaustion is read from the registry, never from the executor's environment log. */
 export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, now = Date.now(), registry?: Pick<FleetClient, 'document'>): Promise<Record<string, ObservedExhaustion>> {
