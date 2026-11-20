@@ -1,4 +1,4 @@
-import { after, before, test } from 'node:test';
+import { after, before, mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -7,7 +7,8 @@ import { headlessWorkers, type HeadlessWorkers } from './helpers/headless-worker
 // GY-3427: an OpenCode worker on a spent Z.AI plan exits at once printing its JSON error event, the
 // provider.quota 429 (code 1310) nested in it; GY-3420 lost two epochs because the account stayed eligible.
 let workers: HeadlessWorkers;
-before(async () => { workers = await headlessWorkers('opencode-worker-quota-exit'); });
+// The reset Z.AI names is a date: the clock is fixed before it, so the hold holds at any hour (GY-3561).
+before(async () => { mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-19T12:00:00Z') }); workers = await headlessWorkers('opencode-worker-quota-exit'); });
 after(async () => { await workers.stop(); });
 
 const body = JSON.stringify({ error: { code: '1310', message: 'Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15' } });

@@ -1,7 +1,7 @@
 {
   "id": "headless-claude-usage-limit",
   "title": "A headless claude or opencode session out of usage hands off to the next account",
-  "description": "Real dispatch with stub runtimes that exit at once on their provider's limit: claude's headless result \"Switch to another model, or manage usage credits at https://claude.ai/settings/usage\", and OpenCode's Z.AI error {\"type\":\"provider.quota\",\"message\":\"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15\",\"status\":429} from a worker (bare, and nested in its JSON error event with the 429 code 1310 body, as the worker run prints it) and a reviewer. Each account is held (the Z.AI one until 2026-11-20 04:49:15 UTC, the notice's Beijing time), the work starts on another account, and no launch failure is recorded.",
+  "description": "Real dispatch with stub runtimes that exit at once on their provider's limit: claude's headless result \"Switch to another model, or manage usage credits at https://claude.ai/settings/usage\", and OpenCode's Z.AI error {\"type\":\"provider.quota\",\"message\":\"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15\",\"status\":429} from a worker (bare, and nested in its JSON error event with the 429 code 1310 body, as the worker run prints it) and a reviewer. With the test clock fixed at 2026-11-19 12:00 UTC, each account is held (the Z.AI one until 2026-11-20 04:49:15 UTC, the notice's Beijing time), the work starts on another account, and no launch failure is recorded.",
   "tags": ["dispatch", "workers"],
   "target": "any",
   "required": true,
