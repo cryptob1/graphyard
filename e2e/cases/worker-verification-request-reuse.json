@@ -1,0 +1,11 @@
+{
+  "id": "worker-verification-request-reuse",
+  "title": "A repeated complete waits on the one host verification already queued for it",
+  "description": "GY-3525: a worker's complete is interrupted while host admission waits and is run again for the same head and lease epoch. Against a real control plane, isolated Postgres and the host pump, only one verification is queued and executed; the repeat receives its result and submits through the unchanged review and acceptance gates.",
+  "tags": ["verification", "complete"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "repeated and interrupted complete requests share one host verification", "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:worker-verification-request-reuse tests/worker-verification-request-reuse.test.ts", "timeoutSeconds": 300 }
+  ]
+}

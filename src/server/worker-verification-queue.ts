@@ -16,6 +16,8 @@ interface Pending {
   job: WorkerVerificationJob; executor?: string; requestedAt: number;
   /** The host's launcher lines so far (GY-3332): what the waiting worker's `complete` prints. */
   lines: string[];
+  /** GY-3525: what every caller asking for this same verification awaits. */
+  identity: string; result: Promise<WorkerVerificationResult | WorkerCheckResult>;
   resolve: (result: WorkerVerificationResult | WorkerCheckResult) => void; reject: (error: Error) => void;
 }
 const queues = new WeakMap<Services, Map<string, Pending>>();
@@ -30,18 +32,21 @@ export const verificationQueue = { waitMs: workerVerificationTimeoutMs };
 export class VerificationStillWaiting extends Refusal {}
 const waitLine = /^waiting\b|^graphyard: .*\bwait(s|ing)\b/;
 const stillWaiting = (pending: Pending) => !pending.executor || waitLine.test(pending.lines.at(-1) ?? '');
+/** GY-3525: a repeated request for the same work, lease epoch, head and inputs joins the pending one; changed inputs run their own. */
 export async function dispatchWorkerVerification<Result extends WorkerVerificationResult | WorkerCheckResult = WorkerVerificationResult>(services: Services, job: Omit<WorkerVerificationJob, 'id'>): Promise<Result> {
-  const pending = queue(services), id = randomUUID();
-  let timer: NodeJS.Timeout;
-  try {
-    return await new Promise<Result>((resolve, reject) => {
-      const entry: Pending = { job: { ...job, id }, requestedAt: Date.now(), lines: [], resolve: resolve as Pending['resolve'], reject };
-      timer = setTimeout(() => reject(stillWaiting(entry)
-        ? new VerificationStillWaiting('Host worker verification is still waiting for a slot', 504)
-        : new Refusal('Host worker verification timed out', 504)), verificationQueue.waitMs);
-      pending.set(id, entry);
-    });
-  } finally { clearTimeout(timer!); pending.delete(id); }
+  const pending = queue(services);
+  const identity = JSON.stringify([job.work.id, job.work.criteria, job.host, job.branch, job.baseBranch, job.input]);
+  const same = [...pending.values()].find(entry => entry.identity === identity);
+  if (same) return same.result as Promise<Result>;
+  const id = randomUUID();
+  let resolve!: Pending['resolve'], reject!: Pending['reject'];
+  const result = new Promise<WorkerVerificationResult | WorkerCheckResult>((yes, no) => { resolve = yes; reject = no; });
+  const entry: Pending = { job: { ...job, id }, requestedAt: Date.now(), lines: [], identity, result, resolve, reject };
+  pending.set(id, entry);
+  const timer = setTimeout(() => reject(stillWaiting(entry)
+    ? new VerificationStillWaiting('Host worker verification is still waiting for a slot', 504)
+    : new Refusal('Host worker verification timed out', 504)), verificationQueue.waitMs);
+  try { return await result as Result; } finally { clearTimeout(timer); pending.delete(id); }
 }
 /** A new loop rejects only its predecessor's assigned requests; queued work stays queued. */
 export function restartWorkerVerifications(services: Services, actor: Principal, body: unknown) {
