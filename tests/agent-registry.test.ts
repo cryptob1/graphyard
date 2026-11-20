@@ -95,7 +95,7 @@ function network(byToken: Record<string, { five: number; seven: number; fiveRese
     const entry = byToken[`${account.name}-oauth-token`];
     if (!entry) return { ok: false, error: 'Not logged in' };
     return entry.seven >= 100 || entry.five >= 100
-      ? { ok: false, error: `7d window at 100%; resets at ${future(48 * hour)}` }
+      ? { ok: false, error: `Usage limit reached: 7d window at 100%; resets at ${future(48 * hour)}` }
       : { ok: true, error: null };
   } };
 }
@@ -399,7 +399,7 @@ test('integration:registry-live-capacity — capacity is a registry change with 
   assert.equal(added.account, 'claude-b'); assert.equal(added.tab.CLAUDE_CONFIG_DIR, homeB);
 
   const smoke = probe.smoke!;
-  probe.smoke = async account => account.name === 'claude-b' ? { ok: false, error: `The provider cut this plan off; resets at ${future(3 * hour)}` } : smoke(account);
+  probe.smoke = async account => account.name === 'claude-b' ? { ok: false, error: `Usage limit reached: The provider cut this plan off; resets at ${future(3 * hour)}` } : smoke(account);
   // Mark it exhausted: the next action skips it, says why, and runs on the next account in order.
   await ok('agent-registry/accounts/claude-b/quota', coordinator, { quota: { state: 'exhausted', resetsAt: future(3 * hour) }, reason: 'The provider cut this plan off' });
   const skipped = await next();
