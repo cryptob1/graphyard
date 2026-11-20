@@ -1,0 +1,13 @@
+{
+  "id": "loop-clears-environment-blockers",
+  "title": "The loop clears a slot-timeout blocker once slots free",
+  "description": "Block an item on a host heavy-job slot timeout while every slot is held, then free a slot; the loop clears the blocker and launches the item again with no unblock command.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "the blocked item resumes once slots free",
+    "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:loop-clears-environment-blockers tests/loop-clears-environment-blockers.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

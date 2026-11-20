@@ -15,10 +15,9 @@ import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/rep
 
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
-// 2026-11-04: refactor items editing the same core files ran in parallel and every merge sent the
-// heads queued behind it back to conflict (GY-3019: 108 attempts). A file an item declares in
-// plannedFiles now holds its release and dispatch while another item on it is in flight —
-// claimed, or submitted through review and merge — and it goes once that item lands.
+// GY-3539: a file an item declares in plannedFiles is advisory. With 12 workers allowed, holding
+// release and dispatch on planned files left 2 working; the merge queue and base refresh integrate
+// overlapping edits, so items declaring the same file run beside each other.
 
 const repository = 'owner/overlap-sequence';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
@@ -46,7 +45,6 @@ const file = (title: string, plannedFiles?: string[]) => ok(token(operator.id), 
   title, type: 'chore', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:overlapping-items-run-in-sequence', 'e2e:fixture'] }],
   policy: { checks: ['test'], review: true }, ...(plannedFiles ? { plannedFiles } : {}),
 }) as Promise<Work>;
-const update = (id: string, patch: Record<string, unknown>) => store.pool.query('UPDATE work_items SET document = document || $1::jsonb WHERE id = $2', [JSON.stringify(patch), id]);
 
 const profile = (name: string, principal: string): WorkerProfile =>
   ({ name, principal, agentName: `agent-${name}`, mode: 'launch', kind: 'claude', credentialFile: `/srv/credentials/${name}.token`, agentArgs: [], approvals: 'auto', environment: {} } as WorkerProfile);
@@ -70,7 +68,7 @@ before(async () => {
 });
 after(async () => { http?.close(); await store?.close(); });
 
-test('integration:overlapping-items-run-in-sequence — of two backlog items declaring the same file only one is released and dispatched while it is in flight (claimed or submitted), the other goes once it lands, and items on other files or declaring none run beside them', async () => {
+test('integration:overlapping-items-run-in-sequence — backlog items declaring the same file keep their planned files and are released and dispatched beside items on other files or declaring none', async () => {
   const first = await file('Refactor engine A', ['src/engine.ts']);
   const second = await file('Refactor engine B', ['src/engine.ts', 'src/release.ts']);
   const other = await file('Refactor close', ['src/server/close.ts']);
@@ -109,35 +107,12 @@ test('integration:overlapping-items-run-in-sequence — of two backlog items dec
   const state: DaemonState = emptyDaemonState(config);
 
   await runCycle(config, state, effects);
-  assert.deepEqual(released, [first.key, other.key, undeclared.key], 'the second item on src/engine.ts stays in the backlog; the rest are released together');
-  assert.deepEqual(new Set(claims), new Set([first.key, other.key, undeclared.key]), 'non-overlapping items are dispatched in parallel');
-
-  await update(second.id, { ready: true });
-  const refusedClaim = await call(token(workers[3].id), 'POST', `work/${second.id}/claim`, {});
-  assert.equal(refusedClaim.status, 409);
-  assert.match(JSON.stringify(refusedClaim.body), /Exclusive resources held/);
-  await update(second.id, { ready: false });
-
-  // The first item submits: its lease ends, and its standing submission through review and merge still holds the file.
-  await update(first.id, { lease: null, stage: 'review', submission: { epoch: 1, pr: 1 } });
-  await runCycle(config, state, effects);
-  assert.deepEqual(released, [first.key, other.key, undeclared.key], 'a submitted item past build still holds its file');
-
-  await update(second.id, { ready: true });
-  const submittedConflict = await call(token(workers[3].id), 'POST', `work/${second.id}/claim`, {});
-  assert.equal(submittedConflict.status, 409);
-  assert.match(JSON.stringify(submittedConflict.body), /Exclusive resources held/);
-  await update(second.id, { ready: false });
-
-  // It lands: the second item is released and dispatched.
-  await update(first.id, { stage: 'done', submission: null });
-  herdr.agents = herdr.agents.filter(agent => agent.pane_id !== `pane-${first.key}`);
-  await runCycle(config, state, effects);
-  assert.deepEqual(released.at(-1), second.key, 'the second item goes once the first lands');
-  assert.equal(claims.at(-1), second.key);
+  // GY-3539: planned files are advisory; items declaring the same file are released and dispatched together.
+  assert.deepEqual(new Set(released), new Set([first.key, second.key, other.key, undeclared.key]), 'every backlog item is released together');
+  assert.deepEqual(new Set(claims), new Set([first.key, second.key, other.key, undeclared.key]), 'items on the same and on other files are dispatched in parallel');
 });
 
-test('unit:overlapping-items-run-in-sequence — two released items declaring the same file, neither in flight, dispatch one at a time in one cycle', async () => {
+test('unit:overlapping-items-run-in-sequence — two released items declaring the same file, neither in flight, both dispatch in one cycle', async () => {
   const at = new Date(Date.now() - 3_600_000).toISOString();
   const ready = (key: string, plannedFiles: string[]) => ({
     id: `id-${key}`, key, title: key, description: '', type: 'chore', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
@@ -154,5 +129,5 @@ test('unit:overlapping-items-run-in-sequence — two released items declaring th
     closeSession: () => {}, dispatch: async item => { log.push(item.key); }, persist: async () => {},
   };
   await runCycle(config, emptyDaemonState(config), effects);
-  assert.deepEqual(log.sort(), ['GY-1', 'GY-3']);
+  assert.deepEqual(log.sort(), ['GY-1', 'GY-2', 'GY-3']);
 });

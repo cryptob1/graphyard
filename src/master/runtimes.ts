@@ -17,7 +17,9 @@ export interface AccountReading { loggedIn: boolean; usage: AccountUsage[]; note
   /** Why a logged-out reading is logged out, when the probe can say more than that. */
   loggedOutReason?: string;
   /** GY-3414: why a logged-in account still cannot run (its configured model is unavailable). */
-  unready?: string }
+  unready?: string;
+  /** GY-3516: the fingerprint of the key the reading was taken with. */
+  key?: string }
 /**
  * Everything Graphyard knows of one runtime kind. Every field is optional but `kind`: a kind with
  * no `recipe` is still a kind profiles may name, and is refused at launch unless an agent-registry

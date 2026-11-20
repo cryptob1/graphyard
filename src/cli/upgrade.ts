@@ -6,7 +6,7 @@ import { existsSync, readFileSync, readdirSync, readlinkSync, statSync } from 'n
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createBackup } from '../backup.js';
+import { writeBackupFile } from '../backup.js';
 import { Store } from '../store.js';
 import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, graphyardUpstreamUrl, graphyardVerifiedRef, imageRepository, installationRoot, releaseIdentityPath, type Release } from '../release.js';
 import { repositoryFromRemote } from '../onboarding.js';
@@ -72,9 +72,10 @@ export function upgradePlan(inputs: UpgradeInputs): UpgradePlan {
   const redeploy = install ? `${cli(cliRoot, 'install', ...install.slice(0, -1), '--plan')} && ${cli(cliRoot, 'install', ...install)}` : `no install record for this repository: redeploy ${image} by hand`;
   const url = inputs.url ? ['--url', inputs.url] : [];
   const steps: UpgradeStep[] = [
+    // GY-3538: the backup runs first, with the running release's CLI, before the checkout moves the code.
+    { id: 'backup', title: `Back up the database at generation ${databaseSchema ?? 'unknown'} (DATABASE_URL) with the running release, before anything changes`, command: `graphyard db backup ${inputs.backupFile}` },
     { id: 'checkout', title: `Check out ${target.version} (${target.revision.slice(0, 12)}) detached in the CLI checkout`, command: `git -C ${JSON.stringify(cliRoot)} checkout --detach ${target.revision}` },
     { id: 'npm-ci', title: 'Install the dependencies the target\'s lockfile names', command: npmCiCommand(cliRoot) },
-    { id: 'backup', title: `Back up the database at generation ${databaseSchema ?? 'unknown'} (DATABASE_URL) before the server migrates it`, command: `graphyard db backup ${inputs.backupFile}` },
     { id: 'redeploy', title: `Redeploy the server at ${image} through the install adapter`, command: redeploy },
     { id: 'restart', title: 'Restart the master loop on the target code', command: cli(cliRoot, 'master', 'restart') },
     { id: 'refresh', title: 'Refresh the generated workflows and the AGENTS.md managed block', command: `${cli(cliRoot, 'init', '--scan', ...url)} && ${cli(cliRoot, 'init', '--scan', '--apply', ...url)}` },
@@ -92,6 +93,16 @@ export interface UpgradeEffects {
 }
 export type UpgradeResult = { ok: true; steps: UpgradeStepId[] } | { ok: false; steps: UpgradeStepId[]; failed: UpgradeStepId; error: string; rollback: string };
 const migratedFrom: UpgradeStepId[] = ['redeploy', 'restart', 'refresh', 'health'];
+
+/** The one-line failure the command prints: nothing to roll back when the first step failed. */
+export const upgradeFailure = (result: Extract<UpgradeResult, { ok: false }>) =>
+  result.steps.length ? `upgrade stopped at ${result.failed}: ${result.error}\nrollback: ${result.rollback}` : `upgrade stopped at ${result.failed}: ${result.error}; nothing was changed`;
+
+async function backupTo(databaseUrl: string, file: string) {
+  const store = new Store(databaseUrl);
+  try { await mkdir(resolve(file, '..'), { recursive: true }); await writeBackupFile(store.pool, file); }
+  finally { await store.close(); }
+}
 
 /** Run the plan's steps in order, stopping at the first that fails with its name and the rollback command. */
 export async function runUpgrade(plan: UpgradePlan, effects: UpgradeEffects): Promise<UpgradeResult> {
@@ -189,7 +200,7 @@ const releaseOfCommit = (cliRoot: string, commit: string): { version: string; re
   return { version: version ?? `unreleased ${commit.slice(0, 12)}`, revision: commit };
 };
 
-/** The real effect of each step; the backup runs on the code already loaded, the release that matches the database. */
+/** The real effect of each step. */
 export function liveEffects(inputs: UpgradeInputs, recordFile: string, fetchHealth: (url: string) => Promise<Pick<Response, 'ok' | 'status' | 'json'>> = url => fetch(url, { signal: AbortSignal.timeout(10_000) })): UpgradeEffects {
   const shell = (command: string, cwd: string) => {
     const run = spawnSync(command, { cwd, shell: true, stdio: 'inherit' });
@@ -201,9 +212,11 @@ export function liveEffects(inputs: UpgradeInputs, recordFile: string, fetchHeal
       if (step.id === 'backup') {
         const databaseUrl = inputs.databaseUrl === undefined ? process.env.DATABASE_URL : inputs.databaseUrl;
         if (!databaseUrl) throw new Error('Set DATABASE_URL to the Graphyard database so the upgrade can back it up before the server migrates it');
-        const store = new Store(databaseUrl);
-        try { const backup = await createBackup(store.pool); await mkdir(resolve(inputs.backupFile, '..'), { recursive: true }); await writeFile(inputs.backupFile, JSON.stringify(backup), { flag: 'wx', mode: 0o600 }); }
-        finally { await store.close(); }
+        // The CLI checkout's own code, not yet moved: the release that matches the database.
+        await mkdir(resolve(inputs.backupFile, '..'), { recursive: true });
+        const loader = createRequire(join(inputs.cliRoot, 'package.json')).resolve('tsx');
+        const run = spawnSync(process.execPath, ['--import', loader, join(inputs.cliRoot, 'src', 'cli.ts'), 'db', 'backup', inputs.backupFile], { cwd: inputs.cliRoot, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, DATABASE_URL: databaseUrl } });
+        if (run.status !== 0) throw new Error((run.stderr || run.stdout).trim().split('\n').at(-1) || `the backup exited ${run.status ?? run.signal}`);
       } else if (step.id === 'health') {
         if (!inputs.url) throw new Error('Set GRAPHYARD_URL so the upgrade can read /healthz');
         await healthVerdict(await fetchHealth(`${inputs.url}/healthz?strict`), inputs.target.version);
@@ -505,7 +518,6 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
     return { cliRoot: buildFor(commit), repoRoot, current, target: { version: releaseOfCommit(cliRoot, commit).version, revision: commit, schema: null }, databaseSchema: null, install, url, cliChanges: [],
       image: install.provider === 'compose' ? `graphyard-local:${commit.slice(0, 12)}` : install.deployment?.image ?? `graphyard-local:${install.installId}`, backupFile: join(directory, 'backups', `before-${commit.slice(0, 12)}-${Date.now()}.json`) };
   };
-  const step = (commit: string, id: UpgradeStepId) => upgradePlan(inputsFor(commit)).steps.find(entry => entry.id === id)!;
   const tree = gitWatchPorts(cliRoot, input.run);
   const gitIn = async (...args: string[]) => String(await input.run('git', ['-C', cliRoot, ...args], { timeoutMs: 120_000 })).trim();
   return {
@@ -519,7 +531,8 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
     },
     restart: commit => withHeavyJob(`deploy restart ${commit.slice(0, 12)}`, async () => {
       const inputs = inputsFor(commit);
-      if (process.env.DATABASE_URL) await liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json')).run(step(commit, 'backup'));
+      // The watch's own code is the release that matches the database; inputs.cliRoot is the new build.
+      if (process.env.DATABASE_URL) await backupTo(process.env.DATABASE_URL, inputs.backupFile);
       // Every redeploy builds with the stamp of the commit it deploys (GY-2167), so /healthz names that commit.
       const stamp = releaseOfCommit(cliRoot, commit);
       const build = buildFor(commit);
@@ -550,7 +563,7 @@ export const upgradeCommands = defineCommands([{
   name: 'upgrade',
   help: [
     '  upgrade [--to VERSION] [--plan]',
-    '                                Move the CLI checkout (then npm ci), back up the database,',
+    '                                Back up the database, move the CLI checkout (then npm ci),',
     '                                redeploy the server, restart loop and executors, refresh the',
     '                                generated files, and check /healthz, to Graphyard\'s main tip',
     '                                (or the dated release VERSION);',
@@ -637,6 +650,6 @@ export const upgradeCommands = defineCommands([{
     const result = await runUpgrade(plan, liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json')));
     if (result.ok) { await migrateHerdr(repoRoot); console.log(`upgraded to ${target.version}`); return; }
     process.exitCode = 1;
-    console.error(`upgrade stopped at ${result.failed}: ${result.error}\nrollback: ${result.rollback}`);
+    console.error(upgradeFailure(result));
   },
 }]);
