@@ -107,7 +107,7 @@ const failureEvents = (output: string) => output.split('\n').flatMap(line => {
   try { const event = JSON.parse(line); return event && (event.type === 'error' || event.type === 'turn.failed' || event.is_error === true) ? [event] : []; } catch { return []; }
 });
 /** The provider's own words in a failed run's output (GY-3555): each failure event's message, never the tail of a JSON line. */
-export function providerWords(output: string) {
+function providerWords(output: string) {
   const words = failureEvents(output).flatMap(event => [event.result, event.error?.message, event.error, event.message].filter(text => typeof text === 'string' && text.trim()).slice(0, 1));
   return (words.length ? words.join(' ') : output).trim().slice(-500);
 }
