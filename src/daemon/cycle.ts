@@ -47,6 +47,7 @@ import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
 import { cpuPressureStep, cpuWaiting, implementationWaiting, sessionUsageStep } from './cpu-pressure.js';
+import { causeCleared, environmentCause } from './environment-blockers.js';
 import { batchGateRunning } from './trial-slots.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
@@ -503,15 +504,43 @@ async function closeStep(cycle: Cycle) {
     await note(cycle, `cli-releases:${state.cycle}`, 'reclaim', null, 'done', `Removed ${releases.removed.length} CLI release copies (${Math.round(releases.bytes / 1e6)} MB) nothing serves or runs: ${releases.removed.join(', ')}`);
   }
   if (releases?.left.length) cycle.log(`[graphyard-master] CLI release copies left in place: ${releases.left.join('; ')}`);
+  // GY-3553: a served CLI release whose commit stamp names another commit than it holds is restamped.
+  const restamped = await cycle.effects.repairCliStamp?.().catch(error => { cycle.log(`[graphyard-master] the CLI release stamp check failed: ${message(error)}`); return null; });
+  if (restamped) await note(cycle, `cli-stamp:${restamped.commit}`, 'reclaim', null, 'done', `Restored the CLI release commit stamp ${restamped.file} to ${restamped.commit.slice(0, 12)}, the commit checked out in it (was ${restamped.was?.slice(0, 12) ?? 'missing'})`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
   // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new
   // launches while it is saturated — before anything of this cycle starts one.
   await cpuPressureStep(cycle);
+  await environmentBlockersStep(cycle);
   // GY-3438: and every agent session's use against its CPU and memory caps.
   sessionUsageStep(cycle);
   // GY-3407: every host is read for the Workers page; one that does not answer reads away until it does.
   if (cycle.effects.hostReadings) cycle.state.hosts = await cycle.effects.hostReadings(cycle.state.hosts).catch(error => { cycle.log(`[graphyard-master] the host readings failed: ${message(error)}`); return cycle.state.hosts; });
+}
+
+/**
+ * GY-3553: a blocker whose cause is the host — a heavy-job slot or heat wait, a host verification
+ * timeout, a CLI/server commit mismatch, an unwritable worktree — is re-checked every cycle and
+ * cleared once that cause is gone, with the cleared cause as the unblock's reason on the item's
+ * history; the item is dispatched again as any ready item. A blocker naming a person or the change stays.
+ */
+async function environmentBlockersStep(cycle: Cycle) {
+  const { effects, state } = cycle;
+  if (!effects.unblock || !effects.environmentReadings) return;
+  const blocked = cycle.snapshot.work.flatMap(item => {
+    const cause = item.stage !== 'done' && item.blocker && !item.lease ? environmentCause(item.blocker) : null;
+    return cause ? [{ item, cause }] : [];
+  });
+  if (!blocked.length) return;
+  const readings = { ...await effects.environmentReadings(), heatClear: cpuWaiting(state) === null };
+  for (const { item, cause } of blocked) {
+    const key = `environment-unblock:${item.id}:${item.blockedAt ?? item.revision}`;
+    if (state.actions[key]?.state === 'done' || !await causeCleared(cause, item, readings)) continue;
+    const reason = `The loop cleared the blocker: the ${cause} has cleared`;
+    try { await effects.unblock(item, reason); await note(cycle, key, 'blocker', item.key, 'done', `${item.key}: ${reason}`); }
+    catch (error) { await note(cycle, key, 'blocker', item.key, 'failed', `Could not clear ${item.key}'s blocker (${cause} cleared): ${message(error)}`); }
+  }
 }
 
 /**
@@ -597,6 +626,7 @@ async function untrustedCheckoutRoles(cycle: Cycle, registry: CheckoutTrustFleet
  * profile, each head nothing can carry forward back to a worker, the reviewer and producer
  * sessions the dispatcher owes, and the master session when absent.
  */
+const refusalsLogged = new WeakMap<DaemonState, Set<string>>();
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
   // GY-3285: the install runs as many workers as its registry's worker role allows; the loop adds
@@ -619,7 +649,19 @@ async function dispatchStep(cycle: Cycle) {
   const health = profileHealth(config.workers, credentials, herdr.agents, state, clock, snapshot.work);
   const taken = cycle.reservedProfiles;
   const hot = new Set(hotspots(open, clock).map(entry => entry.file));
-  const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
+  // GY-3539: each exclusive-resource refusal is one log line naming the item, the resource and its holder.
+  // A refusal standing from the last cycle is not logged again.
+  const before = refusalsLogged.get(state) ?? new Set<string>(), standing = new Set<string>();
+  refusalsLogged.set(state, standing);
+  const refused = (item: Work, resource: string, holder: string) => {
+    const line = `${item.key} waits: exclusive resource ${resource} is held by ${holder}`;
+    if (!before.has(line) && !standing.has(line)) cycle.log(`[graphyard-master] cycle ${state.cycle}: ${line}`);
+    standing.add(line);
+  };
+  const claimable = dispatchSort(open.filter(item => {
+    try { assertDispatchable(item, snapshot.work, snapshot.now); return true; }
+    catch (error) { if (message(error).startsWith('Dispatch blocked by exclusive resources')) for (const held of resourceConflicts(item, snapshot.work, clock)) refused(item, held.resource, held.key); return false; }
+  }), hot, clock);
   const launched: Work[] = [];
   let offers = registry && !state.diskHeadroom ? await runtimeCanaries(cycle, registry.runtimes) : [];
   // GY-3149: a freed worker slot goes to the highest-priority waiting item. An item whose launch last waited
@@ -662,7 +704,8 @@ async function dispatchStep(cycle: Cycle) {
   ].filter((hold): hold is string => !!hold);
   if (!holds.length) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
-    if (launched.some(other => sharedResources(item, other).length)) continue;
+    const holder = launched.find(other => sharedResources(item, other).length);
+    if (holder) { refused(item, sharedResources(item, holder)[0]!, holder.key); continue; }
     // GY-3104: a third equal failure holds the item for the master's decision.
     if (failureHeld(state.failureRuns[item.id])) continue;
     const incident = state.actions[earlyExitKey(item)];
@@ -743,7 +786,7 @@ async function releaseBacklog(cycle: Cycle, allowed: number) {
   for (const item of candidates) {
     // A yard repair (GY-3102) is released past the pipeline cap.
     if (slots <= 0 && !item.yardRepair) continue;
-    // An item sharing an exclusive resource (a file path included) with one in flight or released waits until that one lands.
+    // An item sharing an exclusive resource with one in flight or released waits until that one lands.
     if (resourceConflicts(item, snapshot.work, clock).length || snapshot.work.some(other => other.id !== item.id && other.stage !== 'done' && other.ready && sharedResources(item, other).length)) continue;
     const key = `release:${item.id}:${item.revision}`, inPipeline = snapshot.work.filter(entry => entry.stage !== 'done' && (entry.ready || inFlight(entry, clock))).length;
     try {

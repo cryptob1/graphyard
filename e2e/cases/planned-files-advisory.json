@@ -1,0 +1,14 @@
+{
+  "id": "planned-files-advisory",
+  "title": "Two items editing the same file both get a worker",
+  "description": "Drive the loop against a real control plane: two released items planning the same file are both dispatched in one cycle and master status shows a worker on each at once. Only an explicit exclusive resource held by another item refuses dispatch, with one loop log line naming the item, the resource and the holder; a path the base lacks never blocks.",
+  "tags": ["dispatch"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Run the loop's dispatch over items planning the same file and read master status",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/planned-files-advisory.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

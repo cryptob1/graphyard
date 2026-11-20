@@ -3,9 +3,9 @@ import { readHostReadings, type HostReading } from '../hosts.js';
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import type { Dirent } from 'node:fs';
+import { accessSync, constants, type Dirent } from 'node:fs';
 import { workerVerificationPump, moveBranchToHead } from './worker-verification.js';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -48,7 +48,8 @@ import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
 import { cpuCelsius } from './cpu-pressure.js';
-import { sweepCliReleases } from '../install/cli-release.js';
+import { repairCliStamp, servedCliRelease, sweepCliReleases } from '../install/cli-release.js';
+import { declarationSlot, heavyJobLimit, heavyJobsDirectory, heldSlots, readHeavyDrain } from '../master/verification-slots.js';
 import { collectUsage } from '../usage-capture.js';
 import { upstreamFiler } from './control-plane.js';
 import { runWorkerVerification } from '../merge-writer/worker-verification.js';
@@ -223,6 +224,22 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
+    // GY-3553: the readings that clear environment blockers, the stamp repair, and the unblock itself.
+    repairCliStamp: () => repairCliStamp(installDirectory(installIdFor(current().repository))),
+    environmentReadings: async () => {
+      const slots = heavyJobsDirectory();
+      return {
+        slotsFree: !readHeavyDrain(slots) && heldSlots(slots).filter(entry => entry.slot < declarationSlot).length < heavyJobLimit(slots),
+        cliCommit: servedCliRelease(installDirectory(installIdFor(current().repository)))?.commit ?? null,
+        serverCommit: readDeployRecord(deployRecordPath(root))?.tip ?? null,
+        // The nearest path that exists: a lock file a read-only volume refused never exists itself.
+        writable: function writable(path: string): boolean {
+          try { accessSync(path, constants.W_OK); return true; }
+          catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' && dirname(path) !== path && writable(dirname(path)); }
+        },
+      };
+    },
+    unblock: (work, reason) => asOperatorAgent(`work/${work.id}/unblock`, { expectedRevision: work.revision, reason }, `environment-unblock:${work.id}:${work.revision}`),
     // GY-3432: the commit the deploy unit serves, which the stall alarm compares to the loop's own.
     servingCommit: () => readDeployRecord(deployRecordPath(root))?.tip ?? null,
     // GY-3348: the host's CPU before every launch, and its hottest sensor (GY-3373); each null where unreadable.
