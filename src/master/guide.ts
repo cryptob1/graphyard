@@ -80,7 +80,7 @@ Every item needs an \`e2e:NAME\` criterion bound to a new or existing \`e2e/case
 
 ### Session liveness is reconciled, not trusted
 
-Missing panes free role capacity after two consecutive misses, including across loop restarts. Completed reviews (including COMMENTED and post-merge) release their registry slot on the first readable inventory showing the pane gone after launch grace, even for delivered items absent from open work. Verdicts and review requirements stay unchanged; COMMENTED is not approval. \`blocked\` frees a worker slot; its reason stays until master clears it.
+Missing panes free role capacity after two consecutive misses, including across loop restarts. Completed reviews (including COMMENTED and post-merge) release their registry slot on the first readable inventory showing the pane gone after launch grace, even for delivered items absent from open work. Verdicts and review requirements stay unchanged; COMMENTED is not approval. \`blocked\` frees a worker slot; its reason stays until master clears it, or the loop once its host cause is gone.
 
 ## Automatic dispatch at submit
 

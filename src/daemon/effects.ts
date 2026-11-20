@@ -20,6 +20,7 @@ import type { AdoptedRun } from './run-adoption.js';
 import type { ComposeServer } from './compose-recovery.js';
 import type { FaultItem } from './control-plane.js';
 import type { MemoryNote, ProductBrief } from '../model/project-memory.js';
+import type { EnvironmentReadings } from './environment-blockers.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
 /** GY-1713: body `error` + zod `issues` so a refusal names the refused field; else stringify. */
@@ -119,6 +120,12 @@ export interface DaemonEffects {
   reclaimJobLeftovers?: () => Promise<string[]>;
   /** Removes the install's CLI release copies nothing uses (GY-3334), answering what went, the bytes freed and the copies left with why. */
   sweepCliReleases?: () => Promise<{ removed: string[]; bytes: number; left: string[] }>;
+  /** GY-3553: restamps the served CLI release when its commit stamp names another commit than it holds; what it rewrote, or null. */
+  repairCliStamp?: () => Promise<{ file: string; commit: string; was: string | null } | null>;
+  /** GY-3553: the host readings that judge an environment blocker (slots, CLI and server commits, writability). */
+  environmentReadings?: () => Promise<Omit<EnvironmentReadings, 'heatClear'>>;
+  /** GY-3553: clears a blocker whose environment cause is gone, as the operator agent. */
+  unblock?: (work: Work, reason: string) => Promise<unknown>;
   /** The disk Graphyard's leftovers hold, read once a day for the leftovers report (GY-3190). */
   leftoverDisk?: () => Promise<LeftoverDisk>;
   /** Reports the token usage this host's sessions' runtimes printed (GY-3289, usage-capture.ts); `master` is the master session's conversation. */
