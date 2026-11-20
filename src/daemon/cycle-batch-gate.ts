@@ -10,7 +10,7 @@ import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
 import { gateTrialKey, trialStartOwner, trialStartWaiting } from '../merge-writer/trial-load.js';
 import { heavyTrial, trialShareAllowance, type MergeWriterReads } from './cycle-merge-writer.js';
-import { criterionProofs, e2eProofsOf } from '../merge-writer/executor.js';
+import { criterionProofs, e2eProofsOf, openFlakyItem } from '../merge-writer/executor.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
 import { actionDetailMax, message, storeAction } from './state.js';
@@ -216,7 +216,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
       return { revertSha: revert.revertSha };
     },
     file,
-    flaky: check => work.find(item => item.stage !== 'done' && item.title === `Flaky check on main: ${check}`)?.key ?? null,
+    flaky: check => openFlakyItem(work, check)?.key ?? null,
     // The full suite (a package.json change selects every test) and the whole catalog, each its own trial so the catalog's time is its own; then the preview cases, in a repository that holds them.
     diagnose: async commit => {
       const suite = await trialFailures(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs, trusted);
