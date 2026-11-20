@@ -245,7 +245,9 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
       // without a verdict (no records): the shard runs on another host, its output's tail kept in the trial log
       // (less the launcher's own waiting lines, which on a hot host would fill it).
       const fault = trialContainerFault(end.out);
-      if (!end.ok && (end.status === 255 || end.status === null || fault || !records.trim())) throw new HostDroppedError(target, fault ?? end.out.replace(/^graphyard trial container: (waiting|starting).*\n/gm, '').slice(-500));
+      // A session over a shared connection that lost its host prints nothing of its own, so name that loss.
+      const said = end.out.replace(/^graphyard trial container: (waiting|starting).*\n/gm, '').slice(-500).trim();
+      if (!end.ok && (end.status === 255 || end.status === null || fault || !records.trim())) throw new HostDroppedError(target, fault ?? (said || `the SSH connection to ${target} closed mid-shard (exit ${end.status ?? 'signal'})`));
       return { ...end, records };
     },
     async close() {
