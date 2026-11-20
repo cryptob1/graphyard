@@ -6,7 +6,7 @@ import { mergeWriterIdle, mergeWriterStep, mergeWriterSummary, type MergeWriterR
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { masterConfigSchema } from '../src/master.js';
 import { itemLine } from '../src/cli/master-status.js';
-import { mergeRecordKinds, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { mergeRecordKinds, trialAheadOfReviewReason, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { Observation, Work } from '../src/model/work.js';
 
@@ -30,7 +30,6 @@ const item = (key: string, ageMinutes: number): Work => {
     createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start - ageMinutes * 60_000),
   } as unknown as Work;
 };
-
 
 const pass: MergeTrialRun = { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['src/app.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } };
 async function world(verdict = pass) {
@@ -71,7 +70,7 @@ async function world(verdict = pass) {
   const head = ready.candidate!.sha, mergeSha = sha(`merge:${head}`);
   await record(ready, { kind: 'intent', head, baseTip: base, mergeSha, risk: 'normal', at: iso(start) });
   await record(ready, { kind: 'trial', head, baseTip: base, mergeSha, outcome: 'verdict', build: verdict.build, tests: verdict.tests, files: verdict.files, proofs: verdict.proofs, durationMs: 1, attempts: [] });
-  return { ready, slow, state, step, trials, pushes, mergeSha, hold: () => { held = "review pending"; }, running: () => running, move: () => { tip = sha('moved'); }, close: async () => { release(pass); await mergeWriterIdle(state); } };
+  return { ready, slow, state, step, trials, pushes, mergeSha, aheadOfReview: () => record(ready, { kind: 'refused', head, reason: trialAheadOfReviewReason(ready.key) }), hold: () => { held = 'review pending'; }, running: () => running, move: () => { tip = sha('moved'); }, close: async () => { release(pass); await mergeWriterIdle(state); } };
 }
 
 test('integration:push-passed-trials-at-once — a passed queued candidate pushes in one cycle while the only trial slot is occupied', async () => {
@@ -107,7 +106,6 @@ test('e2e:push-passed-trials-at-once — master status shows the passed candidat
   } finally { await w.close(); }
 });
 
-
 test('integration:push-passed-trials-at-once — failed verdicts and landing holds never push beside a running trial', async () => {
   for (const verdict of [{ ...pass, build: 'fail' as const }, { ...pass, tests: { passed: 0, failed: ['src/app.ts'], files: 1 } }, pass]) {
     const w = await world(verdict);
@@ -118,4 +116,17 @@ test('integration:push-passed-trials-at-once — failed verdicts and landing hol
       assert.ok(w.running());
     } finally { await w.close(); }
   }
+});
+
+
+test('integration:push-passed-trials-at-once — a trial kept ahead of review lands once approved without taking a trial slot', async () => {
+  const w = await world();
+  try {
+    await w.aheadOfReview();
+    await w.step();
+    assert.deepEqual(w.pushes, [w.mergeSha]);
+    assert.equal(w.ready.mergeLedger?.state, 'reconciled');
+    assert.deepEqual(w.trials, ['GY-1']);
+    assert.ok(w.running());
+  } finally { await w.close(); }
 });

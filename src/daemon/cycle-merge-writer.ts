@@ -1035,7 +1035,7 @@ export async function mergeWriterStep(cycle: Cycle) {
       writer.lastMergeAt = at();
       writer.queue = writer.queue.filter(entry => entry.key !== item.key);
       performed.push(storeAction(state, mergeWriterActionKey(item.key, item.candidate!.sha), { kind: 'merge', work: item.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
-        detail: `Merged ${item.key} on its completed trial while other trials continue` }));
+        detail: `Merged ${item.key} on its completed trial` }));
       changed = true; delivered = true;
     }
   }
