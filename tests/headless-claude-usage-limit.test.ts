@@ -9,8 +9,9 @@ import { spawnHeadless, startHeadlessSession } from '../src/headless-session.js'
 // GY-3389: a spent Claude account ends a headless run at once with its usage-credits result; the
 // account is held and the same dispatch starts the item on the next account, with no launch failure.
 let workers: HeadlessWorkers;
-// The reset Z.AI names is a date: the clock is fixed before it, so the hold holds at any hour (GY-3561).
-before(async () => { mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-19T12:00:00Z') }); workers = await headlessWorkers('headless-claude-usage-limit'); });
+// The reset Z.AI names is a date: the clock is fixed after it, as in the incident that filed this,
+// so the hold keeps the reset the notice itself named at any hour the test runs (GY-3561).
+before(async () => { mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T12:00:00Z') }); workers = await headlessWorkers('headless-claude-usage-limit'); });
 after(async () => { await workers.stop(); });
 
 test('e2e:headless-claude-usage-limit — a headless claude usage-credits result holds its account and the same dispatch moves on', async () => {
