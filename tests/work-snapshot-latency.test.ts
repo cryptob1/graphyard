@@ -18,7 +18,8 @@ import { runDaemon } from '../src/daemon/run.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { proofOutcome } from '../src/producer.js';
 import { coordinationHistoryLimit, coordinationViewHeader, coordinationSnapshot as trimInProcess, coordinationWork, type CoordinationRounds } from '../src/server/work-view.js';
-import { assertTiming, interleavedSteadyState, minimumSamples, percentile, steadyState } from './helpers/timing.js';
+import { assertTiming, minimumSamples, steadyState } from './helpers/timing.js';
+import { rowBytes } from './helpers/row-bytes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // A ledger the size production reached and beyond: 100 items, each carrying the history a long-lived
@@ -387,18 +388,22 @@ test('integration:hot-paths-read-no-settled-documents — /api/status, /api/boar
   }
 });
 
-// The bound: a fraction of what reading every document takes on the same store. Each path still
+// The bound: a fraction of what reading every document returns from the same store. Each path still
 // reads every open document and the index's summary of each settled one, so it is not free; it
-// must not grow with the settled items' histories.
-const HOT_PATH_FRACTION = 0.5, HOT_PATH_SAMPLES = 9;
+// must not grow with the settled items' histories. It is judged in bytes the database returned, not
+// wall-clock time, which a loaded runner moves for the HTTP reads more than for the list (GY-3546).
+const HOT_PATH_FRACTION = 0.5;
+async function bytesRead(run: () => Promise<unknown>) {
+  let bytes = 0;
+  resultSink = result => { bytes += rowBytes(result); };
+  try { await run(); return bytes; } finally { resultSink = null; }
+}
 
-test('integration:hot-path-latency-bounded — GET /api/status and GET /api/board each answer within a fraction of the full list\'s time on the same store', async () => {
+test('integration:hot-path-latency-bounded — GET /api/status and GET /api/board each read within a fraction of what the full list reads on the same store', async () => {
   await hotPaths();
-  // The list is timed in the same rounds as the reads it bounds, so both see the same load (GY-3546).
-  const timed = await interleavedSteadyState({ list: () => hotStore.list(), status: () => hotRead('status'), board: () => hotRead('board') }, { warmup: 2, samples: HOT_PATH_SAMPLES });
-  const budgetMs = Math.round(percentile(timed.list.samples, 0.5) * HOT_PATH_FRACTION);
+  const listBytes = await bytesRead(() => hotStore.list());
   for (const name of ['status', 'board'] as const) {
-    const { warmup, samples } = timed[name];
-    assertTiming({ name: `hot-path-latency-bounded.${name}`, test: 'integration:hot-path-latency-bounded', statistic: 'median', fraction: 0.5, budgetMs, samples, warmup });
+    const bytes = await bytesRead(() => hotRead(name));
+    assert.ok(bytes < listBytes * HOT_PATH_FRACTION, `GET /api/${name} read ${bytes} bytes, over ${HOT_PATH_FRACTION} of the full list's ${listBytes}`);
   }
 });
