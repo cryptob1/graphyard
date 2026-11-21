@@ -15,8 +15,7 @@ import { daemonEffects, type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema } from '../src/master.js';
 import { assertDispatchable } from '../src/master/dispatch.js';
 import { leaseCommands } from '../src/cli/lease.js';
-import { requestWorkerVerification, type WorkerVerificationResult } from '../src/cli/worker-verification.js';
-import type { WorkerVerificationInput } from '../src/merge-writer/worker-verification.js';
+import { requestWorkerVerification } from '../src/cli/worker-verification.js';
 import type { CliContext } from '../src/cli/context.js';
 import type { Principal, Work } from '../src/model.js';
 // GY-3037: the fixtures file items carrying an e2e proof; the serve declaration the trial would use.
@@ -29,9 +28,9 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 // master unblocked them every item waited hours for a brand-new worker session only to run
 // complete on the unchanged head. Here a worker whose complete fails on a stubbed trial-host
 // fault blocks naming its committed head; after master unblock, with the worker role at its
-// concurrency limit, the loop re-runs complete's verification and submits that exact head itself,
-// and the item reaches review without any worker launch. A blocker that names no finished head,
-// or a verification that fails on the change, sends the item to a worker as today.
+// concurrency limit, the loop submits that exact head itself (GY-3576: with no host verification;
+// the merge trial decides), and the item reaches review without any worker launch. A blocker that
+// names no finished head sends the item to a worker as today.
 
 const operator: Principal = { id: 'human-operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
@@ -91,11 +90,11 @@ async function assigned(n: number): Promise<Work> {
   return engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test-host', path: worktree, branch }, randomUUID());
 }
 
-/** The worker's own complete: the private verification, here refused by the stubbed trial-host fault. */
+/** The worker's optional verify: the private verification, here refused by the stubbed trial-host fault. */
 async function completeRefusedByHostFault(w: Work) {
   const { head, worktree } = heads.get(w.key)!;
   const context = { repositoryRoot: () => worktree, api: async () => { throw new Error(hostFault); }, print: (value: unknown) => value } as unknown as CliContext;
-  await assert.rejects(requestWorkerVerification(context, w, { mode: 'complete', head, epoch: 1 }), /Trial-host fault/);
+  await assert.rejects(requestWorkerVerification(context, w, { mode: 'verify', head, epoch: 1 }), /Trial-host fault/);
 }
 
 /** `blocked --finished` the way the worker's CLI sends it, from `cwd` (its worktree by default). */
@@ -114,21 +113,12 @@ async function blockFinished(w: Work, reason: string, finished = true, cwd?: str
 const readWork = async (id: string) => (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0].document as Work;
 const unblock = (w: Work) => engine.execute(operator, 'unblock', w.id, { reason: 'the trial host is repaired' }, randomUUID());
 
-/** One private verification `complete` runs, answering pass or fail for the item's own proof. */
-const verify = (result: 'pass' | 'fail') => async (_root: string, work: Work, input: WorkerVerificationInput): Promise<WorkerVerificationResult> => ({
-  record: { key: work.key, head: input.head, clean: true, at: new Date().toISOString(),
-    ran: [{ proof: 'integration:unblock-resubmits-finished-head', criteria: ['AC-1'], result, executed: 1, failed: result === 'fail' ? 1 : 0, skipped: 0, files: ['tests/unblock-resubmits-finished-head.test.ts'] }],
-    outstanding: [] },
-  rerun: { flaked: [], baseFailures: [] },
-});
-
 /**
- * One loop cycle over `work`: the production resubmit effect wired to the real engine (its
- * verification stubbed), a worker role the busy flag fills or frees, and a dispatch that would
+ * One loop cycle over `work`: the production resubmit effect wired to the real engine, a worker role the busy flag fills or frees, and a dispatch that would
  * launch a worker. Answers what the control plane was asked, what the loop recorded, and which
  * items a worker launch was offered for.
  */
-async function cycle(work: Work[], options: { busy: boolean; verify: ReturnType<typeof verify> }) {
+async function cycle(work: Work[], options: { busy: boolean }) {
   const state = emptyDaemonState(config);
   const posts: { path: string; body: any }[] = [], launches: string[] = [];
   const mutate = async (path: string, data: unknown) => {
@@ -136,7 +126,7 @@ async function cycle(work: Work[], options: { busy: boolean; verify: ReturnType<
     const [, id, command] = path.split('/');
     return engine.execute(coordinator, command as never, id, data, randomUUID());
   };
-  const production = daemonEffects(checkout, () => config, { snapshot: async () => ({ work, now: new Date().toISOString() }), mutate, verify: options.verify });
+  const production = daemonEffects(checkout, () => config, { snapshot: async () => ({ work, now: new Date().toISOString() }), mutate });
   const effects: DaemonEffects = {
     snapshot: async () => ({ work, now: new Date().toISOString() }),
     agents: () => options.busy ? [{ name: 'gy-worker-1', pane_id: 'p-busy', agent_status: 'working' } as never] : [],
@@ -168,14 +158,12 @@ test('integration:unblock-resubmits-finished-head — a finished head blocked on
   // the limit is real — while the finished head needs no worker at all.
   const ordinary = await engine.execute(operator, 'create', null, { type: 'chore', title: 'Ordinary ready item', criteria: [{ id: 'AC-1', text: 'Anything', proofs: ['integration:unblock-resubmits-finished-head', 'e2e:unblock-resubmits-finished-head'] }] }, randomUUID());
   await engine.execute(operator, 'ready', ordinary.id, {}, randomUUID());
-  const run = await cycle([await readWork(w.id), await readWork(ordinary.id)], { busy: true, verify: verify('pass') });
+  const run = await cycle([await readWork(w.id), await readWork(ordinary.id)], { busy: true });
 
   assert.deepEqual(run.launches, [], 'no worker launch: not for the finished head, and not for the ordinary item the full role holds back');
   const post = run.posts.find(entry => entry.path === `work/${w.id}/resubmit`);
   assert.ok(post, 'the loop submitted through the control plane');
   assert.equal(post.body.head, head);
-  assert.equal(post.body.verification.head, head);
-  assert.ok(post.body.verification.ran.some((run: { result: string }) => run.result === 'pass'), 'the verification complete runs travelled with the submission');
 
   const submitted = await readWork(w.id);
   assert.equal(submitted.finishedBlockerHead, null, 'the record is spent');
@@ -196,26 +184,6 @@ test('integration:unblock-resubmits-finished-head — a finished head blocked on
   assert.equal(events.length, 1, 'the resubmission is on the item\'s history');
 });
 
-test('integration:unblock-resubmits-finished-head — a verification that fails on the change clears the record and sends the item to a worker as today', async () => {
-  const w = await assigned(2);
-  await blockFinished(w, `complete failed: ${hostFault}`);
-  const unblocked = await unblock(await readWork(w.id));
-
-  const failed = await cycle([unblocked], { busy: true, verify: verify('fail') });
-  const post = failed.posts.find(entry => entry.path === `work/${w.id}/resubmit`);
-  assert.ok(post && /^complete refused: required proofs failed/.test(post.body.failed), 'the failed verification is reported, not submitted');
-  const cleared = await readWork(w.id);
-  assert.equal(cleared.finishedBlockerHead, null, 'the record is spent');
-  assert.equal(cleared.submission, null, 'nothing was submitted');
-  assert.equal(cleared.stage, 'ready');
-  assert.doesNotThrow(() => assertDispatchable(cleared, [cleared], new Date().toISOString()), 'the item is a worker\'s again');
-
-  // A freed slot goes to it as today: the loop resubmits nothing, dispatch launches a worker.
-  const freed = await cycle([await readWork(w.id)], { busy: false, verify: verify('pass') });
-  assert.deepEqual(freed.launches, [w.key]);
-  assert.equal(freed.posts.filter(entry => entry.path === `work/${w.id}/resubmit`).length, 0, 'no second resubmission');
-});
-
 test('integration:unblock-resubmits-finished-head — a blocker that names no finished head sends the item to a worker as today', async () => {
   const w = await assigned(3);
   await blockFinished(w, 'the staging database is unreachable', false);
@@ -224,7 +192,7 @@ test('integration:unblock-resubmits-finished-head — a blocker that names no fi
   const unblocked = await unblock(blocked);
   assert.doesNotThrow(() => assertDispatchable(unblocked, [unblocked], new Date().toISOString()));
 
-  const run = await cycle([unblocked], { busy: false, verify: verify('pass') });
+  const run = await cycle([unblocked], { busy: false });
   assert.deepEqual(run.launches, [w.key], 'the item goes to a worker as today');
   assert.equal(run.posts.length, 0, 'the loop resubmits nothing');
 });
@@ -241,6 +209,5 @@ test('unit:unblock-resubmits-finished-head — blocked --finished runs from the 
   const { head } = heads.get(w.key)!;
   await assert.rejects(engine.execute(worker, 'resubmit', w.id, { head }, randomUUID()), /Only the loop resubmits a finished head/);
   await assert.rejects(engine.execute(coordinator, 'resubmit', w.id, { head: 'f'.repeat(40) }, randomUUID()), /names no finished head/);
-  await assert.rejects(engine.execute(coordinator, 'resubmit', w.id, { head: 'f'.repeat(40), failed: 'not the recorded head' }, randomUUID()), /names no finished head/);
   assert.equal((await readWork(w.id)).finishedBlockerHead?.head, head, 'a refused resubmission spends no record');
 });

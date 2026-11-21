@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { bootstrapGate, gateBoundMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, runGate, writeGateRecord, type GatePorts } from '../src/batch-gate.js';
+import { bootstrapGate, gateBoundMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, runGate, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
 import { batchGateStep, noteBatchGateStopping } from '../src/daemon/cycle-batch-gate.js';
 import { runCycle } from '../src/daemon/cycle.js';
 import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
@@ -202,8 +202,11 @@ test('integration:batch-gate-own-wait-liveness — a batch adopted again before 
     run: async () => { throw new Error('the trial host is down'); }, revert: async () => { throw new Error('unused'); }, file: async () => ({ item: null }) };
   const record = bootstrapGate(repository, 'a'.repeat(40));
   record.inFlight = { tip: 'b'.repeat(40), startedAt: iso(now - 20 * minute), files: ['src/a.ts'], checks: ['build'], results: {}, seenAt: iso(now - 10 * minute) };
-  for (let cycle = 0; cycle < 3; cycle++) await assert.rejects(runGate(ports, record), /trial host is down/);
-  assert.equal(record.inFlight!.waitedMs, 10 * minute, 'three adoptions count the ten minutes once');
+  // Each loop stops mid-run, so the next adopts the batch as it was last checkpointed.
+  let saved: GateRecord['inFlight'] = record.inFlight;
+  ports.checkpoint = async () => { saved = record.inFlight; };
+  for (let cycle = 0; cycle < 3; cycle++) { record.inFlight = saved; await assert.rejects(runGate(ports, record), /trial host is down/); }
+  assert.equal(saved!.waitedMs, 10 * minute, 'three adoptions count the ten minutes once');
 });
 
 test('integration:batch-gate-own-wait-liveness — a waiting container start names its owner, so a gate reads its own start\'s wait and no other\'s', { timeout: 60_000 }, async () => {

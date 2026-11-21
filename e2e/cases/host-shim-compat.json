@@ -1,0 +1,22 @@
+{
+  "id": "host-shim-compat",
+  "title": "A release that changes the host helper keeps compute machines whose helper still runs a trial, and names the ones that need an update",
+  "description": "Two added compute machines read through their graphyard-host-shim as the loop reads them: one on another release's helper that still speaks every verb a trial uses stays ready; one whose helper lacks a verb's current revision reads away. The dashboard's top bar shows one line, 'Compute machines need an update: <names>', with the one command, graphyard host prepare; Needs you holds it as the owner's item. Once the machine's helper is updated, the loop's next probe clears both. Host state in master status is each host's latest probe with when it was read, never the last trial's away reason. No horizontal scroll at 1280 px and 390 px.",
+  "tags": ["dashboard", "hosts", "trial"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "an older helper that speaks every trial verb stays ready, one lacking a verb reads away with the reason; master status reads the latest probe with when it was read",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/host-shim-compat.test.ts",
+      "timeoutSeconds": 300
+    },
+    {
+      "kind": "command",
+      "name": "the top bar line and the Needs you item name the machine needing an update with the one command, and clear once it is updated",
+      "run": "npm run test:browser -- browser-tests/host-shim-compat.spec.ts",
+      "timeoutSeconds": 420
+    }
+  ]
+}

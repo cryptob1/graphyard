@@ -3,9 +3,9 @@ import { readHostReadings, type HostReading } from '../hosts.js';
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import type { Dirent } from 'node:fs';
+import { accessSync, constants, type Dirent } from 'node:fs';
 import { workerVerificationPump, moveBranchToHead } from './worker-verification.js';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -30,7 +30,7 @@ import { stopOrphansOfRemovedWorktrees } from '../session-processes.js';
 import { recordObservedExhaustion } from '../master/environments.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory, recordedMasterMemory } from '../project-memory.js';
-import { mergeCandidateHold, mergeOpeningHold } from '../merge-writer/executor.js';
+import { mergeCandidateHold, mergeOpeningHold, openFlakyItem } from '../merge-writer/executor.js';
 import { mergeRecordKey, mergeWriterReads } from './cycle-merge-writer.js';
 import { runServedPreviewCases } from '../merge-writer/served-previews.js';
 import { readServeRecord, serveRecordPath } from '../serve-app.js';
@@ -48,11 +48,10 @@ import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 import { composeServer } from './compose-recovery.js';
 import { leftoverDisk } from './leftovers.js';
 import { cpuCelsius } from './cpu-pressure.js';
-import { sweepCliReleases } from '../install/cli-release.js';
+import { repairCliStamp, servedCliRelease, sweepCliReleases } from '../install/cli-release.js';
+import { declarationSlot, heavyJobLimit, heavyJobsDirectory, heldSlots, readHeavyDrain } from '../master/verification-slots.js';
 import { collectUsage } from '../usage-capture.js';
 import { upstreamFiler } from './control-plane.js';
-import { runWorkerVerification } from '../merge-writer/worker-verification.js';
-import { failedRequiredProofs } from '../cli/worker-verification.js';
 import { trialRunsDirectory } from '../merge-writer/trial-run.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { graphyardVolumes, reclaimGraphyardLeftovers, reclaimJobLeftovers, stopOrphanTrialContainers, trialContainerMaxAgeMs } from './disk-headroom.js';
@@ -72,8 +71,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   /** Explicit confinement root for an embedded, non-CLI coordinator. */
   coordinatorRoot?: string;
   fetcher?: typeof fetch;
-  /** GY-3335: the head-verification runner; a test's stub, or the process's own private trial. */
-  verify?: typeof runWorkerVerification;
   /** GY-3345: the messages to this install's Master. */
   messages?: DaemonEffects['masterMessages'];
 }): DaemonEffects {
@@ -94,37 +91,17 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const rework: DaemonEffects['rework'] = (work, reason, binding) => asOperatorAgent(`work/${work.id}/rework`, { reason, previousWorkerStopped: true, ...(binding ? { binding } : {}) });
-  // GY-3335: the loop's own resubmission of a finished head. The verification `complete` runs is
-  // re-run on this host — the same private trial the worker-verification pump runs — and its
-  // outcome is submitted to the control plane, which binds the candidate. A verification that
-  // failed on the change itself (a required proof, or complete's own rerun refusal) clears the
-  // record so the item goes to a worker; anything else is a fault of this run, retried next cycle.
-  const verifyHead = deps.verify ?? runWorkerVerification;
+  // GY-3335, GY-3576: the loop's own resubmission of a finished head. It posts the recorded head
+  // at once, with no host verification run: the merge trial runs the tests and decides.
   const resubmit: DaemonEffects['resubmit'] = async (work, head) => {
-    const config = current();
     const record = work.finishedBlockerHead;
     const space = record && record.head === head ? work.workspaces.find(entry => entry.epoch === record.epoch) : undefined;
     if (!record || !space) throw new Error(`${work.key} names no finished head ${head.slice(0, 12)} on a registered workspace to resubmit`);
     await moveBranchToHead(root, space.branch, head);
     // One idempotency key per recorded blocker: a head re-recorded by a later attempt (a rework
     // round that failed its complete on a fault again) is a fresh resubmission, not a replay.
-    const key = `resubmit:${work.id}:${head}:${record.epoch}`;
-    const refused = async (reason: string) => {
-      await mutate(`work/${work.id}/resubmit`, { head, failed: reason.slice(0, 4000) }, key);
-      return { submitted: false, detail: `${work.key}'s finished head ${head.slice(0, 12)} failed the verification complete runs on the change itself: ${reason}; the item goes to a worker`.slice(0, 2000) };
-    };
-    let verification: Awaited<ReturnType<typeof runWorkerVerification>>;
-    try { verification = await verifyHead(root, work, { head, epoch: record.epoch, mode: 'complete' }, config.baseBranch); }
-    catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      // A refusal complete itself would give names the change; a fault of the run does not.
-      if (/^complete refused:/.test(reason)) return refused(reason);
-      throw error;
-    }
-    const failed = failedRequiredProofs(verification.record);
-    if (failed.length) return refused(`complete refused: required proofs failed: ${JSON.stringify(failed)}`);
-    await mutate(`work/${work.id}/resubmit`, { head, verification: { head: verification.record.head, ran: verification.record.ran } }, key);
-    return { submitted: true, detail: `${work.key}: the loop submitted the finished head ${head.slice(0, 12)} after its verification ran and passed; no worker session and no worker slot was spent` };
+    await mutate(`work/${work.id}/resubmit`, { head }, `resubmit:${work.id}:${head}:${record.epoch}`);
+    return `${work.key}: the loop submitted the finished head ${head.slice(0, 12)}; its merge trial runs the tests, and no worker session was spent`;
   };
   const askHumanProof: DaemonEffects['askHumanProof'] = (work, proof) => mutate(`work/${work.id}/human-proof-request`, { proof, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha,
     ...(work.preview?.state === 'running' && work.preview.sha === work.candidate!.sha ? { url: `${current().url}${work.preview.path}/` } : {}) }, `human-proof:${work.id}:${proof}:${work.candidate!.sha}:${work.policyRevision}`);
@@ -223,6 +200,22 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     stopOrphanedProcesses: () => stopOrphansOfRemovedWorktrees([worktreesDirectory(root), worktreeRoot(root, current())]),
     diskVolumes: () => graphyardVolumes([root, dataDirectory(), worktreeRoot(root, current()), ...trialCheckoutRoots(), durableTemporaryRoot()]),
     reclaimDisk: () => reclaimGraphyardLeftovers(run),
+    // GY-3553: the readings that clear environment blockers, the stamp repair, and the unblock itself.
+    repairCliStamp: () => repairCliStamp(installDirectory(installIdFor(current().repository))),
+    environmentReadings: async () => {
+      const slots = heavyJobsDirectory();
+      return {
+        slotsFree: !readHeavyDrain(slots) && heldSlots(slots).filter(entry => entry.slot < declarationSlot).length < heavyJobLimit(slots),
+        cliCommit: servedCliRelease(installDirectory(installIdFor(current().repository)))?.commit ?? null,
+        serverCommit: readDeployRecord(deployRecordPath(root))?.tip ?? null,
+        // The nearest path that exists: a lock file a read-only volume refused never exists itself.
+        writable: function writable(path: string): boolean {
+          try { accessSync(path, constants.W_OK); return true; }
+          catch (error) { return (error as NodeJS.ErrnoException).code === 'ENOENT' && dirname(path) !== path && writable(dirname(path)); }
+        },
+      };
+    },
+    unblock: (work, reason) => asOperatorAgent(`work/${work.id}/unblock`, { expectedRevision: work.revision, reason }, `environment-unblock:${work.id}:${work.revision}`),
     // GY-3432: the commit the deploy unit serves, which the stall alarm compares to the loop's own.
     servingCommit: () => readDeployRecord(deployRecordPath(root))?.tip ?? null,
     // GY-3348: the host's CPU before every launch, and its hottest sensor (GY-3373); each null where unreadable.
@@ -294,6 +287,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), hold: async work => { const snapshot = await deps.snapshot(); return mergeCandidateHold(snapshot.work.find(item => item.id === work.id), work, snapshot.work); }, holdOpening: async work => mergeOpeningHold((await deps.snapshot()).work.find(item => item.id === work.id), work), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) });
       return { ...reads,
         ensureTrialImage: () => ensureTrialImage(),
+        // GY-3545: a merge trial's failure of a test with an open flaky-check item is noted on that item as the coordinator.
+        flaky: async (check: string) => openFlakyItem((await deps.snapshot()).work, check),
+        note: (item: Pick<Work, 'id' | 'key'>, text: string, key: string) => mutate(`work/${item.id}/request`, { type: 'note', reason: text }, key),
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey),
           attest: (work: Work, proof: string, reason: string, idempotencyKey: string) => asOperatorAgent(`work/${work.id}/evidence`, intentInput('attest', work, { proof, reason }), idempotencyKey) } : {}),

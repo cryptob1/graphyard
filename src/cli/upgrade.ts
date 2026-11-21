@@ -8,7 +8,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeBackupFile } from '../backup.js';
 import { Store } from '../store.js';
-import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, graphyardUpstreamUrl, graphyardVerifiedRef, imageRepository, installationRoot, releaseIdentityPath, type Release } from '../release.js';
+import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, graphyardUpstreamUrl, graphyardVerifiedRef, imageRepository, installationRoot, recordCommit, type Release } from '../release.js';
 import { repositoryFromRemote } from '../onboarding.js';
 import { installDirectory, readInstallRecord, type InstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
@@ -222,6 +222,8 @@ export function liveEffects(inputs: UpgradeInputs, recordFile: string, fetchHeal
         await healthVerdict(await fetchHealth(`${inputs.url}/healthz?strict`), inputs.target.version);
       } else if (step.id === 'redeploy' && !inputs.install) throw new Error(step.command);
       else shell(step.command, step.id === 'checkout' || step.id === 'npm-ci' ? inputs.cliRoot : inputs.repoRoot);
+      // GY-3569: the release records the commit it now holds, which a sandboxed caller without git reads.
+      if (step.id === 'checkout') recordCommit(inputs.cliRoot, git(inputs.cliRoot, 'rev-parse', 'HEAD'));
     },
   };
 }
@@ -251,7 +253,7 @@ export function gitWatchPorts(cliRoot: string, run: ChildRun): Pick<DeployWatchP
     fetch: async () => { await oneFetchAtATime(() => git('fetch', '--quiet', 'origin', graphyardBaseBranch)); return git('rev-parse', `refs/remotes/origin/${graphyardBaseBranch}`); },
     head: () => git('rev-parse', 'HEAD'),
     contains: async (ancestor, commit) => { try { await git('merge-base', '--is-ancestor', ancestor, commit); return true; } catch { return false; } },
-    checkout: async commit => { await git('checkout', '--detach', '--quiet', commit); },
+    checkout: async commit => { await git('checkout', '--detach', '--quiet', commit); recordCommit(cliRoot, commit); },
   };
 }
 
@@ -590,9 +592,7 @@ export const upgradeCommands = defineCommands([{
       if (basename(dirname(root)) !== 'cli-releases' || !/^[0-9a-f]{40}$/i.test(commit)) {
         throw new Error('Identity repair requires an installed cli-releases/<commit> directory; run graphyard upgrade from a readable Graphyard checkout');
       }
-      const file = releaseIdentityPath(root);
-      await mkdir(dirname(file), { recursive: true });
-      await writeFile(file, commit.toLowerCase());
+      const file = recordCommit(root, commit);
       console.log(`Restored CLI release identity: ${file}`);
       return;
     }

@@ -1,7 +1,7 @@
 // Concern: GY-3412 — graphyard-host-shim, the only command this machine's SSH key may run on a host
 // (authorized_keys restrict,command=…, written by `graphyard host prepare`). It runs as the host's
 // unprivileged gy-compute user with rootless Docker and answers fixed verbs with validated arguments:
-//   probe                          the shim's own digest, then cores, load, CPU steal, sensors and running trial containers
+//   probe                          the shim's own digest and verbs (GY-3517), then cores, load, CPU steal, sensors and running trial containers
 //   receive-pack REPO SHA          a git pack on stdin into the per-repo mirror ~/.graphyard/mirrors/REPO.git
 //   receive-image IMAGE            `docker save` output on stdin, loaded once per warm image; older warm images go
 //   prepare-run REPO SHA IMAGE     a checkout of SHA cloned from the mirror under ~/.graphyard/runs,
@@ -31,6 +31,22 @@ export const hostProbeScript = [
 /** The warm image a host runs shards in: the trial image's digest and the lockfile's hash (`none` without one). */
 export const warmImagePattern = /^graphyard-warm:[0-9a-f]{12}-(?:[0-9a-f]{12}|none)$/;
 
+/**
+ * GY-3517: the verbs this shim speaks, each with a revision. Bump a verb's revision when a release
+ * changes what it does in a way a trial relies on, and add a new verb here; any other change to the
+ * shim (its launcher, limits, wording) leaves this list alone, so hosts on the older shim keep taking shards.
+ */
+export const hostShimVerbs = ['probe:1', 'receive-pack:1', 'receive-image:1', 'prepare-run:1', 'run-shard:2', 'fetch-records:1', 'clean:1'];
+/** The verbs a merge trial uses: a host whose shim lacks any of them takes no shards until prepare runs again there. */
+export const trialVerbs = hostShimVerbs;
+/** Shims released before the probe listed its verbs, by digest: the verbs each speaks (GY-3549's shim). */
+export const legacyShimVerbs: Record<string, readonly string[]> = { '90b5bdaa66f84f53f7dbc87ef089f17051c1e230900a4248ffb76ecb8d2315d6': hostShimVerbs };
+/** The trial verbs a shim lacks, by what its probe printed: its verbs line, else what its digest is known to speak. */
+export const missingTrialVerbs = (probe: { shim: string | null; verbs: string[] | null }) => {
+  const speaks = probe.verbs ?? (probe.shim === hostShimDigest ? hostShimVerbs : probe.shim ? legacyShimVerbs[probe.shim] : undefined) ?? [];
+  return trialVerbs.filter(verb => !speaks.includes(verb));
+};
+
 const shimDigestSlot = '@GRAPHYARD_SHIM_DIGEST@';
 const shimTemplate = `#!/bin/sh
 # graphyard-host-shim: the only command Graphyard's SSH key may run here (graphyard host prepare).
@@ -41,6 +57,7 @@ export DOCKER_HOST="unix://$XDG_RUNTIME_DIR/docker.sock"
 case "$SSH_ORIGINAL_COMMAND" in
   probe)
     echo "shim ${shimDigestSlot}"
+    echo "verbs ${hostShimVerbs.join(' ')}"
     echo "user $(id -u) $(id -Gn)"
 ${hostProbeScript.split('\n').map(line => `    ${line}`).join('\n')}
     ;;
@@ -171,6 +188,6 @@ GRAPHYARD_VERBS
   *) refuse ;;
 esac
 `;
-/** GY-3476: this release's shim, named by the digest its probe prints; a host whose probe prints another (or none) runs an older shim. */
+/** GY-3476: this release's shim, named by the digest its probe prints; GY-3517: a host on another digest stays ready while it speaks every trial verb. */
 export const hostShimDigest = createHash('sha256').update(shimTemplate).digest('hex');
 export const hostShimScript = shimTemplate.replace(shimDigestSlot, hostShimDigest);

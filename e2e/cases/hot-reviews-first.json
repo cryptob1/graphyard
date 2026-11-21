@@ -1,14 +1,14 @@
 {
   "id": "hot-reviews-first",
-  "title": "When hot, reviews and trials launch first",
-  "description": "With a fixture CPU temperature of 82C (60 s package average), the loop starts no new implementation session while a review and a queued trial launch, and master status shows the implementation hold; at 86C nothing new starts; below 80C implementation launches again; with free capacity and both kinds ready, reviews and trials launch before workers.",
+  "title": "Reviews and trials launch before workers, hot or not",
+  "description": "GY-3501 deleted GY-3437's heat tiers: with a fixture CPU temperature of 86C and low pressure, the worker, the review and the queued trial all launch in one cycle and master status shows no hold; below 80C nothing changes; and with free capacity and both kinds ready, reviews and trials launch before workers.",
   "tags": ["dispatch"],
   "target": "any",
   "required": false,
   "steps": [
     {
       "kind": "command",
-      "name": "at 82C implementation launches wait while a review launches, as master status shows",
+      "name": "everything launches at 86C, reviews and trials first",
       "run": "node --import tsx tests/helpers/run-tests.ts tests/hot-reviews-first.test.ts",
       "timeoutSeconds": 300
     }

@@ -66,7 +66,7 @@ test('integration:reuse-required', () => assert.equal(answer, 42));
     if (!response.ok) throw new Error(`${response.status}: ${JSON.stringify(result)}`);
     return result;
   };
-  const start = (input: Record<string, unknown> = {}, signal?: AbortSignal) => api(`work/${work.id}/worker-verification`, { head, epoch: 1, mode: 'complete', ...input }, worker.token, signal)
+  const start = (input: Record<string, unknown> = {}, signal?: AbortSignal) => api(`work/${work.id}/worker-verification`, { mode: 'verify', head, epoch: 1, ...input }, worker.token, signal)
     .then(value => ({ value, error: null }), error => ({ value: null, error }));
   const pending = async () => (await api('work-snapshot')).workerVerifications as any[];
   const result = { record: { key: work.key, head, clean: true, at: new Date().toISOString(), ran: [], outstanding: [] }, rerun: { flaked: [], baseFailures: [] } };
@@ -119,18 +119,20 @@ test('integration:worker-verification-request-reuse — identical repeats share 
   assert.deepEqual((await rejoined).value, f.result);
 });
 
-test('e2e:worker-verification-request-reuse — an interrupted complete and its repeat run one host verification and submit through unchanged gates', { timeout: 240_000 }, async t => {
+test('e2e:worker-verification-request-reuse — an interrupted verify and its repeat run one host verification and complete submits through unchanged gates', { timeout: 240_000 }, async t => {
   const f = await fixture(t);
-  // The caller gives up while host admission is still waiting.
+  // The caller gives up while host admission is still waiting; the request itself stays queued.
   const abort = new AbortController();
-  const interrupted = f.start({}, abort.signal);
+  const interrupted = f.start({ preserves: [] }, abort.signal);
   await until(async () => (await f.pending()).length === 1, 'first request queued');
   abort.abort();
   assert.ok((await interrupted).error);
   const printed: any[] = [];
-  const context = { args: ['1', '--head', f.head], repositoryRoot: () => f.root,
+  const context = { args: [], repositoryRoot: () => f.root,
     api: (path: string, body?: unknown) => f.api(path, body, f.worker.token), print: (value: any) => printed.push(value) } as unknown as CliContext;
-  const completed = completeCommand.run(context, f.work).then(() => null, error => error);
+  // The worker's repeat — the same verification inputs from `graphyard verify`, a caller whose key order differs — joins it.
+  const { verifyCommand } = await import('../src/cli/verify.js');
+  const verifying = verifyCommand.run(context, f.work).then(() => null, error => error);
   await delay(200);
   const queued = await f.pending();
   assert.equal(queued.length, 1, 'the repeat joins the queued verification');
@@ -141,9 +143,13 @@ test('e2e:worker-verification-request-reuse — an interrupted complete and its 
     return runWorkerVerification(...args);
   });
   await pump();
+  const verifyError = await verifying;
+  if (verifyError) throw verifyError;
+  assert.equal(executions, 1);
+  // With the verification recorded, complete submits the head; no gate changed.
+  const completed = completeCommand.run({ ...context, args: ['1', '--head', f.head] }, f.work).then(() => null, error => error);
   const completionError = await completed;
   if (completionError) throw completionError;
-  assert.equal(executions, 1);
   const recorded = (await f.store.list()).find(work => work.id === f.work.id)!;
   assert.equal(recorded.candidate?.sha, f.head); assert.equal(recorded.submission?.epoch, 1);
   assert.equal(recorded.lease, null); assert.equal(recorded.pipeline?.attempts.length, 1);
@@ -152,6 +158,7 @@ test('e2e:worker-verification-request-reuse — an interrupted complete and its 
   assert.notEqual(recorded.stage, 'done');
   const ran = (await f.store.events(f.work.id)).filter(event => event.kind === 'work.self-verified').at(-1)!.payload.details.record.ran;
   assert.ok(ran.some((run: any) => run.proof === 'integration:reuse-required' && run.result === 'pass' && run.executed > 0), JSON.stringify(ran));
-  assert.equal(printed.length, 1);
+  assert.equal(printed.length, 2);
+  assert.equal(printed.at(-1).selfVerification.state, 'passing', JSON.stringify(printed.at(-1).selfVerification));
   assert.deepEqual(await f.pending(), []);
 });

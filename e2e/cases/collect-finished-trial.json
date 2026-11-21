@@ -1,0 +1,16 @@
+{
+  "id": "collect-finished-trial",
+  "title": "A finished merge trial whose completion was lost leaves flight within one cycle",
+  "description": "The merge writer over detached trial runs whose completions never reach the loop: once a run writes its exit and result files, the next cycle settles the head on that verdict, master status stops showing it in flight, and its lane takes the next candidate. A trial still running beside it is untouched, and no loop restart is needed.",
+  "tags": ["regression"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a finished trial is collected from its files without a restart",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/collect-finished-trial.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

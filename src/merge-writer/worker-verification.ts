@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { defaultChildRun, type ChildRunOptions } from '../child-runner.js';
+import { defaultChildRun, type ChildProcessError, type ChildRunOptions } from '../child-runner.js';
 import { trialContainerDependencies, trialContainerWords, trialHarness } from './trial-container.js';
 import { launcherLines, trialContainerFault, trialLoad } from './trial-load.js';
 import { trialEnvironment, trialHomeVariables, trialTemporaryVariables } from './trial.js';
@@ -12,6 +12,7 @@ import { npmCiEnvironment } from '../cli/test-isolation.js';
 import { installArgv, packageManager } from '../package-manager.js';
 import { pinnedNodePath } from '../node-pin.js';
 import { withHeavyJob } from '../master/verification-slots.js';
+import { maskSecrets } from '../redaction.js';
 import type { WorkerVerificationResult } from '../cli/worker-verification.js';
 import type { Work } from '../model.js';
 
@@ -24,17 +25,29 @@ export const workerVerificationPrefix = 'verify-';
 /**
  * One child of a verification in its trial container (GY-3332): the launcher's lines reach `progress` as
  * they happen, and a start that gave up waiting fails in the launcher's own words, never as a bare failed command.
+ * GY-3506: any other failure keeps its exit status/signal and masked stdout/stderr before cleanup removes the allocation.
  */
 export async function verificationStep(command: string, args: string[], options: ChildRunOptions, progress: (line: string) => void): Promise<string> {
   try { return await defaultChildRun(command, args, { ...options, onStderr: launcherLines(progress) }); }
   catch (error) {
-    const fault = trialContainerFault(String((error as { stderr?: unknown }).stderr ?? ''));
-    throw fault ? new Error(`The verification could not start: ${fault}`) : error;
+    const failed = error as Partial<ChildProcessError>;
+    const fault = trialContainerFault(String(failed.stderr ?? ''));
+    if (fault) throw new Error(`The verification could not start: ${fault}`);
+    if (failed.status == null && !failed.signal && !failed.timedOut) throw error;
+    const ended = failed.status === 124 ? 'exit status 124: the trial container reached its deadline and was stopped'
+      : failed.status != null ? `exit status ${failed.status}`
+        : failed.signal ? `stopped by ${failed.signal}`
+          : 'timed out';
+    const header = maskSecrets(String(failed.message ?? `Command failed: ${command}`)).split('\n')[0];
+    const stderr = maskSecrets(String(failed.stderr ?? '')).trim().slice(-4000);
+    const stdout = maskSecrets(String(failed.stdout ?? '')).trim().slice(-4000);
+    const streams = [stderr ? `stderr:\n${stderr}` : '', stdout ? `stdout:\n${stdout}` : ''].filter(Boolean).join('\n');
+    throw new Error(`${header} (${ended})${streams ? `\n${streams}` : ''}`);
   }
 }
 
 /**
- * `progress` receives each launcher line (waiting, starting) as it happens, for the worker's `complete` to show (GY-3332).
+ * `progress` receives each launcher line (waiting, starting) as it happens, for the worker's optional `verify` to show (GY-3332).
  * GY-3447: a worker's own verification takes no host heavy-job slot; the trial load cap bounds it. GY-3446: under a host strict cap it does.
  */
 export const runWorkerVerification = (root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot(),

@@ -1,7 +1,8 @@
 // GY-3412: hosts for remote shard runs. Every host runs the real graphyard-host-shim, exactly as
 // `graphyard host prepare` installs it, in its own home; only Docker is a stand-in, keeping its images
 // and containers in a state file, logging each call, and running a container's command in its working
-// directory — under `unshare -rn` (no network) when it was created with --network=none. This machine
+// directory — under `unshare -rn` (no network) when it was created with --network=none, and with a
+// read-only root (bubblewrap) on a host whose Docker state holds a `read-only-root` file. This machine
 // has the same stand-in Docker. `ssh` here routes USER@NAME to the host named NAME (exit 255 while
 // NAME.down exists, as OpenSSH does for a host it cannot reach); `sshd` runs a real OpenSSH server.
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
@@ -68,8 +69,18 @@ elif command == 'rm':
 elif command == 'create':
     at = args.index('--entrypoint')
     env = dict(value.split('=', 1) for flag, value in zip(args, args[1:]) if flag == '--env')
-    s['containers'][args[args.index('--name') + 1]] = {'workdir': args[args.index('--workdir') + 1], 'env': env, 'image': args[at + 2],
-        'command': (['unshare', '-rn'] if '--network=none' in args else []) + [args[at + 1]] + args[at + 3:]}
+    workdir, isolate = args[args.index('--workdir') + 1], ['unshare', '-rn'] if '--network=none' in args else []
+    if os.path.exists(os.path.join(STATE, 'read-only-root')):
+        # Docker's --read-only, for a host that asks: only the container's tmpfs and bind mounts are writable.
+        isolate = ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc'] + (['--unshare-net'] if isolate else [])
+        for flag, value in zip(args, args[1:]):
+            if flag == '--tmpfs':
+                isolate += ['--tmpfs', value.split(':')[0]]
+            if flag == '--mount':
+                mount = dict(part.split('=', 1) for part in value.split(',') if '=' in part)
+                isolate += ['--ro-bind' if value.endswith(',readonly') else '--bind', mount['src'], mount['dst']]
+        isolate += ['--chdir', workdir, '--']
+    s['containers'][args[args.index('--name') + 1]] = {'workdir': workdir, 'env': env, 'image': args[at + 2], 'command': isolate + [args[at + 1]] + args[at + 3:]}
     open(os.path.join(STATE, 'creates.jsonl'), 'a').write(json.dumps(sys.argv[1:]) + '\\n')
     save()
 elif command == 'start':
@@ -94,6 +105,7 @@ export async function shardHosts(label: string, names: string[], images: Record<
   }
   await executable(join(bin, 'ssh'), `#!/bin/sh
 if [ "$1" = -G ]; then exec /usr/bin/ssh "$@"; fi
+for arg; do case "$arg" in -fNM|-O) exit 0;; esac; done
 for last; do :; done
 for arg; do case "$arg" in *@*) target="$arg";; esac; done
 host="\${target#*@}"; dir="${root}/hosts/$host"

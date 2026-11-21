@@ -79,6 +79,7 @@ test(`${proof} — the shim's probe reads a host's cores, load, steal and hottes
   const probe = [`shim ${hostShimDigest}`, 'user 1001 gy-compute', 'cores 16', 'load 3.5', 'cpu  100 0 100 700 0 0 0 100 0 0', 'temp k10temp 71000', 'temp nvme 80000', 'runs 1'].join('\n');
   const run: ChildRun = async (command, args) => {
     if (command === 'ssh' && args[0] === '-G') return `hostname ${args.at(-1)!.split('@').at(-1)}\nuser gy-compute\n`;
+    if (command === 'ssh' && (args.includes('-O') || args.includes('-fNM') && args.at(-1) === 'gy-compute@box')) return '';
     if (command === 'ssh' && args.at(-2) === 'gy-compute@box') return probe;
     if (command === 'ssh') throw Object.assign(new Error('ssh: connect to host gone port 22: Connection refused'), { status: 255 });
     throw new Error('no Docker here');

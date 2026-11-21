@@ -76,7 +76,9 @@ function walk(root, directory) {
  * runs. `shape`: the same edges per top-level declaration, so a walk can follow only what the names
  * it takes reach (`moduleShape`). `data`: the tracked paths a file outside src/ and web/ names in
  * text (`'../docs/x.md'`, `join(root, 'e2e/cases/a.json')`, a directory it lists) — files it reads.
- * `files` is the set of tracked files; `directories` maps a directory to the files under it.
+ * A statement's `listed` holds the paths of its `data` it reaches only by listing a directory: it reads
+ * the directory, not each file in it. `files` is the set of tracked files; `directories` maps a
+ * directory to the files under it.
  */
 export function fileEdges(file, text, files, directories) {
   const data = new Set(), directory = posix.dirname(file);
@@ -90,7 +92,7 @@ export function fileEdges(file, text, files, directories) {
     if (!path.endsWith('/')) for (const candidate of [normal, normal.replace(/\.js$/, '.ts'), normal.replace(/\.js$/, '.tsx'), normal.replace(/\.mjs$/, '.mts'), `${normal}.ts`, `${normal}.tsx`, `${normal}.js`, `${normal}.mjs`, `${normal}/index.ts`, `${normal}/index.js`]) {
       if (files.has(candidate)) return [candidate];
     }
-    return directories.has(normal) && (!named || scans) ? directories.get(normal) : [];
+    return directories.has(normal) && (!named || scans) ? Object.assign([...directories.get(normal)], { listing: true }) : [];
   };
   const shape = moduleShape(file, text, specifier => /^\.{1,2}\//.test(specifier) ? resolveIn(posix.join(directory, specifier)) : []);
   const imports = new Set([...shape.imports]);
@@ -99,11 +101,13 @@ export function fileEdges(file, text, files, directories) {
   const roots = [...new Set([...files].map(path => path.split('/')[0]))].filter(name => name !== '.' && name.length > 1).map(name => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   const pathPattern = new RegExp(`(?<![\\w@.-])((?:\\.{1,2}/)*)((?:${roots.join('|')})(?:/[\\w.@-]+)*/?)(?![\\w@-])`, 'g');
   for (const statement of shape.statements.flatMap(statement => [statement, ...statement.members])) {
-    statement.data = new Set();
+    statement.data = new Set(); statement.listed = new Set();
+    const named = new Set();
     for (const [, up, path] of statement.strings.join('\n').matchAll(pathPattern)) {
-      const found = up ? resolveIn(posix.join(directory, up + path), true) : [];
-      for (const target of found.length ? found : resolveIn(path, true)) if (!imports.has(target)) { statement.data.add(target); data.add(target); }
+      const relative = up ? resolveIn(posix.join(directory, up + path), true) : [], found = relative.length ? relative : resolveIn(path, true);
+      for (const target of found) if (!imports.has(target)) { statement.data.add(target); data.add(target); if (!found.listing) named.add(target); }
     }
+    for (const target of statement.data) if (!named.has(target)) statement.listed.add(target);
   }
   return { imports, shape, data };
 }
@@ -227,7 +231,8 @@ export function moduleShape(file, text, resolveSpecifier) {
  * reference — the declarations behind them, the statements every load runs, and the modules those
  * load — transitively; and the paths it or anything it loads outside src/ and web/ reads as data,
  * which are not followed further. A test file maps to itself. `map.declarations` holds, per file, the
- * tests each top-level declaration is needed by; `map.readers` the tests reading each file as data; `map.reverse` every code file's importers, and
+ * tests each top-level declaration is needed by; `map.readers` the tests reading each file as data; `map.listers` the tests whose
+ * only link to a file is listing its directory; `map.reverse` every code file's importers, and
  * `map.texts` each test file's text, for placing a file the map does not hold.
  */
 export function dependencyMap(root = repositoryRoot, tests = listTestFiles(root)) {
@@ -252,7 +257,7 @@ export function dependencyMap(root = repositoryRoot, tests = listTestFiles(root)
   };
   const reach = test => {
     // Each module with the names asked of it so far (`null`: all); a module asked for new names is resolved again.
-    const asked = new Map([[test, null]]), modules = [[test, null]], statements = [], done = new Set(), read = new Set(), used = new Map(), props = new Set();
+    const asked = new Map([[test, null]]), modules = [[test, null]], statements = [], done = new Set(), read = new Set(), listed = new Set(), used = new Map(), props = new Set();
     let methods = [];
     const ask = (file, names) => {
       const before = asked.get(file);
@@ -265,7 +270,7 @@ export function dependencyMap(root = repositoryRoot, tests = listTestFiles(root)
     const take = (file, shape, part) => {
       for (const name of part.declares) used.set(file, (used.get(file) ?? new Set()).add(name));
       for (const { target, name } of part.loads) ask(target, name);
-      for (const target of part.data ?? []) read.add(target);
+      for (const target of part.data ?? []) (part.listed.has(target) ? listed : read).add(target);
       for (const name of part.props) props.add(name);
       for (const ref of part.refs) if (shape.bindings.has(ref)) askBinding(shape.bindings.get(ref)); else for (const at of shape.declaring.get(ref) ?? []) want(file, at);
     };
@@ -292,19 +297,21 @@ export function dependencyMap(root = repositoryRoot, tests = listTestFiles(root)
         for (const [file, shape, member] of ready) take(file, shape, member);
       }
     }
-    return { files: new Set([...asked.keys(), ...read]), read, used };
+    const files = new Set([...asked.keys(), ...read]);
+    return { files, read, used, listed: [...listed].filter(file => !files.has(file)) };
   };
-  const map = new Map(), declarations = new Map(), readers = new Map();
+  const map = new Map(), declarations = new Map(), readers = new Map(), listers = new Map();
   for (const test of tests) {
-    const { files: reached, read, used } = reach(test);
-    for (const file of reached) map.set(file, [...(map.get(file) ?? []), test]);
+    const { files: reached, read, used, listed } = reach(test);
+    for (const file of [...reached, ...listed]) map.set(file, [...(map.get(file) ?? []), test]);
+    for (const file of listed) listers.set(file, [...(listers.get(file) ?? []), test]);
     for (const file of read) readers.set(file, [...(readers.get(file) ?? []), test]);
     for (const [file, names] of used) {
       if (!declarations.has(file)) declarations.set(file, new Map());
       for (const name of names) declarations.get(file).set(name, [...(declarations.get(file).get(name) ?? []), test]);
     }
   }
-  map.declarations = declarations; map.readers = readers;
+  map.declarations = declarations; map.readers = readers; map.listers = listers;
   map.reverse = new Map();
   for (const file of tracked) for (const next of edgesOf(file).imports) map.reverse.set(next, [...(map.reverse.get(next) ?? []), file]);
   map.texts = new Map(tests.filter(test => files.has(test)).map(test => [test, text(test)]));
@@ -363,17 +370,19 @@ export function changedDeclarations(changed, base, root = repositoryRoot, head =
  * changed file is the install or configuration, or when the changed files are unknown. A changed file
  * selects the tests reaching it — only those needing the declarations it touches, where `declarations`
  * (`changedDeclarations`) names them — and a file the map does not hold the tests that import or name
- * it. A change limited to documentation selects nothing: no test executes it.
+ * it. A change limited to documentation selects nothing: no test executes it. A narrowed selection
+ * (`declarations` given: an item's trial against its base) skips the tests whose only link to a
+ * changed file is listing its directory (GY-3541); the batch gate selects with no base and runs them.
  */
-export function selectAffected(changed, map, tests, declarations = new Map()) {
+export function selectAffected(changed, map, tests, declarations) {
   if (!changed) return { mode: 'full', reason: 'the changed files are unknown', files: tests };
   const effective = changed.filter(file => !isDocumentation(file));
   if (!effective.length) return { mode: 'affected', reason: `${changed.length} changed file(s) are documentation only`, files: [] };
   for (const file of effective) if (fullSuitePaths.some(pattern => pattern.test(file))) return { mode: 'full', reason: `${file} changes the install, the test runner or configuration`, files: tests };
   const testsFor = file => {
     if (!map.has(file)) return [...unmappedTests(file, map)];
-    const names = declarations.get(file);
-    return names ? [...(map.readers?.get(file) ?? []), ...[...names].flatMap(name => map.declarations?.get(file)?.get(name) ?? [])] : map.get(file);
+    const names = declarations?.get(file), listers = declarations ? map.listers?.get(file) ?? [] : [];
+    return names ? [...(map.readers?.get(file) ?? []), ...[...names].flatMap(name => map.declarations?.get(file)?.get(name) ?? [])] : map.get(file).filter(test => !listers.includes(test));
   };
   const selected = new Set(effective.flatMap(testsFor));
   if (selected.size === tests.length) return { mode: 'full', reason: `every test file reaches the ${effective.length} changed file(s)`, files: tests };

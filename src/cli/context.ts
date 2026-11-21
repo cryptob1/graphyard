@@ -7,7 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadConnection, hostIdSchema } from '../repository-setup.js';
 import { readCredentialFile } from '../private-file.js';
-import { cliRelease, releaseIdentityPath } from '../release.js';
+import { cliRelease, recordedCommit, releaseIdentityPath } from '../release.js';
 import { shellQuote } from '../shell-quote.js';
 import { cliCommit } from '../protocol-version.js';
 import { verificationRequest } from './verification-request.js';
@@ -60,10 +60,10 @@ export function releaseSkew(cli: ReleaseIdentity, server: { version?: unknown; c
   return !cli.released && cli.unreadable ? cli.unreadable : versionSkewMessage(cli.version, serverVersion);
 }
 
-/** This CLI's own release: the same release `graphyard version` reports and /healthz serves (src/release.ts cliRelease), so both sides compare like with like. Its commit is the checkout this file runs from, what an unreleased build compares. */
+/** This CLI's own release: the same release `graphyard version` reports and /healthz serves (src/release.ts cliRelease), so both sides compare like with like. Its commit is the checkout this file runs from — Git's reading, else the commit every checkout move records (GY-3569), never an older revision. */
 const thisRelease = (): ReleaseIdentity => {
   const release = cliRelease(), root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-  const commit = cliCommit(root) ?? (commitPattern.test(release.revision) ? release.revision.toLowerCase() : null);
+  const commit = cliCommit(root) ?? recordedCommit(root) ?? (commitPattern.test(release.revision) ? release.revision.toLowerCase() : null);
   return { version: release.version, released: release.released, commit, unreadable: commit ? undefined : unreadableReleaseMessage(root) };
 };
 
