@@ -2,9 +2,9 @@ import { trialCpuMonitor, trialOverloadFault, type TrialCpuReading } from './tri
 // Concern: the merge writer's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync, statfsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join, relative, isAbsolute, resolve } from 'node:path';
+import { basename, delimiter, dirname, join, relative, isAbsolute, resolve } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, removeTree, verifyWorktreeRoot, volatileFilesystem, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiEnvironment } from '../cli/test-isolation.js';
@@ -480,10 +480,24 @@ export function shardTestFiles(files: readonly string[], lanes: number, duration
   }
   return shards.map(shard => shard.files).filter(shard => shard.length);
 }
-/** The merge's own timing baseline in its checkout, `{}` when it has none or it does not parse. */
-const checkoutDurations = (worktree: string, path?: string): Promise<Record<string, number>> => path ? readFile(join(worktree, path), 'utf8')
-  .then(text => { const files = (JSON.parse(text) as { files?: unknown } | null)?.files; return files && typeof files === 'object' ? files as Record<string, number> : {}; })
-  .catch(() => ({})) : Promise.resolve({});
+/** Where a passing trial saves its per-file durations (GY-3542): beside the install's other local state, never in a checkout. */
+export const refreshedDurationsPath = (root: string, path: string) => join(root, '.graphyard', basename(path));
+const durationsIn = (text: string): Record<string, number> => { try { const files = (JSON.parse(text) as { files?: unknown } | null)?.files; return files && typeof files === 'object' ? files as Record<string, number> : {}; } catch { return {}; } };
+/** The timings a trial plans its shards from: the merge's own baseline in its checkout, under what passing trials on this install measured since; `{}` when neither exists. */
+const checkoutDurations = async (worktree: string, root: string, path?: string): Promise<Record<string, number>> => path
+  ? Object.assign({}, ...await Promise.all([join(worktree, path), refreshedDurationsPath(root, path)].map(file => readFile(file, 'utf8').then(durationsIn, () => ({})))))
+  : {};
+/** A passing trial's durations for the files it ran (`ran`), from its runner records, laid over those saved before. */
+async function refreshDurations(root: string, path: string, records: string, ran: readonly string[]): Promise<void> {
+  const file = refreshedDurationsPath(root, path), files = durationsIn(await readFile(file, 'utf8').catch(() => ''));
+  for (const line of records.split('\n')) {
+    try { const record = JSON.parse(line) as { file?: unknown; durationMs?: unknown }; if (typeof record.file === 'string' && typeof record.durationMs === 'number' && ran.includes(record.file)) files[record.file] = record.durationMs; } catch { /* not a record */ }
+  }
+  await mkdir(dirname(file), { recursive: true });
+  const temporary = `${file}.${randomUUID().slice(0, 8)}`;
+  await writeFile(temporary, `${JSON.stringify({ files }, null, 2)}\n`);
+  await rename(temporary, file);
+}
 /** How much of a failing runner child's output its diagnostic record keeps: enough to read the exit, little enough for one daemon action. */
 export const runnerDiagnosticTailLength = 1200;
 /**
@@ -1443,14 +1457,14 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     // shared shard to this machine, and placement keeps the local-only shards here (runShardsOnHosts
     // `pinned`) while the others may go to any host.
     const split = await splitLocalOnlyTests(files, file => readFile(join(worktree, file), 'utf8'));
-    const durations = await checkoutDurations(worktree, strategy.durations);
+    const durations = await checkoutDurations(worktree, input.root, strategy.durations);
     const shards: string[][] = [], pinned: boolean[] = [];
     for (const pool of [{ files: split.remoteable, lanes: trialShardLanes(cores) + remoteLanes, local: false }, { files: split.localOnly, lanes: trialShardLanes(cores), local: true }])
       for (const group of input.groupSize === undefined ? shardTestFiles(pool.files, pool.lanes, durations) : groupTestFiles(pool.files, input.groupSize)) { shards.push(group); pinned.push(pool.local); }
     const slotsDirectory = process.env[(await import('../master/verification-slots.js')).slotsDirectoryVariable];
     const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory));
     input.onTiming?.(`tests: ${lanes} lanes, breadth ${breadth}`, 0);
-    const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null; passed: string[] } | undefined)[] = [];
+    const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null; passed: string[]; records: string } | undefined)[] = [];
     let stopped: unknown = null;
     // A shard a host turned away is noted after every shard's output, so the note stays in the log tail kept on the item.
     const dropped = new Map<string, HostDroppedError>();
@@ -1482,7 +1496,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out, group))];
         // GY-3418: the files that passed — the whole shard when it exited 0 naming none, else those its records name passing.
         const passed = tests.ok && !failing.length ? group : recorded.filter(record => record.passed && group.includes(record.file) && !failing.includes(record.file)).map(record => record.file);
-        settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries, passed,
+        settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries, passed, records: recordText,
           unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
       } catch (error) {
         if (error instanceof HostDroppedError) { if (!dropped.has(error.host)) dropped.set(error.host, error); throw error; }
@@ -1517,6 +1531,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const unattributed = ran.find(shard => shard.unattributed)?.unattributed ?? null;
     const failed = [...new Set(groups.flatMap(group => group.failed))];
     if (!failed.length && unattributed) throw unattributed;
+    // GY-3542: a passing trial's own timings balance the next trial's shards.
+    if (!failed.length && strategy.durations) await refreshDurations(input.root, strategy.durations, ran.map(shard => shard.records).join('\n'), files).catch(() => {});
     const worst = groups.find(group => group.status !== 0);
     return result({ passed: Math.max(0, counted - failed.length), failed, files: counted }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups,
       failingOutput.length && log.join('\n').length > tailLength ? failureTail(failingOutput) : tail());

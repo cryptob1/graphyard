@@ -1,0 +1,14 @@
+{
+  "id": "shard-timing-baseline",
+  "title": "A merge trial's shards finish at about the same time once it knows how long each test file takes",
+  "description": "A repository whose test files take very different times is trialled twice. The first trial has no timings, cuts its shards by file count and waits on one slow shard. It passes and saves what each file took. The second trial plans from those timings and reports its slowest shard within 2x of its median shard.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Trial the same commit twice and compare the shard times each trial reports",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/shard-timing-baseline.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
