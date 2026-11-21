@@ -1,9 +1,10 @@
-import { createServer, type IncomingMessage } from 'node:http';
+import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { chmod, rm } from 'node:fs/promises';
 import { z } from 'zod';
 import type { Engine } from '../engine.js';
 import { Refusal, demand, type Principal } from '../model.js';
 import { Next, Sent, matchRoute, requestFailure, type RouteContext, type RouteModule } from './routes.js';
-import { assembleServices, authenticate, configuredActor, confinedLaneProducer, laneProducerScope, localRead, operatorAgentRouteGuard, operatorVisible, type ServerOptions } from './auth.js';
+import { assembleServices, authenticate, configuredActor, tailscaleTeammate, confinedLaneProducer, laneProducerScope, localRead, operatorAgentRouteGuard, operatorVisible, type ServerOptions } from './auth.js';
 import { type Credential } from './principals.js';
 import { loopStateRoutes } from './routes/loop-state.js';
 import { productBriefRoutes } from './routes/product-brief.js';
@@ -81,7 +82,10 @@ export function server(engine: Engine, credentials: Credential[], options: Serve
       const lane = url.pathname.startsWith('/api/') ? configuredActor(services, req.headers.authorization) : null;
       if (!(lane && confinedLaneProducer(lane)) && await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
-        context.actor = await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname, localRead(req));
+        // GY-3486: on the serve socket only tailscaled reaches, its Tailscale-User-Login header names the person.
+        const login = viaTailscale.has(req) && !String(req.headers.authorization ?? '').replace(/^Bearer\s*/, '') ? req.headers['tailscale-user-login'] : undefined;
+        context.actor = typeof login === 'string' && login ? await tailscaleTeammate(services, login)
+          : await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname, localRead(req));
         if (await dispatch([laneProducerScope, reporterScope, ...apiRoutes])) return;
         return send(404, { error: 'Route not found' });
       }
@@ -96,5 +100,20 @@ export function server(engine: Engine, credentials: Credential[], options: Serve
   });
   // The Master page's live terminal (GY-3211) is the one WebSocket.
   http.on('upgrade', (req, socket) => { terminalUpgrade(services, req, socket).catch(error => { console.error(requestFailure(req.method, req.url, error)); socket.destroy(); }); });
-  return Object.assign(http, { services });
+  /**
+   * GY-3486: the serve socket `tailscale serve` proxies the tailnet to (up.ts). Its requests run through
+   * this server's own handlers, marked as tailscaled's, so Tailscale's identity header is trusted there alone.
+   */
+  const serveSocket = async (path: string): Promise<Server> => {
+    await rm(path, { force: true });
+    const socket = createServer((req, res) => { viaTailscale.add(req); http.emit('request', req, res); });
+    socket.on('upgrade', (req, stream, head) => http.emit('upgrade', req, stream, head));
+    await new Promise<void>((resolve, reject) => { socket.once('error', reject); socket.listen(path, () => resolve()); });
+    await chmod(path, 0o600);
+    return socket;
+  };
+  return Object.assign(http, { services, serveSocket });
 }
+
+/** Requests that arrived on the serve socket, which only tailscaled reaches. */
+const viaTailscale = new WeakSet<IncomingMessage>();

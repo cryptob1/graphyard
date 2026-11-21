@@ -84,9 +84,6 @@ async function proofFiles(root: string, proof: string) {
   return named;
 }
 
-/** The longest one proof's test files may run, on HEAD or on the base. */
-export const proofRunTimeoutMs = 10 * 60_000;
-
 /**
  * Run one proof's cases in `root` and count what the TAP stream, else the repository's runner, says about them. The proof's test
  * files run whole, and its cases are the ones whose title begins with the proof name: narrowing the
@@ -94,11 +91,9 @@ export const proofRunTimeoutMs = 10 * 60_000;
  * producer then has to explain away. The run gets the suite's isolation (test-isolation.ts): this
  * session's credentials withheld and a window of free ports held for it alone.
  */
-export async function runProof(root: string, proof: string, files: string[], ports: ReserveOptions = {}, deadline = Infinity): Promise<Pick<ProofRun, 'result' | 'executed' | 'failed' | 'skipped' | 'files' | 'abnormal'>> {
+export async function runProof(root: string, proof: string, files: string[], ports: ReserveOptions = {}): Promise<Pick<ProofRun, 'result' | 'executed' | 'failed' | 'skipped' | 'files' | 'abnormal'>> {
   const reservation = await reserveTestPorts(ports);
-  // GY-3506: a run that hangs is stopped and recorded as such, never left to outlast the verification's own deadline.
-  const timeout = Math.max(1_000, Math.min(proofRunTimeoutMs, deadline - Date.now()));
-  const spawn = (command: string, args: string[]) => spawnSync(command, args, { cwd: root, encoding: 'utf8', env: isolatedTestEnvironment(process.env, testPortEnvironment(reservation.base)), maxBuffer: 64 * 1024 * 1024, timeout });
+  const spawn = (command: string, args: string[]) => spawnSync(command, args, { cwd: root, encoding: 'utf8', env: isolatedTestEnvironment(process.env, testPortEnvironment(reservation.base)), maxBuffer: 64 * 1024 * 1024 });
   const scratch = await mkdtemp(join(tmpdir(), 'graphyard-proof-'));
   try {
     const run = files.length ? spawn(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', '--test-reporter=tap', ...files]) : null;
@@ -111,8 +106,7 @@ export async function runProof(root: string, proof: string, files: string[], por
     if (!run) return { result: 'fail', executed: 0, failed: 0, skipped: 0, files };
     // The file's other cases are the ordinary suite's business: only the proof's own decide its
     // result. A run that did not end normally — a hook, the file or the process failing — passes none.
-    const abnormal = (run.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT' ? `the test process did not finish within ${Math.round(timeout / 1000)}s and was stopped`
-      : run.error ? `the test process could not run: ${run.error.message}` : abnormalTestExit(tap, run.status, run.signal);
+    const abnormal = run.error ? `the test process could not run: ${run.error.message}` : abnormalTestExit(tap, run.status, run.signal);
     return { result: !abnormal && executed > 0 && failed === 0 && skipped === 0 ? 'pass' : 'fail', executed, failed, skipped, files, ...(abnormal ? { abnormal } : {}) };
   } finally { reservation.release(); await rm(scratch, { recursive: true, force: true }); }
 }
@@ -182,10 +176,10 @@ export async function baseTree(root: string, base: string): Promise<{ tree: stri
   }
 }
 
-async function exerciseIn(prepared: NonNullable<Awaited<ReturnType<typeof baseTree>>>, base: string, proof: string, files: string[], ports: ReserveOptions, deadline?: number): Promise<BaseExercise> {
+async function exerciseIn(prepared: NonNullable<Awaited<ReturnType<typeof baseTree>>>, base: string, proof: string, files: string[], ports: ReserveOptions): Promise<BaseExercise> {
   const { tree, reverted } = prepared;
   if (!tree) return { base, result: 'indeterminate', executed: 0, reverted, reason: prepared.reason };
-  const run = await runProof(tree, proof, files, ports, deadline);
+  const run = await runProof(tree, proof, files, ports);
   // A base run that did not end normally — a missing dependency, an unmigrated database, a module
   // only the change adds — still fails without the change, and is recorded as such with what
   // stopped it, so a reader can tell "could not run" from "failed" (GY-1240).
@@ -200,7 +194,7 @@ async function exerciseIn(prepared: NonNullable<Awaited<ReturnType<typeof baseTr
  * without the declaration it would return a head the producer accepts (GY-1240). A declared proof
  * is not run against the base; the declaration is recorded for the reviewer to check.
  */
-export async function verifyWorkingTree(work: { key: string; criteria: Criterion[] }, root: string, now = () => new Date(), options: { baseBranch?: string; preserves?: string[]; ports?: ReserveOptions; deadline?: number } = {}): Promise<VerifyRecord> {
+export async function verifyWorkingTree(work: { key: string; criteria: Criterion[] }, root: string, now = () => new Date(), options: { baseBranch?: string; preserves?: string[]; ports?: ReserveOptions } = {}): Promise<VerifyRecord> {
   const { runnable, outstanding } = classifyProofs(work.criteria);
   const preserves = [...new Set(options.preserves ?? [])];
   const unknown = preserves.filter(proof => !runnable.some(entry => entry.proof === proof));
@@ -212,7 +206,7 @@ export async function verifyWorkingTree(work: { key: string; criteria: Criterion
   const ran: { run: ProofRun; files: string[] }[] = [];
   for (const entry of runnable) {
     const files = await proofFiles(root, entry.proof);
-    const result = await runProof(root, entry.proof, files, ports, options.deadline);
+    const result = await runProof(root, entry.proof, files, ports);
     // The proof's own cases decide its criterion (GY-853): a failed, skipped or unexecuted case is
     // the item's own test failing and blocks, wherever its file sits. When every case of the proof
     // passed but the run still did not complete normally, the failure lies in the rest of the run —
@@ -235,7 +229,7 @@ export async function verifyWorkingTree(work: { key: string; criteria: Criterion
     const prepared = await baseTree(root, base);
     try {
       if (prepared) for (const { run, files } of judged) {
-        const exercise = await exerciseIn(prepared, base, run.proof, files, ports, options.deadline);
+        const exercise = await exerciseIn(prepared, base, run.proof, files, ports);
         run.exercise = exercise;
         if (exercise.result === 'pass') run.unexercised = `${run.proof} does not exercise ${run.criteria.join(', ')}: it also passed against the base ${base.slice(0, 12)} with this change's tests and ${exercise.reverted.length} changed file(s) reverted (${exercise.reverted.slice(0, 5).join(', ')}${exercise.reverted.length > 5 ? ', …' : ''}), so it checks nothing the change adds; a producer would record it as not exercising its criterion. Bind a proof whose cases fail without the change, or, when the proof guards behaviour that predates the change, declare it with --preserves ${run.proof}`;
       }
@@ -291,7 +285,7 @@ export const verifyCommand: CliCommand = {
     const { values } = parseArgs({ args: context.args, options: { preserves: { type: 'string', multiple: true } }, allowPositionals: false });
     const preserves = (values.preserves ?? []).flatMap(value => value.split(',')).map(value => value.trim()).filter(Boolean);
     const { requestWorkerVerification } = await import('./worker-verification.js');
-    const { record } = await requestWorkerVerification(context, work, { mode: 'verify', preserves });
+    const { record } = await requestWorkerVerification(context, work, { mode: 'verify', preserves }) as import('./worker-verification.js').WorkerVerificationResult;
     context.print(record);
     if (record.ran.some(entry => (entry.result !== 'pass' && !leftToCiRun(entry)) || entry.unexercised)) process.exitCode = 1;
   },

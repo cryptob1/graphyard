@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { defaultChildRun, type ChildProcessError, type ChildRunOptions } from '../child-runner.js';
+import { defaultChildRun, type ChildRunOptions } from '../child-runner.js';
 import { trialContainerDependencies, trialContainerWords, trialHarness } from './trial-container.js';
 import { launcherLines, trialContainerFault, trialLoad } from './trial-load.js';
 import { trialEnvironment, trialHomeVariables, trialTemporaryVariables } from './trial.js';
@@ -12,7 +12,6 @@ import { npmCiEnvironment } from '../cli/test-isolation.js';
 import { installArgv, packageManager } from '../package-manager.js';
 import { pinnedNodePath } from '../node-pin.js';
 import { withHeavyJob } from '../master/verification-slots.js';
-import { maskSecrets } from '../redaction.js';
 import type { WorkerVerificationResult } from '../cli/worker-verification.js';
 import type { Work } from '../model.js';
 
@@ -22,25 +21,15 @@ export const workerVerificationTimeoutMs = 55 * 60_000;
 export const workerVerificationRoot = () => join(homedir(), '.gy', 'trials');
 export const workerVerificationPrefix = 'verify-';
 
-/** Proof runs end this long before the trial container's deadline, so the verification still writes its result. */
-export const proofDeadlineMarginMs = 30_000;
-
 /**
  * One child of a verification in its trial container (GY-3332): the launcher's lines reach `progress` as
  * they happen, and a start that gave up waiting fails in the launcher's own words, never as a bare failed command.
- * GY-3506: any other failure keeps its exit status and the end of its output, which the allocation's removal would otherwise take.
  */
 export async function verificationStep(command: string, args: string[], options: ChildRunOptions, progress: (line: string) => void): Promise<string> {
   try { return await defaultChildRun(command, args, { ...options, onStderr: launcherLines(progress) }); }
   catch (error) {
-    const failed = error as Partial<ChildProcessError>;
-    const fault = trialContainerFault(String(failed.stderr ?? ''));
-    if (fault) throw new Error(`The verification could not start: ${fault}`);
-    if (failed.status == null && !failed.signal) throw error;
-    const ended = failed.status === 124 ? 'exit status 124: the trial container reached its deadline and was stopped'
-      : failed.status != null ? `exit status ${failed.status}` : `stopped by ${failed.signal}`;
-    const stdout = String(failed.stdout ?? '').trim();
-    throw new Error(maskSecrets(`${failed.message} (${ended})${stdout ? `\n${stdout.slice(-4000)}` : ''}`));
+    const fault = trialContainerFault(String((error as { stderr?: unknown }).stderr ?? ''));
+    throw fault ? new Error(`The verification could not start: ${fault}`) : error;
   }
 }
 
@@ -48,20 +37,17 @@ export async function verificationStep(command: string, args: string[], options:
  * `progress` receives each launcher line (waiting, starting) as it happens, for the worker's `complete` to show (GY-3332).
  * GY-3447: a worker's own verification takes no host heavy-job slot; the trial load cap bounds it. GY-3446: under a host strict cap it does.
  */
-export async function runWorkerVerification(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot(),
-  progress: (line: string) => void = () => {}, deadline = Date.now() + workerVerificationTimeoutMs): Promise<WorkerVerificationResult> {
-  // GY-3506: a wait for a host slot counts against the request's one deadline, so the host answers before the control plane gives up.
-  const stop = new AbortController(), timer = setTimeout(() => stop.abort(new Error(`The verification waited for a host heavy-job slot until its deadline and did not start; retry complete when the host is free`)), Math.max(1, deadline - Date.now()));
-  try { return await withHeavyJob(`worker verification ${work.key}`, () => verifyOnHost(root, work, input, baseBranch, parent, progress, deadline), { onWait: progress, strictOnly: true, signal: stop.signal }); }
-  finally { clearTimeout(timer); }
-}
+export const runWorkerVerification = (root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent = workerVerificationRoot(),
+  progress: (line: string) => void = () => {}): Promise<WorkerVerificationResult> =>
+  withHeavyJob(`worker verification ${work.key}`, () => verifyOnHost(root, work, input, baseBranch, parent, progress), { onWait: progress, strictOnly: true });
 
 async function verifyOnHost(root: string, work: Work, input: WorkerVerificationInput, baseBranch: string, parent: string,
-  progress: (line: string) => void, deadline: number): Promise<WorkerVerificationResult> {
+  progress: (line: string) => void): Promise<WorkerVerificationResult> {
   await mkdir(parent, { recursive: true });
   const allocation = await mkdtemp(join(parent, workerVerificationPrefix));
   await writeTempOwner(allocation);
   const tree = join(allocation, 'checkout'), home = join(allocation, 'home'), temporary = join(allocation, 'tmp');
+  const deadline = Date.now() + workerVerificationTimeoutMs;
   const remaining = () => Math.max(1, deadline - Date.now());
   try {
     await mkdir(home); await mkdir(temporary);
@@ -90,7 +76,7 @@ import { verifyWorkingTree } from '${trialHarness}/src/cli/verify.ts';
 import { completionRerun } from '${trialHarness}/src/cli/complete.ts';
 import { writeFileSync } from 'node:fs';
 const work = ${JSON.stringify({ key: work.key, criteria: work.criteria, mergeLedger: work.mergeLedger })};
-const record = await verifyWorkingTree(work, ${JSON.stringify(tree)}, undefined, ${JSON.stringify({ baseBranch, preserves: input.preserves, deadline: deadline - proofDeadlineMarginMs })});
+const record = await verifyWorkingTree(work, ${JSON.stringify(tree)}, undefined, ${JSON.stringify({ baseBranch, preserves: input.preserves })});
 const rerun = ${input.mode === 'complete' ? `await completionRerun(${JSON.stringify(tree)}, work)` : '{ flaked: [], baseFailures: [] }'};
 writeFileSync(${JSON.stringify(result)}, JSON.stringify({ record, rerun }));
 `);

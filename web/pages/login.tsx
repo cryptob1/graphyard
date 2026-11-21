@@ -68,7 +68,7 @@ export async function redeemClaim(code: string, fetcher: typeof fetch): Promise<
 
 /** What the sign-in page shows: the token form, the first status read in flight, or that read gone unanswered. */
 export type LoginState = { kind: 'form' } | { kind: 'verifying' } | { kind: 'unreachable'; host: string };
-export type VerifyOutcome = { kind: 'accepted'; status: unknown } | { kind: 'rejected' } | { kind: 'unreachable' };
+export type VerifyOutcome = { kind: 'accepted'; status: unknown } | { kind: 'rejected'; refusal?: string } | { kind: 'unreachable' };
 export interface VerifyClock { setTimeout(run: () => void, ms: number): unknown; clearTimeout(timer: unknown): void }
 
 /**
@@ -85,6 +85,8 @@ export function verifyToken(token: string, fetcher: typeof fetch, clock: VerifyC
   const replied = (async (): Promise<VerifyOutcome> => {
     try {
       const response = await fetcher('/api/status', { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
+      // GY-3486: with no token, a Tailscale login this install has not invited is told who to ask.
+      if (response.status === 403 && !token) return { kind: 'rejected', refusal: (await response.json().catch(() => null))?.error };
       if (response.status === 401 || response.status === 403) return { kind: 'rejected' };
       if (!response.ok) return { kind: 'unreachable' };
       const status = await response.json();
@@ -169,7 +171,7 @@ export default function LoginPage({ token, error, signOut, setError, sessionEpoc
     void check.result.then(outcome => {
       if (!active || epoch !== sessionEpoch.current) return;
       if (outcome.kind === 'accepted') { if (token) offerToSavePassword(token); return; }
-      if (outcome.kind === 'rejected') { if (!token) { setSigningIn(true); return; } signOut(); setError(REJECTED_NOTICE); }
+      if (outcome.kind === 'rejected') { if (!token) { setSigningIn(true); if (outcome.refusal) setError(outcome.refusal); return; } signOut(); setError(REJECTED_NOTICE); }
       else setUnreachable(true);
     });
     return () => { active = false; check.cancel(); };

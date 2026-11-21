@@ -1,0 +1,14 @@
+{
+  "id": "heat-wait-not-red",
+  "title": "A merge trial that failed while its containers waited for the CPU to cool is queued again, not sent back",
+  "description": "A seeded trial whose test failed or timed out while its containers waited over a minute on a hot CPU goes through the real merge writer and control plane: the item stays in the merge queue with the note 'trial slowed by heat, retried' and no rework; the third heat failure raises one attention line. A shorter heat wait, or none, is a red head as before.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "A heat-slowed trial is retried without rework",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/heat-wait-not-red.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

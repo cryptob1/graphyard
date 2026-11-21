@@ -193,6 +193,11 @@ export function credentialMaskFor(
 const keptCli = (config: MaskConfig, operatorHome: string): string[] =>
   config.cliPath && isAbsolute(config.cliPath) && withinCheckout(config.cliPath, operatorHome) ? [cliMountRoot(dirname(dirname(config.cliPath)))] : [];
 
+// Reviewer session bindings live beside the coordinator credential, outside every worktree.
+export function reviewerCredentialDirectory(config?: { credentialFile: string }, input?: string) {
+  if (input) return resolve(input);
+  return config ? resolve(config.credentialFile, '../..', 'reviewers') : resolve(process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'reviewers');
+}
 /** Every absolute path a configuration names, at any depth. */
 const namedPaths = (value: unknown): string[] => typeof value === 'string' ? (isAbsolute(value) ? [value] : [])
   : value && typeof value === 'object' ? Object.values(value).flatMap(namedPaths) : [];
@@ -204,11 +209,18 @@ const namedPaths = (value: unknown): string[] => typeof value === 'string' ? (is
  */
 export function masterCredentialMask(config: MaskConfig, runtimeHomes: readonly string[] = [], home?: string): CredentialMask {
   // GY-3385: a peer's configDirectory keeps that install masked — only its peers directory is bound in, never its credentials.
-  const operatorHome = configHome(home), named = namedPaths({ ...config, cliPath: undefined, peers: (config as { peers?: { tokenFile: string }[] }).peers?.map(peer => peer.tokenFile) });
+  // GY-3565: and the reviewers directory its launch grants writable, so a review session's bindings never mask it.
+  const operatorHome = configHome(home), named = namedPaths({ ...config, cliPath: undefined, peers: (config as { peers?: { tokenFile: string }[] }).peers?.map(peer => peer.tokenFile),
+    reviewers: config.credentialFile && reviewerCredentialDirectory({ credentialFile: config.credentialFile }) });
   let installs: string[] = [];
   try { installs = readdirSync(operatorHome).map(name => join(operatorHome, name)); } catch { /* no config home: nothing of another install to hide */ }
+  const keeps = (path: string) => named.some(kept => kept === path || withinCheckout(kept, path));
+  // GY-3514: in an install directory it keeps, every principal token the configuration does not name —
+  // the operator's admin credential among them — stays hidden, so nothing typed into the master reaches it.
+  const tokens = installs.filter(keeps).flatMap(path => { try { return readdirSync(join(path, 'tokens')).map(name => join(path, 'tokens', name)); } catch { return []; } })
+    .filter(file => !named.includes(file));
   return { configHome: '', extraPaths: [], own: [], cli: keptCli(config, operatorHome),
-    hostPaths: [...hostPathsFor(config, runtimeHomes), ...installs.filter(path => !named.some(kept => kept === path || withinCheckout(kept, path)))] };
+    hostPaths: [...hostPathsFor(config, runtimeHomes), ...installs.filter(path => !keeps(path)), ...tokens] };
 }
 
 /** GY-3385: the `peers` directory of an install's config directory — where the reporter tokens exchanged between two installs on a host live, each placed by the issuing side. */

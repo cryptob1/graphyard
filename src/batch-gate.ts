@@ -43,14 +43,16 @@ export const gateLimitMs = 45 * 60_000;
 export const gateCeilingMs = 90 * 60_000;
 /**
  * GY-3507: one gate run's bound — twice the median execution time of the recent verified runs,
- * never under the limit above (also the cold start, with no verified run) nor over the ceiling.
- * Only verified runs are sampled, their waits left out, so neither a timeout nor a wait inflates it.
+ * never under the floor nor over the ceiling. Only verified runs are sampled, their waits left out,
+ * so neither a timeout nor a wait inflates it. GY-3523: the floor is the 45-minute limit, or 1.5
+ * times the recorded whole-catalog time when that is longer, so a catalog slower than 45 minutes
+ * can verify once and earn samples; a catalog time above the ceiling is inflated and not trusted.
  */
-export function gateBoundMs(record: Pick<GateRecord, 'verifiedRuns'>): number {
+export function gateBoundMs(record: Pick<GateRecord, 'verifiedRuns'> & Partial<Pick<GateRecord, 'catalogMs'>>): number {
   const runs = (record.verifiedRuns ?? []).map(run => run.ms).sort((a, b) => a - b), middle = runs.length >> 1;
-  if (!runs.length) return gateLimitMs;
-  const median = runs.length % 2 ? runs[middle]! : (runs[middle - 1]! + runs[middle]!) / 2;
-  return Math.min(gateCeilingMs, Math.max(gateLimitMs, Math.ceil(2 * median)));
+  const catalog = record.catalogMs ?? 0, floor = catalog <= gateCeilingMs ? Math.max(gateLimitMs, Math.ceil(1.5 * catalog)) : gateLimitMs;
+  const median = !runs.length ? 0 : runs.length % 2 ? runs[middle]! : (runs[middle - 1]! + runs[middle]!) / 2;
+  return Math.min(gateCeilingMs, Math.max(floor, Math.ceil(2 * median)));
 }
 const minutes = (ms: number) => Math.round(ms / 60_000);
 /** How often the full suite and the whole catalog run against the verified commit. */
@@ -257,16 +259,26 @@ export function catalogFits(record: Pick<GateRecord, 'catalogMs' | 'gateRuns'>, 
   return measured !== null && measured <= catalogBudgetMs;
 }
 
-/** The E2E cases the batch's items bind; a reverted item's own cases left main with it. */
-function boundCaseIds(record: Pick<GateRecord, 'merges'>, landings: readonly ServeLanding[]): string[] {
+/** The E2E cases the batch's items bind, with the item that bound each; a reverted item's own cases left main with it. */
+function boundCases(record: Pick<GateRecord, 'merges'>, landings: readonly ServeLanding[]): { id: string; item: string }[] {
   const reverted = new Set(record.merges.filter(merge => merge.reverted).map(merge => merge.sha));
-  return landings.filter(landing => !reverted.has(landing.sha)).flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))) ?? []);
+  return landings.filter(landing => !reverted.has(landing.sha)).flatMap(landing => landing.item?.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => ({ id: proof.slice(4), item: landing.item!.key }))) ?? []);
 }
+const boundCaseIds = (record: Pick<GateRecord, 'merges'>, landings: readonly ServeLanding[]) => boundCases(record, landings).map(bound => bound.id);
 
-/** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. */
-export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
-  const cases = [...new Set([...(whole ? await ports.catalog(tip) : boundCaseIds(record, landings)), ...await ports.core(tip)])];
-  return ['build', ...[...new Set(cases)].map(id => `e2e:${id}`), 'affected'];
+/** The checks one batch runs: the build, the E2E cases (the whole catalog when it fits, else the bound and core ones) and the affected selection. GY-3547: a bound case a later item deleted from the tip's catalog is dropped, with one note. */
+export async function gateChecks(ports: Pick<GatePorts, 'catalog' | 'core'>, record: Pick<GateRecord, 'merges' | 'notes'>, tip: string, landings: readonly ServeLanding[], whole: boolean): Promise<string[]> {
+  const catalog = await ports.catalog(tip);
+  const bound: string[] = [];
+  for (const { id, item } of boundCases(record, landings)) {
+    if (catalog.includes(id)) bound.push(id);
+    else {
+      const note = `${id}: ${item} bound this case; it is gone from the catalog, so the gate skips it`.slice(0, 200);
+      record.notes = [...new Set([...record.notes ?? [], note])].slice(-filingNotesWindow);
+    }
+  }
+  const cases = [...new Set([...(whole ? catalog : bound), ...await ports.core(tip)])];
+  return ['build', ...cases.map(id => `e2e:${id}`), 'affected'];
 }
 
 /** The reason an outcome carries: the failing check a revert names, its own reason, or null on a plain pass. */
@@ -295,8 +307,9 @@ function gatedCases(flight: GateRecord['inFlight']): Record<string, 'pass' | 'fa
  * tip: merges that landed meanwhile ride the next batch.
  */
 export function runGate(ports: GatePorts, record: GateRecord): Promise<GateOutcome> {
-  // A settled gate frees its batch; one that threw leaves it standing for the next loop to adopt.
-  // Either way the run's outcome is the record's last (GY-3141), so status names why it ended.
+  // A settled gate frees its batch, and so does one that threw (GY-3567): the next cycle cuts a fresh
+  // batch from main with a fresh run. The run's outcome is the record's last (GY-3141). A loop stop
+  // writes nothing, so a restart still adopts the batch as last checkpointed.
   const finishedAt = () => new Date(ports.now()).toISOString();
   return gateFlight(ports, record).then(
     outcome => {
@@ -307,6 +320,7 @@ export function runGate(ports: GatePorts, record: GateRecord): Promise<GateOutco
     },
     error => {
       record.lastOutcome = { tip: record.inFlight?.tip ?? null, outcome: 'error', reason: error instanceof Error ? error.message : String(error), finishedAt: finishedAt() };
+      record.inFlight = null;
       throw error;
     });
 }

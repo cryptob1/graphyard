@@ -15,6 +15,9 @@ import type { Services } from './routes.js';
 
 /** The history event each line a human types into the master's pane is recorded as. */
 export const terminalInputEvent = 'master.terminal.input';
+/** GY-3514: every open Master page stream, by who opened it, so revoking a person closes theirs at once. */
+const openTerminals = new Map<string, Set<() => void>>();
+export function endTerminals(id: string) { for (const close of openTerminals.get(id) ?? []) close(); }
 
 const refuse = (socket: Duplex, status: number, text: string) => { socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); };
 /** One unfragmented server frame: text (1), binary (2), close (8) or pong (10). */
@@ -144,8 +147,10 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
   const [cols, rows] = [size('cols', 120), size('rows', 40)];
   let closed = false, framed = false;
   let activePane = pane, typed = '';
+  const open = openTerminals.get(actor.id) ?? openTerminals.set(actor.id, new Set()).get(actor.id)!;
   const close = () => {
     if (closed) return; closed = true;
+    open.delete(close);
     if (control) herdr.send({ type: 'terminal.release' });
     herdr.end();
     if (socket.writable) socket.end(frame(8));
@@ -171,6 +176,7 @@ export async function terminalUpgrade(services: Services, req: IncomingMessage, 
     return { pane, account: null, runtime: null, state: pane ? 'unknown' : 'absent' };
   }, instance);
   const command = herdr.send;
+  open.add(close);
 
   const record = (line: string) => services.engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, terminalInputEvent, JSON.stringify({ pane: activePane, line })]).catch(error => console.error(`[graphyard] terminal input not recorded: ${error}`));
   // A pasted or dropped file is saved on the master's host and its path typed into the pane as a bracketed paste.

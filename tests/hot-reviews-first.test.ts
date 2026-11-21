@@ -25,22 +25,12 @@ import type { Principal, Work } from '../src/model.js';
 // declaration its trial needs.
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
-// GY-3437: when hot, reviews and trials launch first. While the host sat at 80-85C new
-// implementation sessions took every freed slot, so the reviews and trials that would finish work
-// (GY-3418 and GY-3419 waited about 5 h) never started and the heat never drained. Now from 80C
-// (the 60 s package average) no new implementation session starts while reviews and trials go on;
-// at 85C nothing new starts; below 80C implementation launches again; and with free capacity and
-// both kinds ready, the cycle's reviews and trials launch before its workers.
-//
-// The fixture below is GY-3373's: dispatch waits while the CPU is too hot. On core (24 cores, 18 workers) a sensor read
-// 98C with CPU pressure near 20 percent: the trial guard refused every container start at 95C while
-// the loop, holding launches only on pressure, kept launching agents. Now the loop reads the hottest
-// CPU sensor the trial guard reads, and at that guard's own heat limit (GY-3416: min(85C, crit-3),
-// so a laptop at 95-98C against a 102C critical is held too) no worker, reviewer or trial starts,
-// one master status line names the temperature, and a running session is untouched. Below the
-// halving limit the next cycle launches; where no sensor is readable the check is skipped. Driven
-// through the loop's own cycle against a temporary control plane, with an injected /sys/class/hwmon
-// tree read by the production reader.
+// GY-3437 filed the heat tiers (reviews and trials first from 80C, nothing new at 85C); GY-3501
+// deleted them: a hot sensor holds no launch at all, because holding workers for heat they do not
+// cause left ready work idle for hours while the hot work ran on. What stays is the ordering
+// within a cycle: with free capacity and both kinds ready, the reviews and trials that finish work
+// launch before its workers — the fixture is GY-3373's hot host (a sensor at 86C with CPU
+// pressure near 20 percent), read through the production reader against a temporary control plane.
 
 const proof = 'integration:hot-reviews-first';
 const repository = 'owner/hot-reviews-first';
@@ -159,34 +149,29 @@ async function fixture() {
   return { config, state, readyItem };
 }
 
-test(`${proof} — at 82C a review and a queued trial start while the ready implementation item does not; at 86C none start; below 80C implementation launches again`, async () => {
+test(`${proof} — at 86C the worker, the review and the queued trial all launch in one cycle, no waiting line stands, and below 80C the same`, async () => {
   const { config, state, readyItem } = await fixture();
-  // CPU pressure is low throughout (20 percent): only the heat decides. Each reading is a minute after the last, so the 60 s average is that reading.
+  // CPU pressure is low throughout (20 percent): the heat decides nothing anymore. Each reading is a minute after the last, so the 120 s average is that reading.
   let sensors = await hwmon(86), stat = 0, clock = Date.now();
   const { daemon, seen } = effects(config, { agents: [] }, async () => ({ ...calm(stat += 1000), celsius: await cpuCelsius(sensors) }));
 
   await runCycle(config, state, daemon, () => clock);
   await mergeWriterIdle(state);
-  assert.deepEqual(seen.dispatched, [], 'at 86C no implementation session starts');
-  assert.equal(seen.trials, 0, 'at 86C no trial starts');
-  assert.deepEqual(seen.ticks, ['launches waiting: CPU 86C'], 'at 86C the reviewer launches wait too');
-  assert.equal((await status(config, state)).cpuPressure?.waiting, 'launches waiting: CPU 86C');
+  assert.deepEqual(seen.dispatched, [readyItem.key], 'at 86C the implementation session starts: heat holds no worker');
+  assert.equal(seen.trials, 1, 'at 86C the queued trial starts');
+  assert.deepEqual(seen.order, ['review', 'trial', 'implementation'], 'the review and the trial launch before the worker, hot or not');
+  assert.deepEqual(seen.ticks, [undefined], 'no launch waits at 86C');
+  assert.equal(state.cpuPressure?.celsius, 86);
+  assert.equal((await status(config, state)).cpuPressure?.waiting, null, 'master status shows no waiting line');
 
-  sensors = await hwmon(82);
-  clock += 61_000;
-  await runCycle(config, state, daemon, () => clock);
-  await mergeWriterIdle(state);
-  assert.equal(state.cpuPressure?.celsius, 82);
-  assert.deepEqual(seen.ticks, ['launches waiting: CPU 86C', undefined], 'at 82C the review launches');
-  assert.equal(seen.trials, 1, 'at 82C the queued trial starts');
-  assert.deepEqual(seen.dispatched, [], 'at 82C the ready implementation item does not start');
-  assert.equal((await status(config, state)).cpuPressure?.waiting, 'implementation launches waiting: CPU 82C; reviews and trials go on', 'master status names the implementation hold');
-
+  const readyLater = await file('Ready later');
+  await ok(token(operator.id), 'POST', `work/${readyLater.id}/ready`, {});
   sensors = await hwmon(79);
   clock += 61_000;
   await runCycle(config, state, daemon, () => clock);
   await mergeWriterIdle(state);
-  assert.deepEqual(seen.dispatched, [readyItem.key], 'below 80C implementation launches again');
+  assert.deepEqual(seen.dispatched, [readyItem.key, readyLater.key], 'below 80C implementation launches again, exactly the same');
+  assert.deepEqual(seen.ticks, [undefined, undefined]);
   assert.equal((await status(config, state)).cpuPressure?.waiting, null);
 });
 

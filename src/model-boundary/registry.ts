@@ -90,6 +90,10 @@ export const quotaObservationSchema = z.object({
   session: z.enum(['named', 'guessed', 'login']).optional(),
   /** When the exhaustion reported was observed (GY-3117): one observed at or before an operator's latest quota decision on the account is not applied. */
   since: z.string().datetime().optional(),
+  /** GY-3516: the fingerprint of the key the probe read this account's quota with; never the key. */
+  key: z.string().regex(/^[0-9a-f]{12}$/).optional(),
+  /** GY-3516: no longer written (GY-3555: the account's own live request decides); kept so stored readings still parse. */
+  fault: text(300).nullable().optional(),
 }).strict();
 
 /**

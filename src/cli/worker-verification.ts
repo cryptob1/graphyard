@@ -20,7 +20,7 @@ export const failedRequiredProofs = (record: Pick<VerifyRecord, 'ran'>) =>
 /** No candidate command executes in the worker's sandbox. */
 export async function requestWorkerVerification(context: CliContext, work: any, input: {
   mode: 'verify' | 'complete'; head?: string; epoch?: number; preserves?: string[];
-}): Promise<WorkerVerificationResult> {
+}): Promise<WorkerVerificationResult | { queued: true }> {
   const root = context.repositoryRoot();
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
   if (git('status', '--porcelain')) throw new Error('Commit the working tree before verification: the private trial runs exact HEAD');
@@ -41,10 +41,12 @@ export async function requestWorkerVerification(context: CliContext, work: any, 
     reading = false;
   };
   const progress = setInterval(() => void show(), 2_000);
-  let result: WorkerVerificationResult;
+  let result: WorkerVerificationResult | { queued: true };
   try {
     result = await context.api(`work/${work.id}/worker-verification`, { ...input, head, epoch: input.epoch ?? work.lease?.epoch });
   } finally { clearInterval(progress); }
+  // GY-3537: still waiting for a slot when the request's time ran out; the loop verifies and submits.
+  if ('queued' in result) return result;
   if (result.record.head !== head) throw new Error('The private trial returned a different head');
   await written(root, result.record);
   if (input.mode === 'complete') {

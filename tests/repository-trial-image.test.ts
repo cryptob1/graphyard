@@ -8,6 +8,7 @@ import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { runTrial, trialHostFaultHost } from '../src/merge-writer/trial.js';
 import { repositoryTrialImage, repositoryTrialImageTag, trialDockerfile, trialRepositoryImageFault, TrialRepositoryImageError } from '../src/merge-writer/repository-trial-image.js';
 import { trialImage } from '../src/merge-writer/trial-container.js';
+import { gateTrialKey } from '../src/merge-writer/trial-load.js';
 import { trialImageFaultItem } from '../src/daemon/control-plane.js';
 
 // GY-3275: a managed repository commits graphyard.trial.Dockerfile to extend the trial image with
@@ -341,5 +342,45 @@ test('e2e:trial-image-first-introduction — a fixture whose head first adds gra
     assert.equal(confined.length, 1);
     assert.ok(runsIn(confined[0]!, tag), 'the check runs in the built image, whose ENV it sees');
     assert.deepEqual(stub.lines(stub.gofakeLog), ['verify'], 'the check ran the tool the image adds');
+  });
+});
+
+// GY-3566: the batch gate verifies the commit it gates, so its image comes from that commit's own
+// Dockerfile, never its parent's: a repair that lands on main unblocks the next gate.
+const brokenDockerfile = `${baseDockerfile}RUN false\n`;
+/** A fixture whose base commit's Dockerfile does not build and whose tip repairs it; the gate's changed files do not name the file. */
+async function repairedTip() {
+  const fixture = await repository({ [trialDockerfile]: brokenDockerfile, gofake, 'graphyard.json': policy(), 'README.md': 'base\n' });
+  const tip = head(fixture.root, 'repairs the dockerfile', root => { writeFileSync(join(root, trialDockerfile), baseDockerfile); writeFileSync(join(root, 'README.md'), 'repaired\n'); });
+  return { fixture, tip };
+}
+const gateTrial = (fixture: { root: string; base: string }, mergeSha: string, wrappers: (readonly string[])[]) => runTrial({ root: fixture.root, base: fixture.base, mergeSha,
+  changedFiles: ['README.md'], timeoutMs: 120_000, key: gateTrialKey, retries: 0, environment: { PATH: process.env.PATH! }, run: recordingRun(wrappers) });
+
+test('integration:gate-image-from-trialled-commit — a gate trial builds its image from the commit it gates even when the parent\'s copy is broken; a merge trial still builds the base tip\'s copy', { timeout: 300_000 }, async () => {
+  await withStubs(async stub => {
+    const { fixture, tip } = await repairedTip();
+    const wrappers: (readonly string[])[] = [];
+    const gated = await gateTrial(fixture, tip, wrappers);
+    assert.deepEqual(gated.tests, { passed: 1, failed: [], files: 1 }, gated.logTail);
+    const tag = repositoryTrialImageTag(fixture.root, trialImage(), baseDockerfile);
+    assert.ok(builds(stub).every(line => line.includes(`--tag ${tag}`)), 'only the gated commit\'s copy is built');
+    assert.ok(confinedWrappers(wrappers).every(wrapper => runsIn(wrapper, tag)), 'the gate runs in the gated commit\'s image');
+
+    // A merge trial of a head that leaves the Dockerfile alone still builds the base tip's copy: a broken one is a trial-host fault.
+    const broken = await repository({ [trialDockerfile]: brokenDockerfile, gofake, 'graphyard.json': policy(), 'README.md': 'base\n' });
+    const fault = await trialOf(broken, head(broken.root, 'readme', root => writeFileSync(join(root, 'README.md'), 'changed\n')), ['README.md'], [])
+      .then(() => null, (error: unknown) => error);
+    assert.ok(fault instanceof TrialRepositoryImageError, `the base tip's copy is built: ${String(fault)}`);
+  });
+});
+
+test('e2e:gate-image-from-trialled-commit — a batch gate whose tip repairs a broken trial Dockerfile verifies the tip instead of reporting a trial-host fault', { timeout: 300_000 }, async () => {
+  await withStubs(async stub => {
+    const { fixture, tip } = await repairedTip();
+    const gated = await gateTrial(fixture, tip, []).catch((error: unknown) => assert.fail(`the gate reported a trial-host fault: ${String(error)}`));
+    assert.equal(gated.build, 'pass', gated.logTail);
+    assert.deepEqual(gated.tests, { passed: 1, failed: [], files: 1 }, gated.logTail);
+    assert.deepEqual(stub.lines(stub.gofakeLog), ['verify'], 'the tip\'s check ran in the tip\'s image');
   });
 });

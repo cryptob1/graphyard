@@ -8,7 +8,6 @@ import { runCycle } from '../src/daemon/cycle.js';
 import { type DaemonEffects } from '../src/daemon/effects.js';
 import { stallAlarmKey } from '../src/daemon/stall-alarm.js';
 import { batchGateFlights } from '../src/daemon/trial-slots.js';
-import { implementationHotCelsius } from '../src/daemon/cpu-pressure.js';
 import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { herdrSubcommand, isHerdrCommand } from '../src/master/herdr.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
@@ -16,7 +15,7 @@ import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3473: the stall alarm names the reason dispatch holds launches now — a running batch gate,
-// implementation heat, a launch refusal still backing off — never an expired launch failure an
+// CPU pressure, a launch refusal still backing off — never an expired launch failure an
 // item recovered from, and an unexplained idle queue still alarms. Driven through the loop's cycle.
 
 const proof = 'integration:stall-current-dispatch-cause';
@@ -31,7 +30,7 @@ function item(key: string, extra: Partial<Work> = {}): Work {
 }
 
 /** GY-3446 failed to launch at 23:30 (backoff expired 23:45), then launched and finished; GY-1 is ready with a free slot. */
-async function fixture(options: { celsius?: number; credentialsHeld?: boolean } = {}) {
+async function fixture(options: { celsius?: number; pressure?: string; credentialsHeld?: boolean } = {}) {
   const directory = await temporaryDirectory('stall-current-cause');
   const profile = { name: 'w1', principal: 'worker-a', agentName: 'agent-w1', mode: 'launch', kind: 'codex', credentialFile: '/outside/w1.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
   const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', repository: 'owner/stall', credentialFile: join(directory, 'coordinator.token'),
@@ -54,7 +53,7 @@ async function fixture(options: { celsius?: number; credentialsHeld?: boolean } 
       work = work.map(entry => entry.key === target.key ? { ...entry, stage: 'build', sessions: [{ id: 'worker-a:3', kind: 'implementation', state: 'running', principal: 'worker-a', host: 'stall-host', startedAt: at(now) }] } as unknown as Work : entry);
       return { pane: 'p1', epoch: 1 };
     },
-    ...(options.celsius ? { cpuPressure: async () => ({ pressure: null, stat: null, celsius: options.celsius! }) } : {}),
+    ...(options.celsius !== undefined || options.pressure !== undefined ? { cpuPressure: async () => ({ pressure: options.pressure ?? null, stat: null, celsius: options.celsius ?? null }) } : {}),
     servingCommit: () => null,
     masterSession: { wake: async (_target, text) => { prompts.push(text); }, launch: async () => ({ agentName: 'master', pane: 'pM', runtime: 'codex', account: 'a', session: 's' }) },
   };
@@ -99,14 +98,24 @@ test(`${proof} — a running batch gate is the named cause, not the expired work
   assert.equal((await status(f.config, f.state, f.work())).stallAlarm, null);
 });
 
-test(`${proof} — the implementation heat hold is the named cause`, async () => {
-  const f = await fixture({ celsius: implementationHotCelsius });
+test(`${proof} — the pressure hold is the named cause`, async () => {
+  const f = await fixture({ pressure: 'some avg10=90.00 avg60=90.00 avg300=90.00 total=1\n' });
   await f.cycle();
   f.advance(11);
   await f.cycle();
   const alarm = alarmOf(f.state)!;
-  assert.match(alarm, new RegExp(`Cause: implementation launches waiting: CPU ${implementationHotCelsius}C`));
-  assert.doesNotMatch(alarm, /worktree|50ddae/);
+  assert.match(alarm, /Cause: launches waiting: CPU pressure 90 percent/);
+  assert.doesNotMatch(alarm, /worktree|50ddae|heat|85C/);
+});
+
+test(`${proof} — a hot sensor holds no launch, so it is never the stall cause`, async () => {
+  const f = await fixture({ celsius: 96 });
+  f.allow();
+  await f.cycle();
+  assert.deepEqual(f.dispatched, ['GY-1'], 'a CPU at 96C launches the worker');
+  f.advance(11);
+  await f.cycle();
+  assert.equal(alarmOf(f.state), undefined, 'no alarm: the work moved');
 });
 
 test(`${proof} — a launch refusal still backing off stays visible`, async () => {

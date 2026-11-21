@@ -126,7 +126,7 @@ for (const shape of ['uncommitted', 'committed-and-uncommitted', 'clean', 'clean
       return { epoch: claimed.epoch, path, base, branch: at, work: registered };
     };
     const launched = await dispatchWork(root, ready, config.workers[0]!, { allWork: [ready], observedAt: new Date(clock).toISOString(), headless: exec, prepare, release: async () => {},
-      probe: { quota: false, now: () => clock, cacheMs: 0 } as never, capacity: event => ok(coordinator, 'POST', `work/${filed.id}/capacity`, event) });
+      probe: { quota: false, now: () => clock, cacheMs: 0, smoke: async () => ({ ok: false, error: "You've reached your Fable limit. Run /usage-credits to continue or switch models with /model." }) } as never, capacity: event => ok(coordinator, 'POST', `work/${filed.id}/capacity`, event) });
     const after = await reload(filed.id);
     const partial = after.capacity?.exhaustions[0]?.partialWork;
     const saved = git(['rev-parse', 'HEAD'], worktree);

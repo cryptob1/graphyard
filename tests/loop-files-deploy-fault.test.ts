@@ -89,8 +89,8 @@ test('e2e:loop-files-deploy-fault — every fault kind the loop files is built b
     'trial-image-fault': trialImageFaultItem('owner/game'),
     'trial-sandbox-fault': trialSandboxFaultItem('owner/game'),
     'trial-network-fault': trialNetworkFaultItem('owner/game', '31'),
-    'flake': gateFiledItem({ key: 'flake:e2e:sign-in', title: 'Flaky check on main: e2e:sign-in', description: 'Flaky.' }, 'main'),
-    'known-red': gateFiledItem({ key: 'known-red:test:tests/board.test.ts', title: 'Known red on main: test:tests/board.test.ts', description: 'Red.' }, 'main'),
+    'flake': gateFiledItem({ key: 'flake:e2e:sign-in', title: 'Flaky check on main: e2e:sign-in', description: 'Flaky.' }, 'main', 'cryptob1/graphyard'),
+    'known-red': gateFiledItem({ key: 'known-red:test:tests/board.test.ts', title: 'Known red on main: test:tests/board.test.ts', description: 'Red.' }, 'main', 'cryptob1/graphyard'),
   };
   const file = upstreamFiler({ url, credentialFile });
   for (const [kind, item] of Object.entries(kinds)) {

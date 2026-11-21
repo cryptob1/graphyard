@@ -15,7 +15,6 @@ import type { DaemonEffects } from '../src/daemon/effects.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { loadMasterConfig, saveWorkerProfile, setupMaster } from '../src/master/config.js';
 import { dispatchWork, prepareWorkerLaunch, workerCommand, worktreeFailure } from '../src/master/dispatch.js';
-import { launchHotCelsius } from '../src/daemon/cpu-pressure.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { spawnHeadless } from '../src/headless-session.js';
 import { liveRuns } from '../src/runner/registry.js';
@@ -34,7 +33,8 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 let store: Store, http: ReturnType<typeof server>, registry: AgentRegistry;
 let root: string, url: string, runtimeHome: string;
 // The loop's clock runs `skew` ahead of the control plane's, so a back-off expires without the test waiting it out.
-let skew = 0, celsius: number | null = null;
+let skew = 0, celsius: number | null = null, pressure: string | null = null;
+const saturated = 'some avg10=90.00 avg60=90.00 avg300=90.00 total=1\n';
 
 before(async () => {
   store = await withDatabase('dispatch-worktree-failure-isolated'); await store.init();
@@ -106,7 +106,7 @@ async function cycle(state: ReturnType<typeof emptyDaemonState>) {
   const production = daemonEffects(root, () => config, { snapshot, mutate, headless: spawnHeadless });
   const effects: DaemonEffects = {
     snapshot, agents: () => [], herdr: production.herdr, credentials: production.credentials, closeSession: () => {}, recordSession: production.recordSession,
-    cpuPressure: async () => ({ pressure: null, stat: null, celsius }), registry: production.registry, growWorkers: production.growWorkers, persist: async () => {},
+    cpuPressure: async () => ({ pressure, stat: null, celsius }), registry: production.registry, growWorkers: production.growWorkers, persist: async () => {},
     dispatch: (work, profile, _agents, read, launch) => dispatchWork(root, work, profile, { allWork: read.work, observedAt: read.now, headless: spawnHeadless, startupMs: 500,
       prepare: (at, key, name, _run, claimBy, keep, fetched) => prepareWorkerLaunch(at, key, name, (command, args, options) => command === 'git' && args[0] === 'fetch' ? '' : workerCommand(command, args, options), claimBy, keep, fetched),
       capacity: event => mutate(`work/${work.id}/capacity`, event), ...launch }),
@@ -165,15 +165,15 @@ test('integration:dispatch-worktree-failure-isolated — git refuses the highest
   assert.deepEqual(running(), ['GY-9902', 'GY-9903']);
   assert.equal((await item('GY-9901')).lease, null);
 
-  // GY-9902 submits its head, which frees a slot; a hot CPU still holds the launch.
+  // GY-9902 submits its head, which frees a slot; a saturated CPU still holds the launch (GY-3501: heat no longer does).
   await writeFile(join(runtimeHome, 'release-GY-9902'), '');
   for (let tries = 0; tries < 600 && (running().includes('GY-9902') || (await item('GY-9902')).lease); tries++) await new Promise(resolve => setTimeout(resolve, 50));
   const submitted = await item('GY-9902');
   assert.equal(submitted.submission?.epoch, 1);
-  celsius = launchHotCelsius;
+  pressure = saturated;
   await cycle(state);
-  assert.deepEqual(running(), ['GY-9903'], 'no implementation session starts while the CPU is hot');
-  celsius = null;
+  assert.deepEqual(running(), ['GY-9903'], 'no implementation session starts while the CPU is saturated');
+  pressure = null;
 
   // With the slot free and the host cool, the repaired item launches with nobody's help.
   await cycle(state);

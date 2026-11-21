@@ -7,7 +7,7 @@ import { appendFileSync, existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { heavyTrial, mergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
-import { joinHostHeavyBudget, withHeavyJob } from '../../src/master/verification-slots.js';
+import { joinHostHeavyBudget, sharedHeavyJob, withHeavyJob } from '../../src/master/verification-slots.js';
 import { pinKnownGood } from '../../src/master/known-good.js';
 import { openPreview } from '../../src/merge-writer/preview.js';
 import { gateTrialKey } from '../../src/merge-writer/trial-load.js';
@@ -35,7 +35,8 @@ if (mode === 'trial' || mode === 'gate') {
   if (mode === 'gate') await heavyTrial(gateTrialKey, step => console.error(`step: ${step}`), undefined, check, undefined, true);
   else await check();
 } else if (mode === 'check') {
-  await runWorkerCheck({ root, base: scratch, baseBranch: 'main', key: id, head, check: 'test', trial });
+  // The fake check runs wholly on this machine, so it holds the worker verification's local slot as a real one's local shards do (GY-3526).
+  await runWorkerCheck({ root, base: scratch, baseBranch: 'main', key: id, head, check: 'test', trial: input => sharedHeavyJob(input.localSlot!, { strictOnly: true })(trial) });
 } else if (mode === 'preview') {
   const opened = await openPreview({ root, base: scratch, mergeSha: head, timeoutMs: 120_000, application: { id: 'site', kind: 'static', directory: 'site', build: 'true' },
     shell: async () => { await body(); return { ok: true, output: '' }; } }, { keep: false, cases: ['home'] });
