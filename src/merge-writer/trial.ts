@@ -1049,7 +1049,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       }
     }
     const deleted = changed && own === null; // the trialled commit deletes the file: the standard image
-    let imageTip = deleted ? null : input.baseTip ?? null;
+    // GY-3566: a gate verifies the commit it gates, so its image is that commit's own, never its parent's.
+    let imageTip = input.key === gateTrialKey ? input.mergeSha : deleted ? null : input.baseTip ?? null;
     if (imageTip === null && !deleted) {
       try { imageTip = String(await run('git', ['-C', input.root, 'rev-parse', '--verify', '--quiet', `${input.mergeSha}^1`], { timeoutMs: remaining() })).trim().toLowerCase() || null; }
       catch { imageTip = null; } // a root commit names no base to read the file from
