@@ -18,11 +18,14 @@ export const upstreamRetryMs = 3_600_000;
 /**
  * The bug item every fault the loop files is built from (GY-3160, GY-3365): the batch gate's flakes,
  * known reds and diagnostics, and the control plane's own faults. AC-1 binds a new pinning test,
- * which fails on the base, so the bug trial reproduces the defect there; AC-2 binds
- * create-work-item, an existing case that passes on any base, so the item meets the filing rule that
- * every bug owes an e2e proof.
+ * which fails on the base, so the bug trial reproduces the defect there; AC-2 binds an E2E case,
+ * so the item meets the filing rule that every bug owes an e2e proof. Graphyard's own filings bind
+ * create-work-item, an existing case that passes on any base; a gate filing in any other repository
+ * binds that repository's own case instead (GY-3568).
  */
-export const faultItem = (input: { title: string; description: string; proof: string; reason: string; repaired?: { text: string; proof: string } }) => ({
+export const faultItem = (input: { title: string; description: string; proof: string; reason: string; repaired?: { text: string; proof: string }; e2e?: { proof: string; clause: string } }) => {
+  const e2e = input.e2e ?? { proof: 'e2e:create-work-item', clause: 'creating a work item still works' };
+  return {
   title: input.title.slice(0, 200), type: 'bug' as const, priority: 1, description: input.description, dependencies: [],
   why: 'A fault in Graphyard slows or stops delivery for everyone using this install until it is fixed.',
   simplest: 'Fix the one cause the description names and pin it with a test; nothing else changes.',
@@ -30,10 +33,11 @@ export const faultItem = (input: { title: string; description: string; proof: st
     // AC-1 never repeats the title: a title like "… on the install for X" reads as a live-install observation the filing refuses.
     { id: 'AC-1', text: 'The fault is fixed at its cause, not skipped or weakened; a new test pins it and fails without the fix', proofs: [input.proof] },
     input.repaired
-      ? { id: 'AC-2', text: `${input.repaired.text} and creating a work item still works`, proofs: [input.repaired.proof, 'e2e:create-work-item'] }
-      : { id: 'AC-2', text: 'Creating a work item still works', proofs: ['e2e:create-work-item'] },
+      ? { id: 'AC-2', text: `${input.repaired.text} and ${e2e.clause}`, proofs: [input.repaired.proof, e2e.proof] }
+      : { id: 'AC-2', text: `${e2e.clause[0]!.toUpperCase()}${e2e.clause.slice(1)}`, proofs: [e2e.proof] },
   ],
-  reason: input.reason });
+  reason: input.reason };
+};
 
 /** The bug item a failed control-plane upgrade files: one item per verified commit and failed step. */
 export function controlPlaneUpgradeItem(record: ControlPlaneRecord) {
