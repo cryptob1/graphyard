@@ -26,7 +26,7 @@ const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
 const coordinatorToken = `${coordinator.id}-token-${'x'.repeat(32)}`;
 const now = () => new Date().toISOString();
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const servePort = 4397, serveUrl = `http://127.0.0.1:${servePort}/healthz`;
+const servePort = 4411, serveUrl = `http://127.0.0.1:${servePort}/healthz`;
 let store: Store, http: ReturnType<typeof server>, url: string;
 let root: string, credentials: string, base: string, first: string, second: string;
 
