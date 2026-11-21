@@ -22,7 +22,7 @@ test('e2e:setup-failures-say-the-fix — doctor gives remedies on a host missing
 });
 
 test('e2e:setup-failures-say-the-fix — prerequisites have README checks and source has no obsolete step references', async () => {
-  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
+  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8') + await readFile(new URL('../docs/setup.md', import.meta.url), 'utf8');
   for (const command of ['uname -r', 'node --version', 'npm --version', 'git --version', 'git remote -v', 'docker version', 'docker compose version', 'gh auth status', 'bwrap --version', 'python3 --version', 'herdr --version', 'systemctl --user status', 'graphyard doctor']) {
     assert.ok(readme.includes(command), `README is missing ${command}`);
   }

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { bootstrapGate, catalogBudgetMs, catalogFits, diagnosticsIntervalMs, gateCauses, gateHoldAttention, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, timeoutHold, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
 import { appendReleaseNote, latestReleaseNote, readReleaseNotes, releaseNote, releaseNotesPath } from '../src/release-notes.js';
 import { RefusedResponse } from '../src/model/refusal.js';
-import { batchGateStep } from '../src/daemon/cycle-batch-gate.js';
+import { batchGateStep, noteBatchGateStopping } from '../src/daemon/cycle-batch-gate.js';
 import type { MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { deployOnce, deployRecordPath, type DeployWatchPorts } from '../src/deploy-watch.js';
@@ -176,10 +176,11 @@ test('integration:batch-gate-survives-restart — a batch in flight when the loo
     if (commit !== tip) return trial(commit, files, trialItem); // the diagnostics run on the verified commit
     onTip.push({ proofs });
     if (loops === 1 && proofs.length > 1) return trial(commit, files, trialItem); // the cut's one whole run
-    if (loops === 1) { await diagnostics; throw new Error('the loop restarted mid-gate'); } // the failing check's re-run
+    if (loops === 1) { await diagnostics; noteBatchGateStopping(firstCycle.state); throw new Error('the loop restarted mid-gate'); } // the failing check's re-run, killed by the stopping loop
     return trial(commit, files, { ...trialItem, criteria: [] }); // the next loop: the re-run passes, a flake
   };
-  const first = await batchGateStep(cycleWith(loop.value, work));
+  const firstCycle = cycleWith(loop.value, work);
+  const first = await batchGateStep(firstCycle);
   diagnostics = first!.diagnostics;
   await first!.gate;
   assert.equal(fetches, 1, 'the first loop fetched the tip it cut its batch on');
@@ -610,14 +611,14 @@ test('unit:batch-gate-outcome-visible — every settled run is the record\'s las
     assert.equal(gateSummary(record)!.lastOutcome!.tip, tip.slice(0, 12));
     assert.equal(gateSummary(record)!.lastOutcome!.reason, record.lastOutcome!.reason);
   }
-  // A run that throws records an error outcome with the message, and leaves its batch standing for adoption.
+  // A run that throws records an error outcome with the message, and settles its batch (GY-3567).
   {
     const { ports } = gatePorts(batch, () => false, { clock: Date.parse(at) });
     ports.run = async () => { throw new Error('the trial container is gone'); };
     const record = bootstrapGate(repository, verified);
     await assert.rejects(runGate(ports, record), /the trial container is gone/);
     assert.deepEqual([record.lastOutcome!.tip, record.lastOutcome!.outcome, record.lastOutcome!.reason, record.lastOutcome!.finishedAt], [tip, 'error', 'the trial container is gone', at]);
-    assert.equal(record.inFlight?.tip, tip, 'the thrown gate leaves its batch for the next loop to adopt');
+    assert.equal(record.inFlight, null, 'the thrown gate settles its batch');
   }
 
   // End to end on real git: the run in flight names its current step, and the settled outcome is one journal line.
@@ -671,7 +672,7 @@ test('unit:batch-gate-outcome-visible — every settled run is the record\'s las
     const record = readGateRecord(gateRecordPath(coordinator))!;
     assert.deepEqual([record.lastOutcome!.tip, record.lastOutcome!.outcome], [realTip, 'error']);
     assert.match(record.lastOutcome!.reason!, /the trial container is gone/);
-    assert.equal(record.inFlight?.tip, realTip, 'the failed run leaves its batch standing for the next loop to adopt');
+    assert.equal(record.inFlight, null, 'the failed run settles its batch, so the next cycle runs afresh');
     assert.ok(lines.some(line => line.includes('The batch gate failed and runs again next cycle') && line.includes('the trial container is gone')), 'the journal names the error outcome');
   }
 });
