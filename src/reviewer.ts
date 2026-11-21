@@ -15,7 +15,7 @@ import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, screenDigest, sessionWords, settlementDue, settlementReason, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
 import { accountLaunch, profileAccount, recordObservedExhaustion, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
-import { allocateManagedCheckout, settleCheckout } from './master/worktrees.js';
+import { allocateManagedCheckout, settleCheckout, shareDependencies } from './master/worktrees.js';
 import { loadMasterConfig, loadStoredMasterConfig, } from './master/config.js';
 import { autonomousSession } from './master/dispatch.js';
 import { closeHerdrPane, type HerdrAgent } from './master/herdr.js';
@@ -1098,6 +1098,8 @@ export async function launchReview(root: string, work: Work, profileName: string
                 // this launch already allocated for the session.
                 const git = dependencies.run ?? defaultChildRun;
                 await git('git', ['-C', root, 'worktree', 'add', '--detach', checkout.worktree, binding.sha]);
+                // GY-3575: the checkout resolves the repository's declared dependencies (its compatible shared install) before the command starts.
+                await shareDependencies(root, checkout.worktree);
                 const served = serveHead(checkout.worktree, commandApplication(declared), { sha: binding.sha, env: runEnvironment(process.env), budgetMs: (declared.readySeconds + 60) * 1000, scratch: join(checkout.directory, '.graphyard', 'scratch'), log: () => {} });
                 try { serving = { url: await served.ready, close: () => served.close().catch(() => {}) }; }
                 catch (error) { await served.close().catch(() => {}); throw error; }
