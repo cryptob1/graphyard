@@ -156,6 +156,18 @@ export async function adoptTrialRun(ref: { key: string; head: string; mergeSha: 
   return { directory: ref.directory, mergeSha: ref.mergeSha, ...watchTrialRun(ref.directory, meta, spec, { pollMs: options.pollMs, fromStart: false }) };
 }
 
+/**
+ * GY-3564: a run that has finished, read straight from its files — its recorded verdict, or the
+ * failure of a run that exited with none — so a flight whose watcher never delivered the
+ * completion still settles. Null while the run has written neither.
+ */
+export async function finishedTrialRun(directory: string): Promise<{ run: MergeTrialRun } | { error: Error } | null> {
+  const outcome = await readOutcome(directory);
+  if (outcome) return outcome.ok ? { run: outcome.run } : { error: reconstructTrialError(outcome.error) };
+  const exit = readExit(directory);
+  return exit === null ? null : { error: new Error(`the detached trial run in ${directory} exited ${exit} and reached no verdict`) };
+}
+
 /** Stops a detached run nobody will read (a head returned, replaced or delivered): signalled, and its reason recorded beside it. */
 export async function stopTrialRun(ref: { directory: string }): Promise<void> {
   const meta = readRunMeta(ref.directory);

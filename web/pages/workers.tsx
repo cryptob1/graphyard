@@ -12,6 +12,8 @@ import { Agent } from '../fun';
 import { EmptyState, PageHeader } from '../components/page-layout';
 import { overloadAlarm, overloaded } from '../../src/model/session-usage';
 import { formatAge } from '../../src/model/duration';
+import type { FleetAccountView } from '../../src/model/registry';
+import { localTime } from '../agent-status';
 
 /**
  * The Workers tab (GY-116, one compact line per agent since GY-3314): every agent session across
@@ -182,6 +184,24 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
   </table>;
 }
 
+/**
+ * GY-3555: each account as its own last live request decided it, in one line: available, held until the reset the
+ * provider stated (in its words), or broken (in its words), and when that request ran. The full line is its title.
+ */
+export function availabilityLine(account: Pick<FleetAccountView, 'name' | 'quota' | 'loggedIn' | 'resetsAt' | 'reason' | 'checkedLive'>, now: number) {
+  const state = account.quota === 'exhausted' ? 'held' : account.quota === 'broken' || account.loggedIn === false ? 'broken' : 'available';
+  const head = state === 'held' ? `held until ${account.resetsAt ? localTime(account.resetsAt) : 'its next live check'}` : state;
+  const checked = account.checkedLive ? `checked live ${ago(account.checkedLive, now)}` : 'not checked live yet';
+  return { state, text: [account.name, head, checked, state === 'available' ? null : account.reason].filter(Boolean).join(' · ') };
+}
+export function AccountAvailability({ accounts, now }: { accounts: FleetAccountView[]; now: number }) {
+  const enabled = accounts.filter(account => account.enabled);
+  if (!enabled.length) return null;
+  return <section className="hosts-section"><h2>Accounts</h2><ul className="availability" aria-label="Account availability" data-availability>
+    {enabled.map(account => { const line = availabilityLine(account, now); return <li key={account.name} data-availability-row={account.name} data-state={line.state} title={line.text}>{line.text}</li>; })}
+  </ul></section>;
+}
+
 type HostRow = { host: string; local?: boolean; at?: string; away: boolean; update?: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null };
 /**
  * GY-3407: the hosts the loop watches — this machine first, then each one added with
@@ -294,6 +314,7 @@ export default function WorkersPage({ work, observedAt, setSelected, setView, to
     {view.running.length ? table(view.running, 'Agent sessions') : <EmptyState title="No agent session is open.">Agents start here when the loop hands them an item.</EmptyState>}
     <p className="muted workers-note">Building means an agent is writing the change; Rework, that it is making the requested changes; In review, someone else judges it; Proving runs the proofs; the Master runs the loop. An agent never reviews or approves its own work. A session not seen for {Math.round(sessionStaleThresholdMs / 60_000)} minutes reads Not seen, never as live.</p>
     <SessionUsage sessions={(status?.sessions ?? []) as SessionUsageRow[]} now={now}/>
+    <AccountAvailability accounts={(status?.fleet as { accounts?: FleetAccountView[] } | null | undefined)?.accounts ?? []} now={now}/>
     <Hosts hosts={status?.hosts ?? []} now={now}/>
     <ProjectMemorySection memory={status?.projectMemory}/>
     {/* A watched run that ends moves here: the section opens to it, so its panel stays in view. */}

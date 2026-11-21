@@ -48,15 +48,15 @@ test('e2e:stall-alarm — the Master page shows the stall alarm with its cause w
   const { url, close } = await plane(context);
   await serveXterm(context);
   try {
-    // Launches held 11 minutes by heat, one free slot, one ready item: the loop's own check.
+    // Launches held 11 minutes by CPU pressure (the sensor at 96C holds nothing, GY-3501), one free slot, one ready item: the loop's own check.
     const start = Date.parse('2026-11-16T08:00:00Z');
     const state = emptyDaemonState({ url: 'http://127.0.0.1:9', repository: 'fixture/shop' } as never);
-    state.cpuPressure = { at: new Date(start).toISOString(), avg60: 20, steal: 0, stat: null, celsius: 96, samples: [], testBudget: null, trialCap: null };
+    state.cpuPressure = { at: new Date(start).toISOString(), avg60: 96, steal: 0, stat: null, celsius: 96, samples: [], testBudget: null, trialCap: null };
     const item = { key: 'GY-1', stage: 'ready', ready: true, updatedAt: new Date(start).toISOString(), sessions: [] } as unknown as Work;
     // GY-3473: the cause is dispatch's own hold this cycle, as the loop passes it.
     const holds = [implementationWaiting(state)!];
     const alarm = stallAlarm({ now: start + 11 * 60_000, open: [item], ready: [item], freeSlots: 1, holds, state, registry: null, serving: null });
-    expect(alarm).toContain('Cause: launches waiting: CPU 96C');
+    expect(alarm).toContain('Cause: launches waiting: CPU pressure 96 percent');
     await loopRead(url, alarm);
     const signIn = await fetch(`${url}/api/sign-in-links`, { method: 'POST', headers: { Authorization: 'Bearer test-human-operator' } });
     const { code } = await signIn.json() as { code: string };
@@ -66,7 +66,7 @@ test('e2e:stall-alarm — the Master page shows the stall alarm with its cause w
     await expect(banner).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('.page-heading + .stall-alarm')).toBeVisible();
     await expect(banner).toContainText('no launch since 2026-11-16T08:00:00.000Z');
-    await expect(banner).toContainText('launches waiting: CPU 96C');
+    await expect(banner).toContainText('launches waiting: CPU pressure 96 percent');
     // A launch starts: the loop's next read names no alarm, and the page clears it.
     const running = { ...item, stage: 'build', sessions: [{ kind: 'implementation', state: 'running', startedAt: new Date(start + 12 * 60_000).toISOString() }] } as unknown as Work;
     const cleared = stallAlarm({ now: start + 12 * 60_000, open: [running], ready: [], freeSlots: 0, state, registry: null, serving: null });

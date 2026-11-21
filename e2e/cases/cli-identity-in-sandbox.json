@@ -1,0 +1,11 @@
+{
+  "id": "cli-identity-in-sandbox",
+  "title": "After an upgrade, a worker's CLI inside its sandbox runs status and complete without a version refusal",
+  "description": "A CLI release named for an old commit is upgraded in place to a new one, and the upgrade writes the new commit into the release. Inside a worker sandbox git cannot read the release, yet its CLI reports the new commit: status succeeds and complete meets no 'CLI commit X and server commit Y differ' refusal.",
+  "tags": ["cli", "upgrade", "workers"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    { "kind": "command", "name": "a sandboxed CLI runs status and complete after an in-place upgrade", "run": "node --import tsx tests/helpers/run-tests.ts tests/cli-identity-in-sandbox.test.ts", "timeoutSeconds": 300 }
+  ]
+}

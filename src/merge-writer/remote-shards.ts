@@ -48,16 +48,17 @@ export async function splitLocalOnlyTests(files: readonly string[], read: (file:
   return { remoteable, localOnly };
 }
 
-/** This machine's reading and every host's, read at once through the shim's probe; a host that does not answer is away for this trial. */
-export async function readShardHosts(targets: readonly string[], run: ChildRun, cores: number): Promise<HostReading[]> {
-  const ssh = shardSshSession(run);
+/** This machine's reading and every host's, read at once through the shim's probe; a host that does not answer is away for this trial.
+ * A trial passes its own `transport`, so the probe's connection carries its shards too. */
+export async function readShardHosts(targets: readonly string[], run: ChildRun, cores: number, transport?: ShardSshSession): Promise<HostReading[]> {
+  const ssh = transport ?? shardSshSession(run);
   try { return await Promise.all([null, ...targets].map(async target => {
-    const probe = await probeHost(target, async (program, args, options) => run(program, target && program === 'ssh' ? [...await ssh.args(target), args.at(-1)!] : args, options));
+    const probe = await probeHost(target, async (program, args, options) => target && program === 'ssh' ? ssh.session(target, words => run(program, [...words, args.at(-1)!], options)) : run(program, args, options));
     const name = target ?? hostname();
     // This machine always takes shards: an unreadable reading here means only that its Docker or sensors did not answer.
     if (!probe.ok) return { name, cores: target ? 0 : cores, busy: 0, steal: 0, celsius: null, limit: trialHotCelsius, away: target !== null, ...(target ? { reason: probe.reason } : {}) };
     return { name, cores: probe.cores ?? cores, busy: probe.load ?? 0, steal: probe.stat?.total ? probe.stat.steal / probe.stat.total : 0, celsius: probe.celsius, limit: trialHotCelsius, away: false };
-  })); } finally { await ssh.close(); }
+  })); } finally { if (!transport) await ssh.close(); }
 }
 
 /** A shard its host turned away — dropped, unreachable, too hot to start, or not ready — to run on another host: capacity, never a fault. */
@@ -112,27 +113,57 @@ export async function runShardsOnHosts<R>(input: { count: number; hosts: readonl
   return { ran: ran.filter(Boolean), queuedWhileIdle, dropped: [...dropped] };
 }
 
+/** OpenSSH's default MaxSessions: the sessions one connection carries at once. */
+const sessionsPerConnection = 10;
+/** GY-3534: the new SSH connections a trial opens to one host at most; a burst of one per shard reads as resets from the host's sshd. */
+export const connectionsPerHost = 3;
+
 /** A trial owns its SSH config: resolve only the user's aliases, never the system config/includes.
  * Keep connection and host-key settings; commands, forwarding and system includes do not travel.
- * The directory is shared by this session's shards and removed when they finish. */
+ * Sessions to a host share at most `connectionsPerHost` multiplexed connections (ControlMaster), their
+ * sockets in this session's private directory, which is removed, the connections closed, when it ends. */
 export function shardSshSession(run: ChildRun) {
-  let directory: Promise<string> | undefined;
-  const configs = new Map<string, Promise<string>>();
+  let directory: Promise<string> | undefined, opened = 0;
+  type Connection = { path: string; open: Promise<unknown>; sessions: number };
+  const hosts = new Map<string, { config: Promise<string>; connections: Connection[]; waiting: (() => void)[] }>();
+  const host = (target: string) => {
+    if (!hosts.has(target)) hosts.set(target, { connections: [], waiting: [], config: (async () => {
+      const userConfig = join(homedir(), '.ssh', 'config');
+      const resolved = String(await run('ssh', ['-G', '-F', existsSync(userConfig) ? userConfig : '/dev/null', ...sshTarget(target)], { timeoutMs: 5_000 }));
+      const settings = resolved.split('\n').filter(line => /^(hostname|user|port|identityfile|certificatefile|userknownhostsfile|globalknownhostsfile|hostkeyalias|stricthostkeychecking) /i.test(line));
+      const path = join(await (directory ??= mkdtemp(join(tmpdir(), 'graphyard-shard-ssh-'))), `${randomUUID()}.conf`);
+      await writeFile(path, ['Host *', 'BatchMode yes', 'ConnectTimeout 10', 'IdentitiesOnly yes', 'ControlPersist 15m', ...settings, ''].join('\n'), { mode: 0o600 });
+      return path;
+    })() });
+    return hosts.get(target)!;
+  };
   return {
-    async args(target: string): Promise<string[]> {
-      if (!configs.has(target)) configs.set(target, (async () => {
-        const userConfig = join(homedir(), '.ssh', 'config');
-        const resolved = String(await run('ssh', ['-G', '-F', existsSync(userConfig) ? userConfig : '/dev/null', ...sshTarget(target)], { timeoutMs: 5_000 }));
-        const settings = resolved.split('\n').filter(line => /^(hostname|user|port|identityfile|certificatefile|userknownhostsfile|globalknownhostsfile|hostkeyalias|stricthostkeychecking) /i.test(line));
-        const path = join(await (directory ??= mkdtemp(join(tmpdir(), 'graphyard-shard-ssh-'))), `${randomUUID()}.conf`);
-        await writeFile(path, ['Host *', 'BatchMode yes', 'ConnectTimeout 10', 'IdentitiesOnly yes', ...settings, ''].join('\n'), { mode: 0o600 });
-        return path;
-      })());
-      return ['-F', await configs.get(target)!, ...sshTarget(target)];
+    /** Run `use` with the ssh words of one session on `target`, over a shared connection; it waits while every connection carries its full sessions. */
+    async session<T>(target: string, use: (words: string[]) => T | Promise<T>): Promise<T> {
+      const entry = host(target), config = await entry.config, sockets = await directory!;
+      let connection: Connection | undefined;
+      while (!(connection = entry.connections.find(open => open.sessions < sessionsPerConnection))) {
+        if (entry.connections.length < connectionsPerHost) {
+          const path = join(sockets, `${opened++}.sock`);
+          entry.connections.push({ path, sessions: 0, open: Promise.resolve().then(() => run('ssh', ['-F', config, '-S', path, '-fNM', ...sshTarget(target)], { timeoutMs: 30_000 })) });
+        } else await new Promise<void>(resolve => entry.waiting.push(resolve));
+      }
+      connection.sessions++;
+      try { await connection.open; return await use(['-F', config, '-S', connection.path, ...sshTarget(target)]); }
+      finally { connection.sessions--; entry.waiting.shift()?.(); }
     },
-    async close() { if (directory) await rm(await directory, { recursive: true, force: true }); },
+    async close() {
+      await Promise.all([...hosts.entries()].map(async ([target, entry]) => {
+        const config = await entry.config.catch(() => null);
+        if (config) await Promise.all(entry.connections.map(async connection => {
+          if (await connection.open.then(() => true, () => false)) await Promise.resolve().then(() => run('ssh', ['-F', config, '-S', connection.path, '-O', 'exit', ...sshTarget(target)], { timeoutMs: 5_000 })).catch(() => {});
+        }));
+      }));
+      if (directory) await rm(await directory, { recursive: true, force: true });
+    },
   };
 }
+export type ShardSshSession = ReturnType<typeof shardSshSession>;
 
 /** What a remote shard answered: its exit and output, and the per-file records it wrote. */
 export interface RemoteShardEnd { ok: boolean; out: string; status: number | null; records: string }
@@ -149,17 +180,17 @@ export const warmImageTag = (digest: string, lockHash: string) => `graphyard-war
  * only what its mirror lacks, or the warm image, sent once per tag — then clones the commit into a run
  * directory. Shards run there through the shim's `run-shard`; `close` cleans every run directory.
  */
-export function remoteShardSession(input: { root: string; sha: string; image: string; run: ChildRun; deadline: number; signal?: AbortSignal }) {
+export function remoteShardSession(input: { root: string; sha: string; image: string; run: ChildRun; deadline: number; signal?: AbortSignal; transport?: ShardSshSession }) {
   const repo = mirrorName(input.root);
   const remaining = () => Math.max(1_000, input.deadline - Date.now());
   const local = async (command: string, args: string[]) => String(await input.run(command, args, { timeoutMs: remaining() })).trim();
-  const transport = shardSshSession(input.run);
-  const ssh = async (target: string, verb: string) => ['ssh', ...await transport.args(target), verb];
+  const transport = input.transport ?? shardSshSession(input.run);
   /** One shim verb on `target`, with `source`'s output as its input; any failure turns the host away. */
   const shim = async (target: string, verb: string, source?: string) => {
     try {
-      if (!source) { const [program, ...args] = await ssh(target, verb); return String(await input.run(program!, args, { timeoutMs: remaining() })); }
-      return String(await input.run('sh', ['-c', `set -o pipefail 2>/dev/null; ${source} | ${(await ssh(target, verb)).map(shellQuote).join(' ')}`], { timeoutMs: remaining() }));
+      return await transport.session(target, async words => String(source
+        ? await input.run('sh', ['-c', `set -o pipefail 2>/dev/null; ${source} | ${['ssh', ...words, verb].map(shellQuote).join(' ')}`], { timeoutMs: remaining() })
+        : await input.run('ssh', [...words, verb], { timeoutMs: remaining() })));
     } catch (error) {
       const failed = error as { stderr?: unknown; message?: string };
       throw new HostDroppedError(target, (String(failed.stderr ?? '').trim() || String(failed.message ?? error)).slice(-500));
@@ -201,9 +232,8 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
       if (!ready.has(target)) ready.set(target, prepare(target));
       const run = await ready.get(target)!, shard = index + 1;
       const request = JSON.stringify({ files, argv: argv('{list}', '{records}'), cpus, deadline: input.deadline });
-      const words = await ssh(target, `run-shard ${run} ${shard}`);
       let end: Omit<RemoteShardEnd, 'records'>;
-      try { end = { ok: true, out: String(await input.run('sh', ['-c', `printf '%s' ${shellQuote(request)} | ${words.map(shellQuote).join(' ')}`], { timeoutMs: remaining(), ...(input.signal ? { signal: input.signal } : {}) })), status: 0 }; }
+      try { end = { ok: true, out: String(await transport.session(target, words => input.run('sh', ['-c', `printf '%s' ${shellQuote(request)} | ${['ssh', ...words, `run-shard ${run} ${shard}`].map(shellQuote).join(' ')}`], { timeoutMs: remaining(), ...(input.signal ? { signal: input.signal } : {}) }))), status: 0 }; }
       catch (error) {
         const failed = error as { status?: number | null; stdout?: unknown; stderr?: unknown; timedOut?: boolean };
         if (failed.timedOut) throw error;
@@ -214,7 +244,9 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
       // without a verdict (no records): the shard runs on another host, its output's tail kept in the trial log
       // (less the launcher's own waiting lines, which on a hot host would fill it).
       const fault = trialContainerFault(end.out);
-      if (!end.ok && (end.status === 255 || end.status === null || fault || !records.trim())) throw new HostDroppedError(target, fault ?? end.out.replace(/^graphyard trial container: (waiting|starting).*\n/gm, '').slice(-500));
+      // A session over a shared connection that lost its host prints nothing of its own, so name that loss.
+      const said = end.out.replace(/^graphyard trial container: (waiting|starting).*\n/gm, '').slice(-500).trim();
+      if (!end.ok && (end.status === 255 || end.status === null || fault || !records.trim())) throw new HostDroppedError(target, fault ?? (said || `the SSH connection to ${target} closed mid-shard (exit ${end.status ?? 'signal'})`));
       return { ...end, records };
     },
     async close() {
@@ -227,8 +259,8 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
   };
 }
 
-/** One trial's shard record, for master status: wall time, shards run and run remotely, waits while a host idled, and each host's reading. */
-export interface RemoteShardRun { at: string; wallMs: number; shards: number; remote: number; queuedWhileIdle: number; host: string; celsius: number | null; hosts: { name: string; away: boolean; reason?: string; celsius: number | null; freeCores: number }[] }
+/** One trial's shard record, for master status: what ran them, wall time, shards run and run remotely, waits while a host idled, and each host's reading. */
+export interface RemoteShardRun { /** GY-3526: the worker verification that ran them; absent for a merge trial. */ label?: string; at: string; wallMs: number; shards: number; remote: number; queuedWhileIdle: number; host: string; celsius: number | null; hosts: { name: string; away: boolean; reason?: string; celsius: number | null; freeCores: number }[] }
 export const remoteShardRecordPath = (root: string) => join(root, '.graphyard', 'remote-shards.json');
 const keptRuns = 20;
 
@@ -261,9 +293,14 @@ export function remoteShardSummary(runs: readonly RemoteShardRun[], probes?: rea
     peakCelsius: { host: latest.host, celsius: peaks.length ? Math.max(...peaks) : null },
     hosts: probes ? probes.filter(probe => !probe.local).map(probe => ({ name: probe.host, away: probe.away, ...(probe.reason ? { reason: probe.reason } : {}), celsius: probe.celsius, readAt: probe.at ?? null, state: probe.away ? 'away' : 'ready' }))
       : latest.hosts.map(host => ({ ...host, state: host.away ? 'away' : 'ready' })),
+    latest: { run: latest.label ?? 'merge trial', shards: latest.shards, remote: latest.remote },
   };
 }
 
 /** GY-3476, GY-3517: one attention line for each host the latest probe reads away because its shim lacks a verb trials use; it clears on the first probe that reads it ready. */
 export const outdatedShimAttention = (probes: readonly Pick<HostProbe, 'host' | 'away' | 'update'>[]) => probes.filter(probe => probe.away && probe.update).map(probe =>
   ({ subject: `host ${probe.host}`, text: `${probe.host} takes no trial shards: its graphyard-host-shim is older than this release`, next: `Run graphyard host prepare and, with sudo on ${probe.host}, the script it prints` }));
+
+/** GY-3534: one attention line for each host the latest trial left away because its SSH server reset the connection. */
+export const connectionResetAttention = (runs: readonly RemoteShardRun[]) => (runs.at(-1)?.hosts ?? []).filter(host => host.away && /connection reset|kex_exchange_identification/i.test(host.reason ?? '')).map(host =>
+  ({ subject: `host ${host.name}`, text: `${host.name} takes no trial shards: it reset the SSH connection`, next: `Check that sshd is running on ${host.name}; the next trial tries it again` }));

@@ -6,6 +6,8 @@ import { basename, dirname, join, relative, resolve } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import { directoryBytes } from '../daemon/leftovers.js';
 import { livePaths } from '../session-processes.js';
+import { cliCommit } from '../protocol-version.js';
+import { recordCommit, recordedCommit } from '../release.js';
 
 // GY-3214: the paths and the create-once step live in plain JavaScript, which the published npm package runs before any dependency is installed.
 import { cliReleasePath, currentCliPath, installLauncherPath, prepareCliRelease } from '../../bin/cli-release.mjs';
@@ -137,4 +139,23 @@ export async function sweepCliReleases(directory: string, run: ChildRun, procRoo
     swept.bytes += bytes;
   }
   return swept;
+}
+
+/** GY-3553: the served release's tree and the commit checked out in it (the directory's own name when Git cannot read it); null when none is served. */
+export function servedCliRelease(directory: string) {
+  let root: string;
+  try { root = realpathSync(currentCliPath(directory)); } catch { return null; }
+  const commit = cliCommit(root) ?? recordedCommit(root) ?? (/^[0-9a-f]{40}$/i.test(basename(root)) ? basename(root).toLowerCase() : null);
+  return commit ? { root, commit } : null;
+}
+
+/**
+ * GY-3553: the served release's commit stamp, restored to the commit checked out in it, as
+ * `upgrade --repair-identity` does by hand. A stamp naming another commit makes every CLI command
+ * refuse its server. Null when the stamp is right.
+ */
+export async function repairCliStamp(directory: string) {
+  const served = servedCliRelease(directory), was = served && recordedCommit(served.root);
+  if (!served || was === served.commit) return null;
+  return { file: recordCommit(served.root, served.commit), commit: served.commit, was };
 }

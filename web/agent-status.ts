@@ -1,6 +1,5 @@
 import type { FleetAccountView, FleetRoleView, FleetView } from '../src/model/registry';
 import { smokeRetestMs } from '../src/model/registry-sessions';
-import { allowanceHold } from '../src/model/account-quota';
 import { formatDuration } from '../src/model/duration';
 
 /**
@@ -86,7 +85,7 @@ export function accountStatus(account: FleetAccountView, fleet: Pick<FleetView, 
   const status = (chip: AccountChip, reason: string, until: string | null = null): AccountStatus => ({ chip, label: chipLabels[chip], reason, until });
   if (!account.enabled) return status('disabled', 'disabled by an operator; nothing launches on it until it is enabled');
   if (!account.roles.length) return status('no-role', 'serves no role; name it in a role or remove it');
-  if (exhausted(account, now)) return status('spent', allowanceHold.test(account.evidence ?? '') ? account.evidence! : account.resetsAt
+  if (exhausted(account, now)) return status('spent', account.resetsAt
     ? `quota spent until ${whenText(account.resetsAt, now)}${account.usage.length ? ` — ${account.usage.map(entry => `${entry.window} ${entry.percent}%`).join(', ')}` : ''}`
     : 'quota spent; the provider stated no reset time', account.resetsAt);
   const unconfigured = [account.smoke?.result === 'fail' ? account.smoke.reason : null, account.ineligible].find(reason => reason && missingCredential.test(reason));

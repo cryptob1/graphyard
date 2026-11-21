@@ -1,0 +1,14 @@
+{
+  "id": "verification-uses-remote-hosts",
+  "title": "A worker verification's test shards run on ready hosts while a merge trial starts",
+  "description": "A worker's host-run test check over a large test list, with two ready compute hosts reached through graphyard-host-shim under a strict heavy-job cap of one. Its shards run on both hosts as a merge trial's do, and it holds no heavy-job slot while they run there, so a merge trial takes the one slot at once. Master status's remoteShards shows the worker verification as the latest run, with every shard run remotely and both hosts ready.",
+  "tags": ["trial", "verification"],
+  "target": "any",
+  "required": true,
+  "steps": [{
+    "kind": "command",
+    "name": "Run a worker verification on two fake hosts and start a merge trial beside it",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/verification-uses-remote-hosts.test.ts",
+    "timeoutSeconds": 900
+  }]
+}

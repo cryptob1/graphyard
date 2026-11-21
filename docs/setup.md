@@ -67,3 +67,10 @@ The `versionUrl` answers the commit it serves (JSON `commit` or `sha`, or plain 
 ## Publishing
 
 - Verified deploys publish `@cryptob1/graphyard` with npm OIDC provenance plus both GHCR images via Actions — no host publish token. `graphyard guide publishing` covers owner setup.
+
+## Prerequisite details
+
+- Ubuntu 26.04 kernel: `sudo apt install linux-image-oem-7.3`.
+- Check each tool: `git --version`, `git remote -v`, `docker version`, `docker compose version`, `gh auth status`, `bwrap --version`, `python3 --version`, `herdr --version`, `systemctl --user status`.
+- Install Herdr: `curl -fsSL https://herdr.dev/install.sh | sh`.
+- The dashboard's trust strip counts this week's deliveries: verified by running the real app, sent back, reverted.

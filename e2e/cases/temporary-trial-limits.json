@@ -1,7 +1,7 @@
 {
   "id": "temporary-trial-limits",
-  "title": "The master sets a temporary trial cap, heat limit and host-wide strict cap that revert on their own",
-  "description": "master config trialCap=2 launchHotCelsius=80 hostHeavyJobs=1 until=TIME: master status shows each limit with its expiry, looser values are refused, merge trials stop at 2 and launches wait at an 80C average, two installs' trials, gate, selected tests and worker checks run one at a time without stopping running jobs, and every limit reverts to its default at expiry.",
+  "title": "Temporary trial cap, heat limit and host-wide strict cap that revert on their own",
+  "description": "master config trialCap=2 launchHotCelsius=80 hostHeavyJobs=1 until=TIME: master status shows each limit with its expiry, looser values are refused, merge trials stop at 2 and halve below an 80C average, two installs' trials, gate, selected tests and worker checks run one at a time without stopping running jobs, and every limit reverts to its default at expiry.",
   "target": "any",
   "required": false,
   "steps": [

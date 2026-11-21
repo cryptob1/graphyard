@@ -1,0 +1,14 @@
+{
+  "id": "ssh-reuse-per-host",
+  "title": "A trial reaches a compute host over a few shared SSH connections, so the host stays ready",
+  "description": "A merge trial places 30 shards on one compute host: a real OpenSSH server whose only key runs graphyard-host-shim, behind a proxy that resets every new connection above 5 open at once, as a host's sshd does under a burst. The trial opens at most 3 multiplexed SSH connections to it, every shard runs there through the shim, the host stays ready, and a plain shell command over the shared connection is still refused. When the host resets every connection, the shards run on this machine, master status lists the host away and one plain attention line says it reset the SSH connection, with the next step.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Run 30 shards on a host that resets bursts, then on one that resets every connection",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/ssh-reuse-per-host.test.ts",
+    "timeoutSeconds": 900
+  }]
+}

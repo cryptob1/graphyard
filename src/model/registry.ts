@@ -17,7 +17,7 @@ export type FleetRuntime = z.infer<typeof runtimeSchema>;
 export const capabilityTiers = ['frontier', 'strong', 'fast'] as const;
 export type FleetModel = z.infer<typeof modelSchema>;
 
-export const quotaStates = ['available', 'exhausted', 'unknown'] as const;
+export const quotaStates = ['available', 'exhausted', 'broken', 'unknown'] as const;
 export type QuotaObservation = z.infer<typeof quotaObservationSchema>;
 export interface ObservedQuota extends QuotaObservation { observedAt: string | null; observedBy: string | null; source: 'probe' | 'operator' | null }
 export const unobservedQuota: ObservedQuota = { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null, identity: null, observedAt: null, observedBy: null, source: null };
