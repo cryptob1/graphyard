@@ -86,7 +86,7 @@ function harness(work: Work[]) {
   return { tip, trialled, recorded, state, step, settle, waiting: () => mergeWriterSummary(state.mergeWriter).queue.filter(entry => (entry as { waiting?: string }).waiting).map(entry => entry.key) };
 }
 
-test('integration:red-base-only-fix-trials — while main fails, only a head changing the failing tests or the files they read is trialled; the others wait for a green base, across a merge that leaves main red, and start once main changes what fails', async () => {
+test('integration:red-base-only-fix-trials — while main fails, only the base repair (here changing what the failing test reads) is trialled; the others wait for a green base, across a merge that leaves main red, and start once main changes what fails', async () => {
   // GY-3 recorded the base failure on the red tip and was returned to its worker; GY-1 (oldest) changes nothing the failing test reads.
   const recorder = item('w3', 'GY-3', recorderHead, start - 9_000, { mergeLedger: refusedOn('GY-3', recorderHead, reason), reworkRequested: true });
   const work = [item('w1', 'GY-1', unrelated, start - 5_000), recorder];
@@ -106,7 +106,7 @@ test('integration:red-base-only-fix-trials — while main fails, only a head cha
   assert.equal(run.recorded.length, 0, 'the waiting head is refused once, not again on every cycle or tip');
 
   // The fix arrives: it changes the file the failing test reads, so it alone is trialled and lands.
-  work.push(item('w2', 'GY-2', fix, start - 1_000));
+  work.push(item('w2', 'GY-2', fix, start - 1_000, { title: `Base branch main fails unit test: ${failingTest}` }));
   await run.step();
   assert.deepEqual(run.trialled, ['GY-2'], 'the head changing what the failing test reads gets a merge trial');
   assert.ok(run.recorded.some(entry => entry.key === 'GY-2' && entry.event.kind === 'pushed'));
@@ -124,7 +124,7 @@ test('integration:red-base-only-fix-trials — while main fails, only a head cha
 test('e2e:red-base-fix-first — with main red, the fixing item merges while other items wait, then the others merge after main is green', async () => {
   const recorder = item('w3', 'GY-3', recorderHead, start - 9_000, { mergeLedger: refusedOn('GY-3', recorderHead, reason), reworkRequested: true });
   // GY-4 is the master's hotfix for the base: it is trialled whatever it changes.
-  const work = [item('w1', 'GY-1', unrelated, start - 5_000), item('w2', 'GY-2', fix, start - 2_000), item('w4', 'GY-4', hotfix, start - 1_000, { title: 'Hotfix: main passes again' }), recorder];
+  const work = [item('w1', 'GY-1', unrelated, start - 5_000), item('w2', 'GY-2', fix, start - 2_000, { title: `Base branch main fails unit test: ${failingTest}` }), item('w4', 'GY-4', hotfix, start - 1_000, { title: 'Hotfix: main passes again' }), recorder];
   const run = harness(work);
   run.tip.at = stillRed; // main moved on and stayed red
 
@@ -139,4 +139,44 @@ test('e2e:red-base-fix-first — with main red, the fixing item merges while oth
   await run.step();
   assert.deepEqual(run.trialled.at(-1), 'GY-1', 'once main is green the waiting item is trialled');
   assert.ok(run.recorded.some(entry => entry.key === 'GY-1' && entry.event.kind === 'pushed'), 'and merges');
+});
+
+// GY-3563: on 2026-11-20 main stayed red for an hour while ordinary heads that touched the failing
+// tests' wide import scope held every trial slot, and the hotfix and base repair queued behind them.
+// While a base failure stands, only hotfixes and base repairs start trials; every other head waits.
+const repairTitle = `Base branch main fails unit test: ${failingTest}`;
+
+test('integration:held-candidates-no-trial — while main fails, only hotfix and base-repair heads start trials; other due heads, even ones touching what fails, stay queued and start once the failure clears', async () => {
+  const recorder = item('w3', 'GY-3', recorderHead, start - 9_000, { mergeLedger: refusedOn('GY-3', recorderHead, reason), reworkRequested: true });
+  // GY-1 is an ordinary head that changes what the failing test reads; GY-5 is the filed base repair.
+  const work = [item('w1', 'GY-1', fix, start - 5_000), item('w5', 'GY-5', sha('repair-head'), start - 1_000, { title: repairTitle }), recorder];
+  const run = harness(work);
+  run.tip.at = stillRed;
+
+  await run.step();
+  assert.deepEqual(run.trialled, ['GY-5'], 'only the base repair is trialled while main fails');
+  assert.deepEqual(run.waiting(), ['GY-1'], 'the ordinary head waits for a green base');
+  assert.ok(run.recorded.some(entry => entry.key === 'GY-1' && entry.event.kind === 'refused' && entry.event.reason === reason), 'it is held without a trial');
+  run.settle();
+
+  await run.step();
+  assert.deepEqual(run.trialled, ['GY-5'], 'it stays queued while the failure stands');
+
+  run.tip.at = green;
+  await run.step();
+  assert.deepEqual(run.trialled, ['GY-5', 'GY-1'], 'once the failure clears it starts normally');
+  assert.deepEqual(run.waiting(), []);
+});
+
+test('e2e:held-candidates-no-trial — with main red, a base-repair head starts its trial before an ordinary head queued earlier', async () => {
+  const recorder = item('w3', 'GY-3', recorderHead, start - 9_000, { mergeLedger: refusedOn('GY-3', recorderHead, reason), reworkRequested: true });
+  const work = [item('w1', 'GY-1', fix, start - 5_000), item('w5', 'GY-5', sha('repair-head'), start - 1_000, { title: repairTitle }), recorder];
+  const run = harness(work);
+  run.tip.at = stillRed;
+  await run.step();
+  run.settle();
+  run.tip.at = green;
+  await run.step();
+  await run.step();
+  assert.deepEqual(run.trialled, ['GY-5', 'GY-1'], 'the repair is trialled first, the earlier ordinary head after main is green');
 });
