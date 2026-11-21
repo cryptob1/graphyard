@@ -1,7 +1,7 @@
 {
   "id": "worker-verification-error-details",
   "title": "Failing confined host verification exposes exit status and masked output without breaking proof enforcement",
-  "description": "Forces a confined verify.mjs runner failure through the completion path, confirms the completion response and durable history carry the exit status and masked stdout/stderr while normal cleanup removes the allocation, and confirms successful verification still enforces required proofs.",
+  "description": "Forces a confined verify.mjs runner failure through graphyard verify, confirms the verification response and durable history carry the exit status and masked stdout/stderr while normal cleanup removes the allocation, and confirms successful verification still enforces required proofs before complete submits.",
   "tags": ["workers", "verification"],
   "target": "any",
   "required": false,

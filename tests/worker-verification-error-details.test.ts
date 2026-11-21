@@ -10,6 +10,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { createContext } from '../src/cli/context.js';
 import { completeCommand } from '../src/cli/complete.js';
+import { verifyCommand } from '../src/cli/verify.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { workerVerificationPump } from '../src/daemon/worker-verification.js';
 import { verificationStep } from '../src/merge-writer/worker-verification.js';
@@ -71,7 +72,7 @@ test('integration:worker-verification-error-details — a failing verification s
   assert.deepEqual(await readdir(allocations), [], 'normal cleanup still removes the allocation');
 });
 
-test('e2e:worker-verification-error-details — forced runner failure surfaces exit status and masked output in completion response and durable history; successful verification still enforces required proofs', { timeout: 120_000 }, async t => {
+test('e2e:worker-verification-error-details — forced runner failure surfaces exit status and masked output in the verification response and durable history; successful verification still enforces required proofs', { timeout: 120_000 }, async t => {
   const base = await realpath(await temporaryDirectory('verification-error-e2e', process.cwd()));
   const allocations = await temporaryDirectory('trials', base);
   const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' }).trim();
@@ -139,22 +140,25 @@ test('e2e:worker-verification-error-details — forced runner failure surfaces e
     if (saved.file !== undefined) process.env.GRAPHYARD_TOKEN_FILE = saved.file;
   });
 
-  const runComplete = async () => {
+  const run = async (command: typeof verifyCommand, args: string[]) => {
     const printed: unknown[] = [];
-    const context = await createContext('complete', work.key, ['1', '--head', head], false);
+    const context = await createContext(command.name, work.key, args, false);
     context.repositoryRoot = () => worktree;
     context.print = value => { printed.push(value); };
-    const error = await completeCommand.run(context, work).then(() => null, (err: unknown) => err as Error);
-    return { printed, error };
+    const exitCode = process.exitCode;
+    const error = await command.run(context, work).then(() => null, (err: unknown) => err as Error);
+    const failed = process.exitCode === 1;
+    process.exitCode = exitCode;
+    return { printed, error, failed };
   };
 
-  // 1. Forced runner failure: completion response and durable history expose exit status + masked stdout/stderr; allocation is cleaned up.
-  const crashed = await runComplete();
-  assert.ok(crashed.error, 'forced runner failure must fail complete');
+  // 1. Forced runner failure: the verification response and durable history expose exit status + masked stdout/stderr; allocation is cleaned up.
+  const crashed = await run(verifyCommand, []);
+  assert.ok(crashed.error, 'forced runner failure must fail verification');
   assert.match(crashed.error.message, /exit status 2/);
   assert.match(crashed.error.message, /confined-verify-stdout: step 2 failed/);
   assert.match(crashed.error.message, /confined-verify-stderr: boom/);
-  assert.doesNotMatch(crashed.error.message, /ghp_abcdef/, 'completion response must not leak secrets');
+  assert.doesNotMatch(crashed.error.message, /ghp_abcdef/, 'verification response must not leak secrets');
   assert.deepEqual(await readdir(allocations), [], 'normal cleanup removes the temporary allocation');
   const eventsAfterCrash = await store.events(work.id);
   const durableFailure = eventsAfterCrash.find(event => event.kind === 'work.self-verification-failed');
@@ -166,18 +170,20 @@ test('e2e:worker-verification-error-details — forced runner failure surfaces e
   assert.doesNotMatch(failureError, /ghp_abcdef/, 'durable diagnostic must not leak secrets');
   assert.equal(eventsAfterCrash.filter(event => event.kind === 'work.self-verified').length, 0);
 
-  // 2. Successful verification with a failing required proof still refuses complete.
+  // 2. Successful verification with a failing required proof still fails verify, and complete reports it failing.
   mode = 'proof-fail';
-  const refused = await runComplete();
-  assert.ok(refused.error, 'failing required proof must refuse complete');
-  assert.match(refused.error.message, /complete refused: required proofs failed/);
+  const refused = await run(verifyCommand, []);
+  assert.equal(refused.error, null, String(refused.error));
+  assert.ok(refused.failed, 'a failing required proof must fail verify');
   const readWork = async () => (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [work.id])).rows[0].document as Work;
-  assert.equal((await readWork()).submission, null, 'failing proof must not submit');
 
-  // 3. Successful verification with all required proofs passing submits the head.
+  // 3. Successful verification with all required proofs passing: verify passes and complete submits the head, reporting it passing.
   mode = 'proof-pass';
-  const passed = await runComplete();
-  assert.equal(passed.error, null, `passing proofs should submit: ${String(passed.error)}`);
-  const submitted = await readWork();
-  assert.equal(submitted.candidate?.sha, head, 'passing verification submits the head');
+  const passed = await run(verifyCommand, []);
+  assert.equal(passed.error, null, String(passed.error));
+  assert.equal(passed.failed, false, 'passing proofs pass verify');
+  const completed = await run(completeCommand, ['1', '--head', head]);
+  assert.equal(completed.error, null, `passing proofs should submit: ${String(completed.error)}`);
+  assert.equal((completed.printed[0] as any).selfVerification.state, 'passing');
+  assert.equal((await readWork()).candidate?.sha, head, 'complete submits the head');
 });
