@@ -16,9 +16,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3432: free worker slots and ready work with no launch for 10 minutes raise one alarm line at
 // the top of master status and wake the master, naming the cause: the last dispatch error (the
-// 2026-11-16 loop-state save 500), launches waiting on heat, every worker account out of quota,
-// the loop running older code than the served commit, or else the ready item with no actor. An
-// open item with no change and no lease for an hour raises it too. Driven through the loop's own cycle.
+// 2026-11-16 loop-state save 500), launches waiting on CPU pressure, every worker account out of
+// quota, the loop running older code than the served commit, or else the ready item with no actor.
+// An open item with no change and no lease for an hour raises it too. Driven through the loop's own cycle.
 
 const proof = 'integration:stall-alarm-causes';
 const start = Date.parse('2026-11-16T08:00:00Z');
@@ -30,7 +30,7 @@ function ready(key = 'GY-1', updatedAt = new Date(start).toISOString()): Work {
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['e2e:fixture'] }], dependencies: [], evidence: [], gates: [], workspaces: [], sessions: [], createdAt: updatedAt, updatedAt } as unknown as Work;
 }
 
-async function fixture(options: { work?: Work[]; launches?: boolean; dispatchTick?: () => Promise<void>; celsius?: number; registry?: Pick<AgentRegistry, 'accounts' | 'roles'>; serving?: string } = {}) {
+async function fixture(options: { work?: Work[]; launches?: boolean; dispatchTick?: () => Promise<void>; celsius?: number; pressure?: string; registry?: Pick<AgentRegistry, 'accounts' | 'roles'>; serving?: string } = {}) {
   const directory = await temporaryDirectory('stall-alarm');
   const profile = { name: 'w1', principal: 'worker-a', agentName: 'agent-w1', mode: 'launch', kind: 'claude', credentialFile: '/outside/w1.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
   const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', repository: 'owner/stall', credentialFile: join(directory, 'coordinator.token'),
@@ -53,7 +53,7 @@ async function fixture(options: { work?: Work[]; launches?: boolean; dispatchTic
       return { pane: 'p1', epoch: 1 };
     },
     ...(options.dispatchTick ? { dispatchTick: options.dispatchTick } : {}),
-    ...(options.celsius ? { cpuPressure: async () => ({ pressure: null, stat: null, celsius: options.celsius! }) } : {}),
+    ...(options.celsius !== undefined || options.pressure !== undefined ? { cpuPressure: async () => ({ pressure: options.pressure ?? null, stat: null, celsius: options.celsius ?? null }) } : {}),
     ...(registry ? { registry: async () => registry } : {}),
     servingCommit: () => options.serving ?? null,
     masterSession: { wake: async (_target, text) => { prompts.push(text); }, launch: async () => ({ agentName: 'master', pane: 'pM', runtime: 'codex', account: 'a', session: 's' }) },
@@ -103,9 +103,10 @@ test(`${proof} — the last dispatch error, today's loop-state save 500, is the 
   assert.equal(f.prompts.length, wakes, 'a new request id in the same error wakes nobody again');
 });
 
-test(`${proof} — launches waiting on heat are the named cause`, async () => {
-  const alarm = await stalled(await fixture({ celsius: 96 }));
-  assert.match(alarm, /Cause: launches waiting: CPU 96C/);
+test(`${proof} — launches waiting on CPU pressure are the named cause; a hot sensor is none`, async () => {
+  const alarm = await stalled(await fixture({ pressure: 'some avg10=96.00 avg60=96.00 avg300=96.00 total=1\n' }));
+  assert.match(alarm, /Cause: launches waiting: CPU pressure 96 percent/);
+  assert.doesNotMatch(alarm, /heat|96C/, 'a hot sensor alone names no launch cause (GY-3501)');
 });
 
 test(`${proof} — every eligible worker account out of quota is the named cause`, async () => {

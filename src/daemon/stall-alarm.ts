@@ -19,7 +19,7 @@ export interface StallReadings {
   /** Open items in scope; `ready` are the ones dispatch could launch now. */
   open: readonly Work[]; ready: readonly Work[];
   freeSlots: number;
-  /** GY-3473: what holds every implementation launch this cycle — disk, heat, an untrusted checkout, a running batch gate — as dispatch itself decided it. */
+  /** GY-3473: what holds every implementation launch this cycle — disk, CPU pressure, an untrusted checkout, a running batch gate — as dispatch itself decided it. */
   holds?: readonly string[];
   state: Pick<DaemonState, 'actions' | 'stepFailures' | 'launchBackoff' | 'cpuPressure' | 'release' | 'lock' | 'mergeWriter'>;
   registry: Pick<AgentRegistry, 'accounts' | 'roles'> | null;

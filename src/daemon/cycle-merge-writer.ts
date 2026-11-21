@@ -1055,7 +1055,9 @@ export async function mergeWriterStep(cycle: Cycle) {
       changed = true; delivered = true;
     }
   }
-  // GY-3437: at the launch limit no new trial starts; the cap still reads half, so status shows what returns once it cools.
+  // GY-3437, GY-3501: pressure above the ceiling alone stops new trials; heat never does — the cap
+  // still reads half, so status shows what returns once it cools, and the trial container guard
+  // waits on its own limit once the flight launches.
   if (busy.size < parallel && !cpuPressureHeld(state) && ![...live].some(flight => flight.revert) && !revertWaiting.has(state) && !writer.unconfirmed?.length
     && !writer.inFlight?.revert && !replayed && !delivered) {
     const free = snapshot.work.filter(item => !busy.has(item.key) && !settledNow.has(item.key));

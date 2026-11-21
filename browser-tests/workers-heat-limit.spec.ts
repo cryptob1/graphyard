@@ -6,8 +6,8 @@ import { encodeLoopCpu, loopCpuHeader, loopPresenceHeader, loopSupervisionHeader
 import { coordinationViewHeader } from '../src/server/work-view';
 
 // e2e:heat-limit-laptop (GY-3416): the Workers page header beside the sessions carries what a hot
-// laptop's loop read — the hottest package or core sensor (96C), the trial cap halved by the heat
-// and the guard's own word for it: launches waiting.
+// laptop's loop read — the hottest package or core sensor (96C) and the trial cap halved by the
+// heat. Since GY-3501 the reading holds no launch, so no launches-waiting word serves beside them.
 
 /** The real control plane serving the built dashboard, proxying the page's API reads to it. */
 async function plane(context: BrowserContext) {
@@ -36,8 +36,8 @@ async function seedLoopRead(url: string) {
     Authorization: 'Bearer test-loop',
     [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: '15', [loopSupervisionHeader]: 'autonomous',
     // The operator's reading (GY-3416's episode): package 95C, core 16 at 96C, against a 105C
-    // critical — over the 85C limit, so the cap of 4 trials is halved and no launch goes out.
-    [loopCpuHeader]: encodeLoopCpu({ avg60: 20, steal: 0, celsius: 96, trialCap: { now: 2, full: 4 }, waiting: true }),
+    // critical — over the 85C limit, so the cap of 4 trials is halved; the heat holds no launch.
+    [loopCpuHeader]: encodeLoopCpu({ avg60: 20, steal: 0, celsius: 96, trialCap: { now: 2, full: 4 } }),
   } });
   expect(read.status).toBe(200);
 }
@@ -52,7 +52,7 @@ async function openWorkers(page: Page, url: string) {
   await expect(page.getByRole('heading', { name: 'Workers', exact: true, level: 1 })).toBeVisible({ timeout: 15_000 });
 }
 
-test('e2e:heat-limit-laptop — the Workers page header shows the laptop\'s hot reading, the halved trial cap and launches waiting', async ({ page, context }) => {
+test('e2e:heat-limit-laptop — the Workers page header shows the laptop\'s hot reading and the halved trial cap', async ({ page, context }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1280, height: 800 });
   const { url, close } = await plane(context);
@@ -63,6 +63,5 @@ test('e2e:heat-limit-laptop — the Workers page header shows the laptop\'s hot 
     await expect(figures).toBeVisible({ timeout: 15_000 });
     await expect(figures).toContainText('temperature 96°C');
     await expect(figures).toContainText('trials 2 of 4');
-    await expect(figures).toContainText('launches waiting');
   } finally { await page.close(); await close(); }
 });

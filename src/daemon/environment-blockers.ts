@@ -5,7 +5,7 @@ import type { Work } from '../model.js';
 export interface EnvironmentReadings {
   /** A host heavy-job slot is free and heavy work is not drained. */
   slotsFree: boolean;
-  /** The CPU is neither saturated nor too hot for a launch. */
+  /** The CPU is neither saturated nor too hot for the trial and check waits the heat rule still governs (GY-3501). */
   heatClear: boolean;
   /** The commit the served CLI release holds, and the commit the server runs. */
   cliCommit: string | null;
