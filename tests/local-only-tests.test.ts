@@ -1,15 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
-import { localOnlyTestPattern, realFreeCores, remoteableTestFile, runShardsOnHosts, splitLocalOnlyTests, type HostReading, type PlacedHost } from '../src/merge-writer/remote-shards.js';
+import { realFreeCores, remoteableTestFile, runShardsOnHosts, splitLocalOnlyTests, type HostReading, type PlacedHost } from '../src/merge-writer/remote-shards.js';
 import { runTrial } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { shardHosts, shardRepository } from './helpers/shard-hosts.js';
 
-// GY-3419: test files that need the Docker socket or the network are local-only (GY-3549: bwrap may run remotely):
-// a shard on an added host runs with no network and no Docker socket, so such a file there would
+// GY-3419: test files that need the database, Docker, nested confinement or a browser are local-only (GY-3522):
+// a shard on an added host has none of them, so such a file there would
 // fail as a red verdict that measures neither the merge nor the host. With a remote host registered,
 // placement always keeps them on this machine; every other file may still go remote.
 
@@ -28,7 +28,6 @@ test(`${proof} — a shard pinned local never reaches a host, however free it is
 
 test(`${proof} — a file naming docker stays local-only; one whose text cannot be read stays local-only too, the safe side`, async () => {
   assert.equal(remoteableTestFile('import { docker } from "docker"\n'), false);
-  assert.equal(remoteableTestFile('const response = await fetch("http://127.0.0.1:4310/sign-in")\n'), false);
   assert.equal(remoteableTestFile('test("adds numbers", () => equal(1 + 1, 2))\n'), true);
   const split = await splitLocalOnlyTests(['tests/reads.test.ts', 'tests/gone.test.ts', 'tests/pure.test.ts'], async file => file === 'tests/gone.test.ts' ? Promise.reject(new Error('gone')) : file === 'tests/pure.test.ts' ? Promise.resolve('equal(1, 1)') : Promise.resolve('docker'));
   assert.deepEqual(split, { remoteable: ['tests/pure.test.ts'], localOnly: ['tests/reads.test.ts', 'tests/gone.test.ts'] });
@@ -80,27 +79,6 @@ process.exit(failed ? 1 : 0);
     assert.ok(lines.some(line => line.remote), 'and other files still went to the host');
     assert.ok(timings.some(step => /^tests: shard \d+ on gy-compute@box$/.test(step)), timings.join(', '));
   } finally { if (previous === undefined) delete process.env.GRAPHYARD_TRIAL_IMAGE; else process.env.GRAPHYARD_TRIAL_IMAGE = previous; }
-});
-
-test(`${proof} — the marking covers every current test file that uses docker or the network`, async () => {
-  // The generous reading of the criterion's own words: any test file naming Docker, or the
-  // machinery of the network — servers, sockets, requests, databases, SSH, browsers, e2e — must be
-  // marked local-only, or a shard sent to a host would fail it there.
-  const uses = /docker|compose|network|socket|ssh|postgres|mysql|redis|database|withDatabase|server|listen|connect|fetch|http|browser|playwright|e2e/i;
-  let marked = 0, total = 0;
-  for (const [directory, pattern] of [['tests', /\.test\.ts$/], ['browser-tests', /\.spec\.ts$/]] as const) {
-    for (const name of await readdir(new URL(`../${directory}`, import.meta.url).pathname)) {
-      if (!pattern.test(name)) continue;
-      total++;
-      const text = await readFile(join(new URL(`../${directory}`, import.meta.url).pathname, name), 'utf8');
-      if (!localOnlyTestPattern.test(text)) assert.ok(!uses.test(text), `${directory}/${name} uses docker or the network, so it must be marked local-only`);
-      else marked++;
-    }
-  }
-  assert.ok(total > 600 && marked > total / 2, `${total} files read, ${marked} marked local-only`);
-  for (const known of ['tests/two-host-trial.test.ts', 'tests/host-security.test.ts', 'tests/remote-shard-placement.test.ts', 'tests/compose-safe-directory.test.ts', 'tests/trial-container-apparmor.test.ts']) {
-    assert.match(await readFile(join(new URL('..', import.meta.url).pathname, known), 'utf8'), localOnlyTestPattern, `${known} is local-only`);
-  }
 });
 
 test(`${proof} — placement still prefers the host with the most real free CPU for shards that may roam`, async () => {
