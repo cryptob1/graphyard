@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { delimiter, dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type CliCommand } from './registry.js';
 import { checkoutRoot } from './context.js';
@@ -179,7 +180,8 @@ export async function rerunTrialFiles(root: string, files: readonly string[], ru
     // /var/tmp is durable scratch available to confined workers. Keep it short and outside
     // the checkout: fixture sockets have a pathname bound and upward lookups must stay clean.
     // The operator HOME stays read-only, including for runners that relocate tmpfs beneath HOME.
-    scratch = await mkdtemp('/var/tmp/gy-r');
+    // A trial shard on an added host has a read-only /var/tmp: its tmpdir serves there.
+    scratch = await mkdtemp('/var/tmp/gy-r').catch(() => mkdtemp(join(tmpdir(), 'gy-r')));
     const home = join(scratch, 'home'), temporary = join(scratch, 'tmp');
     await mkdir(home); await mkdir(temporary); await chmod(temporary, trialTemporaryMode);
     // A NODE_TEST_CONTEXT inherited from an enclosing test run suppresses the child's runner.
