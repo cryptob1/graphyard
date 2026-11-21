@@ -1,0 +1,14 @@
+{
+  "id": "local-only-pattern-narrow",
+  "title": "A trial places most of its test shards on a ready added host",
+  "description": "A merge trial with one ready compute host reached through graphyard-host-shim, over test files that start servers and fetch URLs plus one that needs Docker. Only the Docker file stays on this machine; the rest run on the host, and master status's remoteShards shows most of the trial's shards run remotely with the host ready.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": true,
+  "steps": [{
+    "kind": "command",
+    "name": "Run a trial of network-word test files with one ready compute host",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/local-only-pattern-narrow.test.ts",
+    "timeoutSeconds": 900
+  }]
+}

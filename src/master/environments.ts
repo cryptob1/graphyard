@@ -10,7 +10,7 @@ import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harness.js';
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
-import { type FleetClient, type FleetLaunchAccount, type FleetProbe, accountCheckIntervalMs, checkAccountLive, observeAccount, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
+import { type FleetClient, type FleetLaunchAccount, type FleetProbe, accountCheckIntervalMs, checkAccountLive, nextLiveCheck, observeAccount, selectFleetSession, fleetRoleHealth, httpFleetClient } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
 import { externalCredential, loadStoredMasterConfig } from './config.js';
 import { atomicPrivateText, atomicPrivateWrite, readCredentialFile } from '../private-file.js';
@@ -87,6 +87,8 @@ export interface EnvironmentHealth {
   healthy: boolean; reason: string | null; note: string | null; login: string | null;
   /** The provider login behind the home (GY-1573): accounts that share one share one quota. Null when the login names none; absent when its file could not be read just now. */
   identity?: string | null;
+  /** GY-3516: the fingerprint of the key the probe read the quota with; never the key. */
+  key?: string;
 }
 export interface EnvironmentProbe {
   fetch?: typeof fetch; now?: () => number; ceilingPercent?: number; timeoutMs?: number; cacheMs?: number;
@@ -140,7 +142,7 @@ export async function checkAgentEnvironment(environment: ProbedEnvironment, prob
     : exhausted ? `${environment.name} quota is exhausted (${(spent.length ? spent : account.usage).map(usage => `${usage.window} window at ${usage.percent}%${usage.resetsAt ? ` until ${usage.resetsAt}` : ''}`).join(', ')}; ceiling ${ceiling}%)` : null;
   const health: EnvironmentHealth = { name: environment.name, kind: environment.kind, home: environment.home, variable: environmentVariable[environment.kind], checkedAt: new Date(now).toISOString(),
     loggedIn: account.loggedIn, quota, usage: account.usage, healthy: !reason, reason, note: account.note, login: account.loggedIn ? null : loginCommand(environment),
-    identity: account.loggedIn ? await providerIdentity(environment.kind, environment.home) : null };
+    identity: account.loggedIn ? await providerIdentity(environment.kind, environment.home) : null, ...account.key ? { key: account.key } : {} };
   healthCache.set(cacheKey, { at: now, health });
   return health;
 }
@@ -231,7 +233,9 @@ export async function recordObservedExhaustion(config: Pick<MasterConfig, 'crede
     ? (await observeAccount(recentPass ? account : { ...account, quota: { ...account.quota, state: 'exhausted' } }, runtime, { smoke: report?.smoke, now: () => now, quota: false, opencodeAuth: null, opencodeModels: null }, document!.accounts, model ?? undefined)).quota
     : await checkAccountLive(account, runtime, { smoke: report?.smoke, now: () => now }, model);
   await registry.observe({ host: config.hostId, observations: [{ account: environment, quota }] });
-  return { ...observed, available: quota.state === 'available', at: quota.since!, reason: quota.reason ?? 'The live request passed', resetsAt: quota.session === 'guessed' ? null : quota.resetsAt, until: quota.resetsAt ?? new Date(now).toISOString() };
+  // GY-3561: a live check that can only guess a reset never erases the one the notice itself named —
+  // the account's own event stays on the record while the hold's bound stays the recheck window.
+  return { ...observed, available: quota.state === 'available', at: quota.since!, reason: quota.reason ?? 'The live request passed', resetsAt: quota.session === 'guessed' ? observed.resetsAt ?? null : quota.resetsAt, until: quota.state === 'broken' ? new Date(nextLiveCheck(quota)).toISOString() : quota.resetsAt ?? new Date(now).toISOString() };
 }
 /** Current exhaustion is read from the registry, never from the executor's environment log. */
 export async function observedExhaustions(config: Pick<MasterConfig, 'credentialFile'> & Partial<Pick<MasterConfig, 'url' | 'hostId'>>, now = Date.now(), registry?: Pick<FleetClient, 'document'>): Promise<Record<string, ObservedExhaustion>> {

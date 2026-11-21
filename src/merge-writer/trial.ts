@@ -24,10 +24,10 @@ import { mergeGateSchema } from '../model-boundary/delivery-policy.js';
 import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerBoundary, trialContainerDependencies, trialImage } from './trial-container.js';
 import { cachedPasses, commitDependencies, dependencyKey, moduleFile, recordPasses, testResultKeys, warmDependencies } from './trial-caches.js';
-import { HostDroppedError, readShardHosts, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, splitLocalOnlyTests, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
+import { HostDroppedError, readShardHosts, shardSshSession, type ShardSshSession, runShardsOnHosts, realFreeCores, recordRemoteShardRun, remoteShardSession, shardHosts, splitLocalOnlyTests, underHeatLimit, type HostReading, type PlacedHost } from './remote-shards.js';
 import { repositoryTrialImage, trialDockerfile, TrialRepositoryImageError } from './repository-trial-image.js';
 import { addressPoolsSpent, checkServiceVariables, dockerEnvironment, previewNetworkCount, startCheckServices, tcpAcceptProbe, type CheckServices } from '../compose-preview.js';
-import { diskFloorBytes, gateTrialKey, trialContainerFault, trialLoad, trialShardLanes, trialStartOwner } from './trial-load.js';
+import { diskFloorBytes, gateTrialKey, heatWaitSeconds, TrialHeatError, trialContainerFault, trialLoad, trialShardLanes, trialStartOwner } from './trial-load.js';
 import { nestedSandboxDenied, trialAppArmorFix } from './trial-apparmor.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -753,10 +753,14 @@ export interface RunTrialInput {
   hidden?: readonly string[];
   /** GY-3209: starts a check's declared Compose services; `startCheckServices` unless a test injects a fake. */
   services?: typeof startCheckServices;
+  /** GY-3577: the merge trial's proof count: every test shard, on this machine or a host, runs with `args` before its file list, and its output goes to `output`. */
+  reporter?: { args: readonly string[]; output: (out: string) => void };
   /** GY-3283: run only the declared check of this name, whatever paths it is limited to (a worker's `graphyard check NAME`). */
   only?: string;
   /** GY-3412: the hosts a selection's shards fan out to — those `graphyard host add` recorded unless a test names others — and how they are read. */
-  remote?: { hosts: readonly string[]; read?: (hosts: readonly string[]) => Promise<HostReading[]> };
+  remote?: { hosts: readonly string[]; read?: (hosts: readonly string[], transport: ShardSshSession) => Promise<HostReading[]> };
+  /** GY-3526: a worker verification's label: it holds a host heavy-job slot under it only while a test shard or check runs on this machine, never while its shards run on other hosts. */
+  localSlot?: string;
 }
 const tailLength = 4000;
 /**
@@ -1049,7 +1053,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       }
     }
     const deleted = changed && own === null; // the trialled commit deletes the file: the standard image
-    let imageTip = deleted ? null : input.baseTip ?? null;
+    // GY-3566: a gate verifies the commit it gates, so its image is that commit's own, never its parent's.
+    let imageTip = input.key === gateTrialKey ? input.mergeSha : deleted ? null : input.baseTip ?? null;
     if (imageTip === null && !deleted) {
       try { imageTip = String(await run('git', ['-C', input.root, 'rev-parse', '--verify', '--quiet', `${input.mergeSha}^1`], { timeoutMs: remaining() })).trim().toLowerCase() || null; }
       catch { imageTip = null; } // a root commit names no base to read the file from
@@ -1120,7 +1125,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     catch (error) {
       const out = output(error);
       const ended = endedOf(error, out);
-      cpu.finish(stepLabel, cpuBefore, !!(error as { timedOut?: boolean }).timedOut || now() >= deadline || repositoryCheckFailure(out).timedOut || /Timed out waiting \d+ms from config\.webServer|file timed out|file timeout/i.test(out), line => entries.push(line));
+      const timedOut = !!(error as { timedOut?: boolean }).timedOut || now() >= deadline || repositoryCheckFailure(out).timedOut || /Timed out waiting \d+ms from config\.webServer|file timed out|file timeout/i.test(out);
+      cpu.finish(stepLabel, cpuBefore, timedOut, line => entries.push(line));
+      // GY-3535: a step that timed out while its containers waited over a minute for the CPU to cool measures the heat, not the head.
+      if (timedOut && heatWaitSeconds(out) > 60) { entries.push(`$ ${command} ${args.join(' ')}\n${out}`); throw new TrialHeatError(stepLabel, heatWaitSeconds(out)); }
       entries.push(`$ ${command} ${args.join(' ')}\n${out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`);
       if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError(phase, Math.max(0, now() - startedAt), tail());
       // GY-3332: a container start that gave up waiting on host pressure is no verdict on the head.
@@ -1173,6 +1181,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const closed = enter();
     const line = `[step] ${stepLabel} took ${stepSeconds(now() - stepAt)}`;
     log.push(line);
+    // GY-3535: a failure while its containers waited over a minute for the CPU to cool measures the heat, not the head.
+    const heat = build === 'fail' || tests.failed.length ? heatWaitSeconds(log.join('\n')) : 0;
+    if (heat > 60) throw new TrialHeatError(stepLabel, heat);
     return { build, tests, durationMs: Math.max(0, now() - startedAt), logTail: logTail === undefined ? tail() : `${logTail}\n${line}`, runnerExit, ...(groups ? { groups } : {}), phases: closed,
       ...(detail?.failingCase ? { failingCase: detail.failingCase } : {}),
       ...(detail?.timedOut ? { timedOut: true } : {}),
@@ -1312,6 +1323,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       await started.close();
     }
   };
+  // GY-3526: a worker verification's tests on this machine run on one shared host slot; a merge trial already holds its own.
+  const onThisMachine = input.localSlot ? (await import('../master/verification-slots.js')).sharedHeavyJob(input.localSlot, { strictOnly: true }) : <T>(part: () => Promise<T>) => part();
   const runChecks = async (checks: RepositoryTrialCheck[]): Promise<TrialRun> => {
     // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
     if (input.e2eProofs?.length) {
@@ -1362,7 +1375,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       }
       files++;
       enterStep(`tests: ${check.check}`);
-      const ran = await withServices(check, () => child('tests', check.argv[0]!, check.argv.slice(1)));
+      const ran = await withServices(check, () => onThisMachine(() => child('tests', check.argv[0]!, check.argv.slice(1))));
       if ('services' in ran) { failed.push(check.check); detail = { failingCase: ran.services }; runnerExit = null; break; }
       if (hostEnded(ran)) throw runnerFailure('tests', ran);
       if (!ran.ok) {
@@ -1421,11 +1434,12 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     // GY-3412: with added hosts, every host is read once and the selection is cut for this machine's
     // lanes plus the real free cores of every remote host under its heat limit.
     const hosts = input.remote?.hosts ?? await shardHosts();
-    const readings = hosts.length ? await (input.remote?.read ?? (named => readShardHosts(named, run, cores)))(hosts) : [];
+    // GY-3534: one SSH transport carries the probe and every shard, over a few multiplexed connections per host.
+    const transport = hosts.length ? shardSshSession(run) : undefined;
+    const readings = hosts.length ? await (input.remote?.read ?? ((named, shared) => readShardHosts(named, run, cores, shared)))(hosts, transport!) : [];
     const remoteLanes = readings.slice(1).filter(underHeatLimit).reduce((sum, reading) => sum + Math.floor(realFreeCores(reading)), 0);
-    // GY-3419: test files naming bwrap, Docker or the network are local-only — a remote shard runs
-    // with no namespaces, network or Docker socket, so they would fail there as red verdicts that
-    // measure nothing. Each pool is cut into its own shards, so a local-only file never pins a whole
+    // GY-3419: test files naming the database, Docker, nested confinement or a browser are local-only —
+    // a remote shard has none, so they would fail there as red verdicts that measure nothing. Each pool is cut into its own shards, so a local-only file never pins a whole
     // shared shard to this machine, and placement keeps the local-only shards here (runShardsOnHosts
     // `pinned`) while the others may go to any host.
     const split = await splitLocalOnlyTests(files, file => readFile(join(worktree, file), 'utf8'));
@@ -1440,13 +1454,13 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     let stopped: unknown = null;
     // A shard a host turned away is noted after every shard's output, so the note stays in the log tail kept on the item.
     const dropped = new Map<string, HostDroppedError>();
-    const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, deadline, signal: input.signal }) : null;
+    const session = hosts.length ? remoteShardSession({ root: input.root, sha: input.mergeSha, image: runImage ?? trialImage(), run, deadline, signal: input.signal, transport }) : null;
     // One shard on this machine, or on `remote`; a remote host that turned it away rethrows, so it runs elsewhere.
     const shard = async (index: number, remote?: string) => {
       const group = shards[index]!, entries: string[] = [];
       try {
         const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
-        const argv = (list: string, records: string) => [...check.argv.slice(1), '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'];
+        const argv = (list: string, records: string) => [...check.argv.slice(1), ...input.reporter?.args ?? [], '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'];
         const shardAt = now();
         let tests: Ended, recordText: string;
         try {
@@ -1457,10 +1471,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
             recordText = ended.records;
           } else {
             await writeFile(list, `${group.join('\n')}\n`);
-            tests = await child('tests', check.argv[0]!, argv(list, records), { entries });
+            tests = await onThisMachine(() => child('tests', check.argv[0]!, argv(list, records), { entries }));
             recordText = await readFile(records, 'utf8').catch(() => '');
           }
         } finally { input.onTiming?.(`tests: shard ${index + 1}${remote ? ` on ${remote}` : ''}`, Math.max(0, now() - shardAt)); }
+        input.reporter?.output(tests.out);
         const recorded = runnerRecords(recordText);
         // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
         const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
@@ -1484,7 +1499,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const placed = [local, ...hosts.map((host, index) => ({ name: host, remote: host, reading: readings[index + 1]!, room: Math.floor(realFreeCores(readings[index + 1]!) / breadth) }))];
       const placement = await runShardsOnHosts({ count: shards.length, hosts: placed, breadth, pinned, stopped: () => stopped !== null,
         run: (host, index) => shard(index, host.remote) });
-      if (hosts.length) await recordRemoteShardRun(input.root, { at: new Date().toISOString(), wallMs: Math.max(0, now() - startedAt), shards: placement.ran.length, remote: placement.ran.filter(name => name !== local.name).length,
+      if (hosts.length) await recordRemoteShardRun(input.root, { ...(input.localSlot ? { label: input.localSlot } : {}), at: new Date().toISOString(), wallMs: Math.max(0, now() - startedAt), shards: placement.ran.length, remote: placement.ran.filter(name => name !== local.name).length,
         queuedWhileIdle: placement.queuedWhileIdle, host: local.name, celsius: local.reading.celsius,
         hosts: readings.map(reading => ({ name: reading.name, away: reading.away || placement.dropped.includes(reading.name), reason: dropped.get(reading.name)?.reason ?? reading.reason, celsius: reading.celsius, freeCores: Math.round(realFreeCores(reading) * 10) / 10 })) }).catch(() => {});
     } finally { await release(); await session?.close(); }

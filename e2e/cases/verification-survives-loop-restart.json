@@ -1,9 +1,9 @@
 {
   "id": "verification-survives-loop-restart",
-  "title": "Complete preserves its head across a loop restart",
-  "description": "Restart the coordinator while its server holds a complete request, retry the same worker/head through real required trial validation, and retain independent review and proof gates.",
+  "title": "Optional verification preserves its head across a loop restart",
+  "description": "Restart the coordinator while its server holds an optional verify request, retry the same worker/head through real required trial validation, and retain independent review and proof gates.",
   "tags": ["workers", "verification"],
   "target": "any",
   "required": false,
-  "steps": [{ "kind": "command", "name": "Complete across coordinator restart", "run": "node --import tsx tests/helpers/run-tests.ts tests/verification-survives-loop-restart.test.ts", "timeoutSeconds": 240 }]
+  "steps": [{ "kind": "command", "name": "Verify across coordinator restart, then submit", "run": "node --import tsx tests/helpers/run-tests.ts tests/verification-survives-loop-restart.test.ts", "timeoutSeconds": 240 }]
 }

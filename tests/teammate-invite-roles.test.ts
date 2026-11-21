@@ -6,7 +6,7 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { createContext } from '../src/cli/context.js';
 import { inviteCommand } from '../src/cli/invite.js';
-import { HumanSignIn, signInLinkTtlMs } from '../src/server/auth.js';
+import { HumanSignIn, teammateSessionTtlMs } from '../src/server/auth.js';
 import { canTypeIntoMasterPane } from '../src/server/principals.js';
 import { signInDatabase } from './helpers/sign-in-database.js';
 import { localRequest } from './helpers/local-request.js';
@@ -39,17 +39,15 @@ test('e2e:teammate-invite-roles — invited viewer and maintainer sign in as the
     const sessions: Record<string, { token: string; actor: Principal }> = {};
     for (const [name, role] of [['vera@example.com', 'viewer'], ['mo-gh', 'maintainer']]) {
       const invite = await cli(name, '--role', role);
-      assert.equal(invite.teammate, name); assert.equal(invite.role, role);
-      const code = new URL(invite.invite).hash.replace('#sign-in=', '');
+      assert.equal(invite.name, name); assert.equal(invite.role, role);
+      const code = new URL(invite.link).hash.replace('#sign-in=', '');
       const opened = await call('POST', 'sign-in', '', { code });
       assert.equal(opened.status, 200, JSON.stringify(opened.body));
       assert.equal(opened.body.actor.id, name);
       assert.equal((await call('POST', 'sign-in', '', { code })).status, 401, 'the invite link is single use');
       sessions[role] = opened.body;
-      // The stored expiry is the 90-day session, far past the link's ten minutes; a request with the clock past ten minutes still authenticates.
-      const stored = await database.store.pool.query(`SELECT expires_at FROM human_sign_in_sessions WHERE actor->>'id'=$1`, [name]);
-      assert.ok(stored.rows[0].expires_at.getTime() - Date.now() > 80 * 86_400_000, 'the session outlives the invite link by far');
-      const later = new HumanSignIn(database.store, () => Date.now() + signInLinkTtlMs + 60_000);
+      // GY-3514: a teammate's session renews while used, and is short-lived.
+      const later = new HumanSignIn(database.store, () => Date.now() + teammateSessionTtlMs / 2);
       assert.equal((await later.authenticate(opened.body.token))?.id, name);
     }
     const { viewer, maintainer } = sessions;

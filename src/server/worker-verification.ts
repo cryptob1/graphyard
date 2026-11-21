@@ -2,12 +2,13 @@ import { z } from 'zod';
 import { activeLease, demand, type Principal } from '../model.js';
 import { lockedWork } from '../store/locked-read.js';
 import { save } from '../store.js';
+import { maskSecrets } from '../redaction.js';
 import type { Services } from './routes.js';
 import { dispatchWorkerVerification } from './worker-verification-queue.js';
 import type { WorkerCheckResult } from '../merge-writer/worker-check.js';
 
 const schema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/), epoch: z.number().int().positive(),
-  mode: z.enum(['verify', 'complete', 'check']), preserves: z.array(z.string()).max(1000).optional(),
+  mode: z.enum(['verify', 'check']), preserves: z.array(z.string()).max(1000).optional(),
   check: z.string().min(1).max(200).optional() }).strict().refine(input => (input.mode === 'check') === !!input.check, 'A check request names exactly one check');
 
 /** The lease holder requests only its recorded criteria, never arbitrary host commands. */
@@ -27,7 +28,18 @@ export async function workerVerification(services: Services, actor: Principal, i
   const job = { host: workspace!.host, branch: workspace!.branch, work, input, baseBranch: services.engine.baseBranch };
   // GY-3283: a declared check's run is the worker's own feedback, not proof: answered, never recorded.
   if (input.mode === 'check') return dispatchWorkerVerification<WorkerCheckResult>(services, job);
-  const result = await dispatchWorkerVerification(services, job);
+  let result;
+  try { result = await dispatchWorkerVerification(services, job); }
+  catch (error) {
+    const reason = maskSecrets(error instanceof Error ? error.message : String(error)).slice(0, 8000);
+    await services.engine.store.transaction(async (db, now) => {
+      const current = (await lockedWork(db, [id])).find(entry => entry.id === work.id);
+      if (!current) return;
+      activeLease(current, actor, input.epoch, now);
+      await save(db, current, actor.id, 'work.self-verification-failed', now, { epoch: input.epoch, head: input.head, mode: input.mode, error: reason });
+    }).catch(() => {});
+    throw error;
+  }
   demand(result.record.head === input.head, 'Verification returned a different head', 409);
   await services.engine.store.transaction(async (db, now) => {
     const current = (await lockedWork(db, [id])).find(entry => entry.id === work.id)!;

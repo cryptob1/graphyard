@@ -1,4 +1,5 @@
 // Concern: one agent environment's provider login and quota — the per-provider probes that read them, and one shared plan's cached reading.
+import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { getCachedPlanUsage, parseZaiUsage, type ProviderUsageResult } from '../provider-usage.js';
@@ -78,7 +79,9 @@ export async function codexAccount(environment: ProbedHome, probe: EnvironmentPr
   return { loggedIn, usage, note: null, reached: !!limits.rate_limit_reached_type };
 }
 
-export async function zaiAccount(environment: ProbedHome, probe: EnvironmentProbe, plan: { id: string | null; now: number }): Promise<{ loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading }> {
+/** GY-3516: a key named by a short digest, so a reading says whose key answered without ever recording the key. */
+export const keyFingerprint = (key: string) => createHash('sha256').update(key).digest('hex').slice(0, 12);
+export async function zaiAccount(environment: ProbedHome, probe: EnvironmentProbe, plan: { id: string | null; now: number }): Promise<{ loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading; key?: string }> {
   const opencodeAuth = await readJsonFile(resolve(environment.home, 'opencode/auth.json'));
   const zaiKey = opencodeAuth?.['zai-coding-plan']?.key ?? opencodeAuth?.['z.ai']?.key ?? opencodeAuth?.zai?.key;
   // A named key file is read as Z.AI's only when it is Z.AI's by its variable or name: an OpenCode account whose
@@ -91,7 +94,7 @@ export async function zaiAccount(environment: ProbedHome, probe: EnvironmentProb
   const piKey = auth?.zai?.key ?? auth?.['z.ai']?.key ?? auth?.['zai-coding-plan']?.key ?? auth?.ZAI_API_KEY;
   const key = zaiKey ?? piKey ?? (fileKey?.trim() || undefined) ?? (fallbackKey?.trim() || undefined);
 
-  const hasZaiKey = !!key;
+  const hasZaiKey = !!key, own = key ? { key: keyFingerprint(key) } : {};
   // Z.AI-specific only on Z.AI evidence: the Pi runtime, a declared zai plan, or a key named Z.AI's. A plan id derived
   // from the runtime is no evidence (every OpenCode account defaults to the 'zai' kind), nor is the account's name (GY-1158).
   // The key's presence decides, not its value: a caller that passes an optional plan as `declaredPlan: undefined` has
@@ -103,7 +106,7 @@ export async function zaiAccount(environment: ProbedHome, probe: EnvironmentProb
 
   if (isZaiSpecific) {
     if (!hasZaiKey || probe.quota === false) {
-      return { loggedIn: hasZaiKey, usage: [], note: hasZaiKey ? 'quota not read' : null };
+      return { loggedIn: hasZaiKey, usage: [], note: hasZaiKey ? 'quota not read' : null, ...own };
     }
   } else {
     // Any provider entry carrying credential material is an OpenCode login: an API key (`type: 'api'`), a well-known
@@ -124,7 +127,7 @@ export async function zaiAccount(environment: ProbedHome, probe: EnvironmentProb
   // Any reading the endpoint answered is shared, a zero-window one too, and it carries the plan's own
   // reason and limit flag rather than a note another account wrote (GY-1260).
   const shared: PlanReading | null = plan.id ? getCachedPlanUsage(plan.id, plan.now, probe.cacheMs ?? 30_000) : null;
-  if (shared) return { loggedIn: true, usage: shared.windows, note: shared.reason, reached: shared.reached, shared: true };
+  if (shared) return { loggedIn: true, usage: shared.windows, note: shared.reason, reached: shared.reached, shared: true, ...own };
   try {
     const response = await (probe.fetch ?? fetch)('https://api.z.ai/api/monitor/usage/quota/limit', {
       headers: { Authorization: `Bearer ${key}` },
@@ -135,17 +138,17 @@ export async function zaiAccount(environment: ProbedHome, probe: EnvironmentProb
         const text = await response.text();
         const parsed = parseZaiUsage(text);
         if (parsed.reported && parsed.windows.length > 0) {
-          return { loggedIn: true, usage: parsed.windows, note: parsed.reason, plan: parsed };
+          return { loggedIn: true, usage: parsed.windows, note: parsed.reason, plan: parsed, ...own };
         }
       }
-      return { loggedIn: true, usage: [], note: `provider returned ${response.status}` };
+      return { loggedIn: true, usage: [], note: `provider returned ${response.status}`, ...own };
     }
     const body = await response.json();
     const parsed = parseZaiUsage(body);
     // A key that answers no limits is unknown on its own: it never reads another account's windows (GY-3495).
-    return { loggedIn: true, usage: parsed.windows, note: parsed.windows.length ? parsed.reason : 'this key reports no allowance', plan: parsed };
+    return { loggedIn: true, usage: parsed.windows, note: parsed.windows.length ? parsed.reason : 'this key reports no allowance', plan: parsed, ...own };
   } catch (error) {
-    return { loggedIn: true, usage: [], note: `the provider usage endpoint is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}` };
+    return { loggedIn: true, usage: [], note: `the provider usage endpoint is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}`, ...own };
   }
 }
 

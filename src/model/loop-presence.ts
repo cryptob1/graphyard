@@ -31,7 +31,7 @@ export interface LoopCpu { avg60: number | null; steal: number | null; celsius?:
 /** One live agent session as the loop last read its cgroup (GY-3438): its use, its fair share, and since when it has used far more than its share of a saturated machine. */
 export interface LoopSession { session: string; cpu: number | null; cpuShare: number; memory: number; memoryShare: number; overSince: string | null }
 /** One host as the loop last read it (GY-3407): this machine (`local`) or an added one; `away` while it does not answer. */
-export interface LoopHost { host: string; local?: boolean; away: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null }
+export interface LoopHost { host: string; local?: boolean; at?: string; away: boolean; update?: boolean; reason?: string; cores: number | null; celsius: number | null; steal: number | null; runs: number | null }
 /**
  * How long one read keeps the loop live: three of its cycles, never under two minutes —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
@@ -214,11 +214,11 @@ export function loopPanesRegistry(owner: object): LoopPanesRegistry {
 
 /**
  * The header on the loop's coordination reads naming every host it reads (GY-3407): this machine
- * and each added one with cores, temperature, steal and runs now, or away, URI-encoded JSON, or
+ * and each added one with cores, temperature, steal and runs now, or away (`update` when only its shim is too old, GY-3517), with when each was read, URI-encoded JSON, or
  * `off` before the first reading. /api/status serves the latest as `hosts` for the Workers page.
  */
 export const loopHostsHeader = 'X-Graphyard-Loop-Hosts';
-export const encodeLoopHosts = (hosts: LoopHost[]) => encodeURIComponent(JSON.stringify(hosts.map(({ host, local, away, reason, cores, celsius, steal, runs }) => ({ host, ...(local ? { local } : {}), away, ...(away && reason ? { reason: reason.slice(0, 300) } : {}), cores, celsius, steal, runs }))));
+export const encodeLoopHosts = (hosts: LoopHost[]) => encodeURIComponent(JSON.stringify(hosts.map(({ host, local, at, away, update, reason, cores, celsius, steal, runs }) => ({ host, ...(local ? { local } : {}), ...(at ? { at } : {}), away, ...(away && update ? { update } : {}), ...(away && reason ? { reason: reason.slice(0, 300) } : {}), cores, celsius, steal, runs }))));
 /** The hosts a loop read names, or null when it names none or they do not parse. */
 export function loopHosts(header: string | string[] | undefined): LoopHost[] | null {
   const value = Array.isArray(header) ? header[0] : header;
@@ -228,7 +228,7 @@ export function loopHosts(header: string | string[] | undefined): LoopHost[] | n
     if (!Array.isArray(parsed)) return null;
     const figure = (raw: unknown) => typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? raw : null;
     return parsed.filter(entry => typeof entry?.host === 'string').slice(0, 50)
-      .map(entry => ({ host: String(entry.host).slice(0, 300), ...(entry.local === true ? { local: true } : {}), away: entry.away === true, ...(typeof entry.reason === 'string' && entry.reason ? { reason: entry.reason.slice(0, 300) } : {}), cores: figure(entry.cores), celsius: figure(entry.celsius), steal: figure(entry.steal), runs: figure(entry.runs) }));
+      .map(entry => ({ host: String(entry.host).slice(0, 300), ...(entry.local === true ? { local: true } : {}), ...(typeof entry.at === 'string' && !Number.isNaN(Date.parse(entry.at)) ? { at: entry.at.slice(0, 40) } : {}), away: entry.away === true, ...(entry.update === true ? { update: true } : {}), ...(typeof entry.reason === 'string' && entry.reason ? { reason: entry.reason.slice(0, 300) } : {}), cores: figure(entry.cores), celsius: figure(entry.celsius), steal: figure(entry.steal), runs: figure(entry.runs) }));
   } catch { return null; }
 }
 

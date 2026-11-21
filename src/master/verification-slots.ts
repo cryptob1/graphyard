@@ -5,7 +5,7 @@ import { dataDirectory } from '../install/worktree-root.js';
 import { randomUUID } from 'node:crypto';
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cpuCelsius, trialHotCelsius } from '../merge-writer/trial-load.js';
+import { cpuCelsius, heatReading, heatWindowMs, trialHotCelsius } from '../merge-writer/trial-load.js';
 
 /**
  * The host heavy-job budget (GY-612, GY-3290).
@@ -341,6 +341,7 @@ export async function acquireVerificationSlot(options: AcquireOptions): Promise<
   // A declaration beyond the bound (a running trial's shard files) or a caller fixing its own numbers does not queue.
   const ticket = options.firstSlot === undefined ? await enqueue(options.directory, options) : null;
   let told = false, drained = false, heated = false, blocked = false;
+  const samples: [number, number][] = [];
   try {
     for (;;) {
       if (options.signal?.aborted) throw options.signal.reason;
@@ -351,9 +352,12 @@ export async function acquireVerificationSlot(options: AcquireOptions): Promise<
         continue;
       }
       // GY-3446: under a strict cap no new job starts at the launch heat limit, and the reservation is not beside the limit.
-      const strict = readStrictCap(options.directory), celsius = strict ? await cpuCelsius(options.hwmon) : null;
-      if (celsius !== null && celsius >= trialHotCelsius) {
-        if (!heated) { heated = true; options.onWait?.(`graphyard: ${options.label} waits: the host's strict heavy-job cap (until ${strict!.until}) starts nothing while the CPU reads ${celsius}C, ${trialHotCelsius}C or more`); }
+      // GY-3532: it compares the 120 s mean of this wait's own samples, the latest until it holds 4.
+      const strict = readStrictCap(options.directory), sample = strict ? await cpuCelsius(options.hwmon) : null, at = Date.now();
+      if (sample !== null) { while (samples.length && at - samples[0]![0] >= heatWindowMs) samples.shift(); samples.push([at, sample]); }
+      const heat = sample === null ? null : heatReading(samples);
+      if (heat && heat.celsius >= trialHotCelsius) {
+        if (!heated) { heated = true; options.onWait?.(`graphyard: ${options.label} waits: the host's strict heavy-job cap (until ${strict!.until}) starts nothing while the CPU ${heat.mean === null ? 'reads' : 'averages'} ${heat.celsius}C, ${trialHotCelsius}C or more`); }
         await new Promise(done => setTimeout(done, pollMs));
         continue;
       }
@@ -421,6 +425,26 @@ export async function withHeavyJob<T>(label: string, job: () => Promise<T>, opti
   const ended = AbortSignal.any([options.signal, options.until].filter((signal): signal is AbortSignal => !!signal));
   if (ended.aborted) held.release(); else ended.addEventListener('abort', held.release, { once: true });
   try { return await inheritedVariables.run({ [heldVariable]: '1' }, job); } finally { ended.removeEventListener('abort', held.release); held.release(); }
+}
+
+/**
+ * GY-3526: one heavy job made of parts that run now and then, several at once — a worker check's
+ * shards on this machine. One slot covers every part running: the first to start takes it, the
+ * last to end gives it back, and while no part runs on this machine the job holds none.
+ */
+export function sharedHeavyJob(label: string, options: Parameters<typeof withHeavyJob>[2] = {}) {
+  type Held = { release: () => void; inherited?: Record<string, string> };
+  let parts = 0, slot: Promise<Held> | null = null;
+  return async <T>(part: () => Promise<T>): Promise<T> => {
+    parts++;
+    try {
+      // A part's children carry the slot's mark as a whole held job's do, so a suite inside takes no second slot.
+      const { inherited } = await (slot ??= new Promise<Held>((taken, failed) => { withHeavyJob(label, () => new Promise<void>(release => taken({ release, inherited: inheritedVariables.getStore() })), options).catch(failed); }));
+      return await (inherited ? inheritedVariables.run(inherited, part) : part());
+    } finally {
+      if (--parts === 0 && slot) { const held = slot; slot = null; (await held.catch(() => null))?.release(); }
+    }
+  };
 }
 
 /**

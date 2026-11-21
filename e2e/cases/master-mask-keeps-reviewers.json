@@ -1,0 +1,13 @@
+{
+  "id": "master-mask-keeps-reviewers",
+  "title": "The confined master launches again after a review session exists",
+  "description": "With a reviewers directory a review session created in the config home, a confined master session under real bubblewrap passes the credential-mask probe, writes its reviewer binding there, and still cannot read another install's token.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "confined master launches with the reviewers directory present",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/master-mask-keeps-reviewers.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

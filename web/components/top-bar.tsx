@@ -1,4 +1,5 @@
 import { glossary, type GlossaryTerm } from '../glossary';
+import Invite from './invite';
 import Term from './term';
 import { viewFor, visibleViews, type View } from '../pages';
 import type { Dashboard } from '../pages/dashboard';
@@ -112,6 +113,21 @@ export function WeekLine({ status, work, open }: { status?: Dashboard['status'];
   </p>;
 }
 
+/** GY-3517: the compute machines the loop's latest probe reads away only because their host helper is too old for this release. */
+export const hostsNeedingUpdate = (status?: Dashboard['status']): string[] =>
+  Array.isArray(status?.hosts) ? status.hosts.filter((host: { away?: unknown; update?: unknown; host?: unknown }) => host?.away === true && host.update === true && typeof host.host === 'string').map((host: { host: string }) => host.host) : [];
+/** The one command that updates a machine's helper: its printed script is then run there with sudo. */
+export const hostUpdateCommand = 'graphyard host prepare';
+
+/** GY-3517: one line while any compute machine needs its helper updated, naming them and the one command; gone once the next probe reads them ready. */
+export function HostUpdateLine({ status }: { status?: Dashboard['status'] }) {
+  const names = hostsNeedingUpdate(status);
+  if (!names.length) return null;
+  return <p className="host-update-line" role="status" data-host-update={names.join(' ')}>
+    <strong>Compute machines need an update: {names.join(', ')}</strong> · run <span className="mono">{hostUpdateCommand}</span>, then the script it prints on each with sudo
+  </p>;
+}
+
 /** The glossary entry a tab's label names, by the label itself or by its singular. */
 const meaning = (label: string): GlossaryTerm | null => {
   const key = label.toLowerCase(), singular = key.replace(/s$/, '');
@@ -144,9 +160,11 @@ export default function TopBar(dashboard: Dashboard & { onPalette?: () => void }
         <ActivityStrip work={work} observedAt={observedAt} status={status}/>
         <ShippedStrip work={work} observedAt={observedAt} live={status?.live}/>
         <OpenApp status={status}/>
+        <Invite api={dashboard.api} status={status}/>
         {onPalette && <button type="button" className="palette-button" title="Ctrl K / ⌘ K" aria-label="Command palette (Ctrl K)" onClick={onPalette}><kbd>⌘</kbd><kbd>K</kbd></button>}
       </div>
     </div>
+    {status && <HostUpdateLine status={status}/>}
     {status && <ReleaseLine status={status}/>}
     {status && <WeekLine status={status} work={work} open={dashboard.setSelected}/>}
     {!selected && pages.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab)}{advanced.length > 0 && <details className="tabs-advanced" open={advanced.some(page => page.id === view) || undefined}><summary className="tab">Advanced</summary>{advanced.map(tab)}</details>}</nav>}

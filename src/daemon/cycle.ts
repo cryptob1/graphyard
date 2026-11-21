@@ -46,7 +46,8 @@ import { actionStallDelay, actionStallThreshold } from '../model/action-progress
 import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
-import { cpuPressureStep, cpuWaiting, implementationWaiting, sessionUsageStep } from './cpu-pressure.js';
+import { cpuPressureStep, cpuWaiting, heatClear, implementationWaiting, sessionUsageStep } from './cpu-pressure.js';
+import { causeCleared, environmentCause } from './environment-blockers.js';
 import { batchGateRunning } from './trial-slots.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
 import { yardAlertStep } from './yard-alerts.js';
@@ -503,15 +504,43 @@ async function closeStep(cycle: Cycle) {
     await note(cycle, `cli-releases:${state.cycle}`, 'reclaim', null, 'done', `Removed ${releases.removed.length} CLI release copies (${Math.round(releases.bytes / 1e6)} MB) nothing serves or runs: ${releases.removed.join(', ')}`);
   }
   if (releases?.left.length) cycle.log(`[graphyard-master] CLI release copies left in place: ${releases.left.join('; ')}`);
+  // GY-3553: a served CLI release whose commit stamp names another commit than it holds is restamped.
+  const restamped = await cycle.effects.repairCliStamp?.().catch(error => { cycle.log(`[graphyard-master] the CLI release stamp check failed: ${message(error)}`); return null; });
+  if (restamped) await note(cycle, `cli-stamp:${restamped.commit}`, 'reclaim', null, 'done', `Restored the CLI release commit stamp ${restamped.file} to ${restamped.commit.slice(0, 12)}, the commit checked out in it (was ${restamped.was?.slice(0, 12) ?? 'missing'})`);
   // GY-3122: with ended worktrees and settled checkouts gone, the volumes are measured against the floor.
   await diskHeadroomStep(cycle);
   // GY-3348: and the host's CPU is read, so the dispatch and merge-writer steps below hold new
   // launches while it is saturated — before anything of this cycle starts one.
   await cpuPressureStep(cycle);
+  await environmentBlockersStep(cycle);
   // GY-3438: and every agent session's use against its CPU and memory caps.
   sessionUsageStep(cycle);
   // GY-3407: every host is read for the Workers page; one that does not answer reads away until it does.
   if (cycle.effects.hostReadings) cycle.state.hosts = await cycle.effects.hostReadings(cycle.state.hosts).catch(error => { cycle.log(`[graphyard-master] the host readings failed: ${message(error)}`); return cycle.state.hosts; });
+}
+
+/**
+ * GY-3553: a blocker whose cause is the host — a heavy-job slot or heat wait, a host verification
+ * timeout, a CLI/server commit mismatch, an unwritable worktree — is re-checked every cycle and
+ * cleared once that cause is gone, with the cleared cause as the unblock's reason on the item's
+ * history; the item is dispatched again as any ready item. A blocker naming a person or the change stays.
+ */
+async function environmentBlockersStep(cycle: Cycle) {
+  const { effects, state } = cycle;
+  if (!effects.unblock || !effects.environmentReadings) return;
+  const blocked = cycle.snapshot.work.flatMap(item => {
+    const cause = item.stage !== 'done' && item.blocker && !item.lease ? environmentCause(item.blocker) : null;
+    return cause ? [{ item, cause }] : [];
+  });
+  if (!blocked.length) return;
+  const readings = { ...await effects.environmentReadings(), heatClear: heatClear(state) };
+  for (const { item, cause } of blocked) {
+    const key = `environment-unblock:${item.id}:${item.blockedAt ?? item.revision}`;
+    if (state.actions[key]?.state === 'done' || !await causeCleared(cause, item, readings)) continue;
+    const reason = `The loop cleared the blocker: the ${cause} has cleared`;
+    try { await effects.unblock(item, reason); await note(cycle, key, 'blocker', item.key, 'done', `${item.key}: ${reason}`); }
+    catch (error) { await note(cycle, key, 'blocker', item.key, 'failed', `Could not clear ${item.key}'s blocker (${cause} cleared): ${message(error)}`); }
+  }
 }
 
 /**
@@ -597,6 +626,7 @@ async function untrustedCheckoutRoles(cycle: Cycle, registry: CheckoutTrustFleet
  * profile, each head nothing can carry forward back to a worker, the reviewer and producer
  * sessions the dispatcher owes, and the master session when absent.
  */
+const refusalsLogged = new WeakMap<DaemonState, Set<string>>();
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
   // GY-3285: the install runs as many workers as its registry's worker role allows; the loop adds
@@ -619,7 +649,27 @@ async function dispatchStep(cycle: Cycle) {
   const health = profileHealth(config.workers, credentials, herdr.agents, state, clock, snapshot.work);
   const taken = cycle.reservedProfiles;
   const hot = new Set(hotspots(open, clock).map(entry => entry.file));
-  const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
+  // GY-3539: each exclusive-resource refusal is one log line naming the item, the resource and its holder.
+  // A refusal standing from the last cycle is not logged again.
+  const before = refusalsLogged.get(state) ?? new Set<string>(), standing = new Set<string>();
+  refusalsLogged.set(state, standing);
+  // GY-3502: the gate that refuses each ready item this cycle, in plain words, which the stall alarm names.
+  const gates = new Map<string, string>();
+  const wait = (item: Work, why: string) => { if (!gates.has(item.key)) gates.set(item.key, `${item.key} waits: ${why}`); };
+  const refused = (item: Work, resource: string, holder: string) => {
+    const line = `${item.key} waits: exclusive resource ${resource} is held by ${holder}`;
+    if (!before.has(line) && !standing.has(line)) cycle.log(`[graphyard-master] cycle ${state.cycle}: ${line}`);
+    standing.add(line);
+    wait(item, `exclusive resource ${resource} is held by ${holder}`);
+  };
+  const claimable = dispatchSort(open.filter(item => {
+    try { assertDispatchable(item, snapshot.work, snapshot.now); return true; }
+    catch (error) {
+      if (message(error).startsWith('Dispatch blocked by exclusive resources')) for (const held of resourceConflicts(item, snapshot.work, clock)) refused(item, held.resource, held.key);
+      else wait(item, message(error));
+      return false;
+    }
+  }), hot, clock);
   const launched: Work[] = [];
   let offers = registry && !state.diskHeadroom ? await runtimeCanaries(cycle, registry.runtimes) : [];
   // GY-3149: a freed worker slot goes to the highest-priority waiting item. An item whose launch last waited
@@ -632,11 +682,10 @@ async function dispatchStep(cycle: Cycle) {
   // names for the cycle, with one standing attention line (untrustedCheckoutRoles).
   const refusedRoles = await untrustedCheckoutRoles(cycle, registry);
   // GY-3335: a finished head a blocked worker named is the loop's to resubmit: once the master has
-  // unblocked the item, the launcher beside this cycle re-runs complete's verification on the host
-  // and submits the head as the next attempt, so no worker session and no worker slot is spent
-  // re-running complete on unchanged work. While the record stands the item is not claimable
-  // (assertDispatchable); a verification that fails on the change clears it and the item goes to a
-  // worker as today.
+  // unblocked the item, the launcher beside this cycle submits the head as the next attempt, so no
+  // worker session is spent re-running complete on unchanged work. GY-3576: no host verification
+  // runs first; the merge trial runs the tests and decides. While the record stands the item is
+  // not claimable (assertDispatchable).
   if (effects.resubmit) for (const item of open) {
     const finished = item.finishedBlockerHead;
     if (!finished || !item.ready || item.blocker || item.hold || item.lease || item.submission && !item.reworkRequested) continue;
@@ -644,10 +693,10 @@ async function dispatchStep(cycle: Cycle) {
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     launcher.submit(key, [], async sink => { await resubmitFinishedHead(cycle, item, finished, sink); });
   }
-  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) or too hot (GY-3373) no new worker,
+  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) no new worker,
   // reviewer or trial starts: one status line names the figure, and running sessions are never
-  // stopped. The first cycle below it launches again on its own. GY-3437: from 80C only new
-  // workers wait, so the reviews and trials that finish work drain the heat.
+  // stopped. The first cycle below it launches again on its own. GY-3501: a hot CPU sensor holds
+  // no launch — only the trials and checks that make the heat wait on it.
   const cpuWaitingLine = cpuWaiting(state) ?? undefined;
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
   // GY-3444: while a batch gate runs no implementation session starts, so the gate's checks finish
@@ -662,19 +711,20 @@ async function dispatchStep(cycle: Cycle) {
   ].filter((hold): hold is string => !!hold);
   if (!holds.length) for (const item of claimable) {
     // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
-    if (launched.some(other => sharedResources(item, other).length)) continue;
+    const holder = launched.find(other => sharedResources(item, other).length);
+    if (holder) { refused(item, sharedResources(item, holder)[0]!, holder.key); continue; }
     // GY-3104: a third equal failure holds the item for the master's decision.
-    if (failureHeld(state.failureRuns[item.id])) continue;
+    if (failureHeld(state.failureRuns[item.id])) { wait(item, 'held for the master after the same failure three times'); continue; }
     const incident = state.actions[earlyExitKey(item)];
-    if (incident?.state === 'failed' && incident.attempts >= actionStallThreshold && clock - Date.parse(incident.at) < actionStallDelay(incident.attempts)) continue;
+    if (incident?.state === 'failed' && incident.attempts >= actionStallThreshold && clock - Date.parse(incident.at) < actionStallDelay(incident.attempts)) { wait(item, 'held after its workers exited early again and again'); continue; }
     const key = dispatchKey(item);
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
-    if (item.priority > slotHeldAbove) continue;
+    if (item.priority > slotHeldAbove) { wait(item, 'a higher-priority item waits for a worker slot first'); continue; }
     const free = health.filter(entry => entry.busy || taken.has(entry.profile.name)).length < allowed ? health.find(entry => entry.healthy && !taken.has(entry.profile.name)) : undefined;
-    if (!free) break;
+    if (!free) { wait(item, 'no free worker account'); continue; }
     // GY-3103: a runtime whose launches of this item failed backs off for this item only; its accounts are excluded from the selection.
     const held = backedOffAccounts(state, registry, free.profile, item, clock);
-    if (held.all) continue;
+    if (held.all) { wait(item, 'every worker runtime backs off after its failed launch'); continue; }
     taken.add(free.profile.name);
     // Each newer runtime version is offered to one launch at a time, the canary; the rest stay pinned.
     const canaries = offers;
@@ -706,12 +756,20 @@ async function dispatchStep(cycle: Cycle) {
     try { await effects.askHumanProof(item, proof); await note(cycle, key, 'judgement', item.key, 'done', `Asked a person for ${proof} on ${item.candidate!.sha.slice(0, 12)}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not ask a person for ${proof} on ${item.key}: ${message(error)}`); }
   }
+  // GY-3502: a launch failure whose back-off expired, or whose item is done, is history: deleted
+  // here so it never reads as a cause. An item launching now keeps its entry, whose count doubles the next back-off.
+  const live = new Set(snapshot.work.filter(item => item.stage !== 'done').map(item => item.id));
+  const launching = new Set(open.filter(item => launched.includes(item) || launcher.busy(dispatchKey(item))).map(item => item.id));
+  for (const [key, entry] of Object.entries(state.launchBackoff)) {
+    const id = key.slice(key.indexOf(':') + 1);
+    if (!live.has(id) || Date.parse(entry.until) <= clock && !launching.has(id)) delete state.launchBackoff[key];
+  }
   // GY-3432: the stall alarm, before the master is woken, so a raised alarm wakes it this cycle.
   if (!config.forPerson) {
     const running = snapshot.work.flatMap(item => item.sessions ?? []).filter(session => session.kind === 'implementation' && session.state === 'running').length;
     // An item in a run of equal failures already wakes the master by that run (GY-3104), held or not.
     const repeating = repeatingItems(state.failureRuns), unheld = (item: Work) => !repeating.has(item.key);
-    const alarm = stallAlarm({ now: clock, open: open.filter(unheld), ready: claimable.filter(unheld), freeSlots: allowed - running, holds,
+    const alarm = stallAlarm({ now: clock, open: open.filter(unheld), ready: claimable.filter(unheld), freeSlots: allowed - running, holds, gates,
       state, registry, serving: await Promise.resolve(effects.servingCommit?.()).catch(() => null) ?? null });
     if (recordStallAlarm(state, alarm, clock)) { cycle.log(`[graphyard-master] cycle ${state.cycle}: ${alarm ?? 'the stall alarm cleared'}`); await effects.persist(state); }
   }
@@ -743,7 +801,7 @@ async function releaseBacklog(cycle: Cycle, allowed: number) {
   for (const item of candidates) {
     // A yard repair (GY-3102) is released past the pipeline cap.
     if (slots <= 0 && !item.yardRepair) continue;
-    // An item sharing an exclusive resource (a file path included) with one in flight or released waits until that one lands.
+    // An item sharing an exclusive resource with one in flight or released waits until that one lands.
     if (resourceConflicts(item, snapshot.work, clock).length || snapshot.work.some(other => other.id !== item.id && other.stage !== 'done' && other.ready && sharedResources(item, other).length)) continue;
     const key = `release:${item.id}:${item.revision}`, inPipeline = snapshot.work.filter(entry => entry.stage !== 'done' && (entry.ready || inFlight(entry, clock))).length;
     try {
@@ -764,19 +822,17 @@ async function releaseBacklog(cycle: Cycle, allowed: number) {
 }
 
 /**
- * GY-3335: one finished-head resubmission on the launcher: the verification `complete` runs on
- * this host, then the submit through the control plane. A fault of the run or the plane is one
- * failed action retried next cycle; the fault the 2026-11-14 host move left every item with.
+ * GY-3335: one finished-head resubmission on the launcher: the submit through the control plane.
+ * A fault of the plane is one failed action retried next cycle.
  */
 async function resubmitFinishedHead(cycle: Cycle, item: Work, finished: NonNullable<Work['finishedBlockerHead']>, sink: DaemonAction[]) {
   const { state, effects, now } = cycle;
   const key = `resubmit:${item.id}:${finished.head}:${finished.epoch}`;
   const attempts = (state.actions[key]?.attempts ?? 0) + 1;
   const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: finished.epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
-  await entry('started', `Resubmitting ${item.key}'s finished head ${finished.head.slice(0, 12)}: the verification complete runs, then the submit, with no worker session`);
+  await entry('started', `Resubmitting ${item.key}'s finished head ${finished.head.slice(0, 12)} with no worker session`);
   try {
-    const outcome = await effects.resubmit!(item, finished.head);
-    await entry('done', outcome.detail);
+    await entry('done', await effects.resubmit!(item, finished.head));
   } catch (error) {
     await entry('failed', `Could not resubmit ${item.key}'s finished head ${finished.head.slice(0, 12)}: ${message(error)}; it is retried next cycle`);
   }

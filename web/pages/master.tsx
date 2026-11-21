@@ -9,6 +9,7 @@ import { PageHeader } from '../components/page-layout';
 
 type Message = { id: number; from: string; to?: string; thread: string; text: string; at: string; replies: { id: number; by: string; text: string; at: string }[] };
 type Entry = { id: number; who: string; text: string; at: string };
+type Typed = { who: string; text: string; at: string };
 
 /** GY-3345: messages between this Master and other installs' Masters, one thread per conversation, oldest entry first. */
 export function messageThreads(messages: Message[]) {
@@ -42,9 +43,13 @@ export function masterOwes(work: Work[], now: number) {
  */
 export default function MasterPage({ work, observedAt, token, api, setSelected, status }: Pick<Dashboard, 'work' | 'observedAt' | 'token' | 'api' | 'setSelected'> & { status?: Dashboard['status'] }) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [typed, setTyped] = useState<Typed[]>([]);
   useEffect(() => {
     let live = true;
-    const load = () => api('master/messages').then(body => { if (live) setMessages(body.messages ?? []); }, () => {});
+    const load = () => {
+      void api('typed-input').then(body => { if (live) setTyped(body.typed ?? []); }, () => {});
+      return api('master/messages').then(body => { if (live) setMessages(body.messages ?? []); }, () => {});
+    };
     void load(); const timer = setInterval(load, 15_000);
     return () => { live = false; clearInterval(timer); };
   }, [token]);
@@ -64,6 +69,10 @@ export default function MasterPage({ work, observedAt, token, api, setSelected, 
       </li>)}</ul>
     </section>}
     <LiveTerminal token={token} label="Master terminal"/>
+    {/* GY-3514: what people typed into the master, newest first. */}
+    {typed.length > 0 && <section className="panel typed-input" aria-label="Typed into the master"><h2>Typed into the master</h2>
+      <ol>{typed.map((entry, index) => <li key={index}><b>{entry.who}</b> <time dateTime={entry.at}>{new Date(entry.at).toLocaleString()}</time> <code>{entry.text}</code></li>)}</ol>
+    </section>}
     {threads.length > 0 && <details className="panel master-messages"><summary>Messages with other installs ({threads.length})</summary>
       {threads.map(thread => <article key={thread.entries[0]!.id} className="master-thread" aria-label={`Thread with ${thread.peer}`}>
         <h2>With {thread.peer}</h2>

@@ -19,7 +19,7 @@ test('unit:gate-filed-item-pins-cause — a flake, known red or diagnostic filin
   assert.equal(pinningProof('known-red:test:tests/board-queue.test.ts'), 'unit:board-queue-pinned');
   assert.equal(pinningProof('flake:e2e:sign-in'), 'unit:e2e-sign-in-pinned');
   assert.equal(pinningProof('diagnostic:build'), 'unit:build-pinned');
-  const item = gateFiledItem({ key: 'flake:e2e:sign-in', title: 'Flaky check on main: e2e:sign-in', description: 'd' }, 'main');
+  const item = gateFiledItem({ key: 'flake:e2e:sign-in', title: 'Flaky check on main: e2e:sign-in', description: 'd' }, 'main', 'cryptob1/graphyard');
   assert.equal(item.type, 'bug');
   assert.deepEqual(item.criteria.map(criterion => criterion.proofs), [['unit:e2e-sign-in-pinned'], ['manual:batch-gate-repaired', 'e2e:create-work-item']]);
 });
@@ -76,7 +76,7 @@ async function merge(repo: Awaited<ReturnType<typeof repository>>, criteria: Wor
 
 test('e2e:pipeline-gate-filed-item-merges — a gate-filed item whose head adds its pinning test merges; bound to create-work-item alone it was refused as not reproduced', { timeout: 300_000 }, async () => {
   const repo = await repository();
-  const filed = await merge(repo, gateFiledItem(filing, 'main').criteria as Work['criteria']);
+  const filed = await merge(repo, gateFiledItem(filing, 'main', 'cryptob1/graphyard').criteria as Work['criteria']);
   assert.equal(filed.outcome, 'merged', JSON.stringify(filed));
   const old = await merge(repo, [{ id: 'AC-1', text: 'fixed', proofs: ['manual:batch-gate-repaired', 'e2e:create-work-item'] }] as Work['criteria']);
   assert.equal(old.outcome, 'refused', JSON.stringify(old));

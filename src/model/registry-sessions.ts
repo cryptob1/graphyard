@@ -1,6 +1,6 @@
 import type { Work } from './work.js';
 import { fleetRoles, rolePolicy, roleRuntimeRefusal } from './registry.js';
-import { allowanceHold, exhaustionEvidence, foldObservation, utcClock } from './account-quota.js';
+import { exhaustionEvidence, foldObservation, utcClock } from './account-quota.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
 import { accountProvider, busyDifferentProvider, sameProviderFallback, sharedProviderSkip, type ReviewDiversity } from './review-diversity.js';
 import { workerOrder, planSpreadOrder, fleetOrder, roleUnsupported } from './worker-preference.js';
@@ -123,8 +123,8 @@ export function accountIneligibility(registry: AgentRegistry, account: FleetAcco
   if (account.quota.loggedIn === false) return `${account.name} is not logged in${account.quota.reason ? `: ${account.quota.reason}; checked again within 30 minutes` : ''}`;
   const pi = registry.runtimes.some(runtime => runtime.name === account.runtime && smokeTestedKinds.includes(runtime.launch.kind));
   if (account.smoke?.result === 'fail' && !(options.expiredSmokeRetestable && pi && smokeFailureDue(account, now))) return `${account.name} failed its smoke test${account.smoke.reason ? `: ${account.smoke.reason}` : ''}; it is tested again after ${smokeRetestMs / 60_000} minutes, or at once when the account is changed (master registry account set)`;
-  if (exhaustionEvidence(account.quota, now)) return allowanceHold.test(account.quota.reason ?? '') ? `${account.name} quota is exhausted: ${account.quota.reason}`
-    : `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
+  if (account.quota.state === 'broken') return `${account.name} is broken: its live request failed${account.quota.reason ? ` (${account.quota.reason})` : ''}; checked again within 30 minutes`;
+  if (exhaustionEvidence(account.quota, now)) return `${account.name} quota is exhausted${until(account.quota.resetsAt)}${account.quota.reason ? ` (${account.quota.reason})` : ''}`;
   const running = liveSessions(registry).filter(session => session.account === account.name).length;
   // GY-3333: sessions other installs on this host hold on the same login home count toward the
   // account's own limit — one home serves at most its maxSessions sessions across every install.
@@ -282,6 +282,10 @@ export interface FleetAccountView {
   liveSessions: { id: string; role: FleetRoleName; work: string | null; host: string; since: string }[];
   /** `exhausted` only with evidence that still holds, named in `evidence` with its reset; an exhausted reading without it is `unknown` (GY-3094). */
   quota: ObservedQuota['state']; evidence: string | null; loggedIn: boolean | null; usage: (Omit<ObservedQuota['usage'][number], 'readAt'> & { /** `last read <time>`: a window kept past a failed usage read (GY-3494). */ lastRead?: string })[]; resetsAt: string | null; observedAt: string | null; quotaSource: ObservedQuota['source'];
+  /** When the account's own live request last answered (GY-3555); null when none has. */
+  checkedLive?: string | null;
+  /** Why it is held or broken, in the provider's own words from that request (or the operator's mark); null when available. */
+  reason?: string | null;
   /** Why an unknown account shows no usage, in the probe's words: `this key reports no allowance` (GY-3495). */
   usageNote?: string | null;
   /** The hold's `resetsAt` is the bounded unknown-reset window, not a reset the provider named (GY-3302). */
@@ -328,7 +332,7 @@ export function fleetView(registry: AgentRegistry, now: number, host: string | n
       plan: account.plan ?? planInfo.planName,
       roles: registry.roles.filter(role => role.accounts.includes(account.name)).map(role => ({ role: role.name, preference: role.accounts.indexOf(account.name) + 1, of: role.accounts.length })),
       liveSessions: live.filter(session => session.account === account.name).map(session => ({ id: session.id, role: session.role, work: session.work, host: session.host, since: session.selectedAt })),
-      quota: evidence ? 'exhausted' : account.quota.state === 'exhausted' ? 'unknown' : account.quota.state, evidence, loggedIn: account.quota.loggedIn, usage: account.quota.usage.map(({ readAt, ...usage }) => readAt ? { ...usage, lastRead: `last read ${utcClock(readAt)}` } : usage), resetsAt: account.quota.resetsAt, observedAt: account.quota.observedAt, quotaSource: account.quota.source, resetUnknown: account.quota.session === 'guessed',
+      quota: evidence ? 'exhausted' : account.quota.state === 'exhausted' ? 'unknown' : account.quota.state, evidence, loggedIn: account.quota.loggedIn, usage: account.quota.usage.map(({ readAt, ...usage }) => readAt ? { ...usage, lastRead: `last read ${utcClock(readAt)}` } : usage), resetsAt: account.quota.resetsAt, observedAt: account.quota.observedAt, checkedLive: account.quota.since ?? null, reason: account.quota.state === 'available' ? null : account.quota.reason, quotaSource: account.quota.source, resetUnknown: account.quota.session === 'guessed',
       usageNote: !evidence && account.quota.state !== 'available' && !account.quota.usage.length ? account.quota.reason : null,
       eligible: !ineligible, ineligible, smoke: account.smoke ?? null,
       held: fleetRoles.flatMap(role => { const reason = roleIneligibility(account, role, now); return reason ? [{ role, reason }] : []; }) };

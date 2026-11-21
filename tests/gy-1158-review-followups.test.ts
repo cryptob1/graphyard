@@ -102,6 +102,7 @@ test('unit:gy-1158-finding-4 — reconcile stale exhausted observations per plan
     usage: [{ window: '5h', percent: 100, resetsAt: null }],
     resetsAt: null,
     reason: 'quota exceeded',
+    since: iso(-30 * minute),
   }, { actor: 'coordinator', at: iso(-30 * minute) });
 
   // Later at T - 5 minutes, Host B observes the shared plan as available
@@ -243,13 +244,13 @@ test('unit:gy-1158-finding-4 — eligibility is a pure read: a stale exhaustion 
     reason: 'test setup',
   }, { actor: 'operator', at: iso(-2 * hour) }).registry;
   const [a, b] = registry.accounts;
-  foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 100, resetsAt: null }], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-30 * minute) });
+  foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 100, resetsAt: null }], resetsAt: null, reason: 'quota exceeded', since: iso(-30 * minute) }, { actor: 'coordinator', at: iso(-30 * minute) });
   foldObservation(b, { loggedIn: true, state: 'available', usage: [], resetsAt: null, reason: null }, { actor: 'coordinator', at: iso(-5 * minute) });
   const before = structuredClone(a.quota);
   assert.match(accountIneligibility(registry, a, now, 'host-a')!, /quota is exhausted/);
   assert.deepEqual(a.quota, before, 'the read leaves the account\'s recorded quota as it was');
   // A newer exhaustion on the plan holds every account on it.
-  foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 100, resetsAt: null }], resetsAt: null, reason: 'quota exceeded' }, { actor: 'coordinator', at: iso(-1 * minute) });
+  foldObservation(a, { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 100, resetsAt: null }], resetsAt: null, reason: 'quota exceeded', since: iso(-1 * minute) }, { actor: 'coordinator', at: iso(-1 * minute) });
   assert.equal(accountIneligibility(registry, b, now, 'host-b'), null);
 });
 

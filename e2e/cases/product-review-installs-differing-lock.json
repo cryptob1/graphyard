@@ -1,0 +1,16 @@
+{
+  "id": "product-review-installs-differing-lock",
+  "title": "A product review of a head with its own lockfile installs its dependencies and serves it",
+  "description": "GY-3579: a product review of a candidate whose package-lock.json differs from the repository checkout's cannot share that install, so it installs the head's dependencies in the review checkout, starts the head's e2e.serve command and reaches the reviewer session, with no ERR_MODULE_NOT_FOUND launch failure. A head with a matching lockfile still shares the install and installs nothing; a failing install names its output tail in the launch outcome.",
+  "tags": ["review", "product-review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "product review installs a differing lockfile's dependencies",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/product-review-installs-differing-lock.test.ts",
+      "timeoutSeconds": 900
+    }
+  ]
+}

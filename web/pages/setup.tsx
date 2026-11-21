@@ -3,7 +3,6 @@ import { checklistGreen, paneServer, requestedView, setupChecklist, statusSuperv
 import { whereLogs, type WhereThingsRun } from '../../src/model/where-things-run';
 import { herdrConnectCommands, type HerdrWatch } from '../../src/herdr-connect';
 import { CopyButton } from './workers';
-import { sealForHost } from '../seal';
 import { findOnboardingWork, onboardingWait, type OnboardingWait } from '../../src/model/onboarding-work';
 import { MoreDetails, PageHeader, PageSection } from '../components/page-layout';
 import type { Dashboard } from './dashboard';
@@ -140,128 +139,6 @@ export function SetupView({ status, work, workUnread, now, onConnect }: { status
   </>;
 }
 
-type Invitation = { principal: string; role: string; expiresAt: string };
-type ShareLink = { url: string; createdOn: string; expiresAt: string; state: 'ok' | 'refresh' | 'expired' };
-type TeamAccess = { summary: string; port: string; installUrl: string | null; hostSynced: boolean; hostKey: string | null; mode: 'api' | 'reusable'; shareLink: ShareLink | null; guidance: string | null; acl: string; aclGuidance: string };
-type Invited = Invitation & { link: string | null; message: string | null; missing: string | null };
-
-const day = (iso: string) => <time dateTime={iso}>{new Date(iso).toLocaleDateString()}</time>;
-const today = () => new Date().toISOString().slice(0, 10);
-
-/**
- * GY-3294: the machine's Tailscale access every install on it shares (src/team-access.ts): the share
- * link pasted once for the machine with the day it was made, or the optional API token (sealed to the
- * host in this browser, never shown again), and the policy grant that keeps a teammate on this port.
- */
-function MachineAccess({ api, access, setAccess }: Pick<Dashboard, 'api'> & { access: TeamAccess; setAccess(value: TeamAccess): void }) {
-  const [error, setError] = useState('');
-  const [link, setLink] = useState(''), [made, setMade] = useState(today), [token, setToken] = useState('');
-  const save = (path: string, body: () => Promise<object> | object, clear: () => void) => async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault(); setError('');
-    try { setAccess(await api(path, await body())); clear(); } catch (e) { setError((e as Error).message); }
-  };
-  const share = access.shareLink;
-  return <div aria-label="Team access on this machine" role="group">
-    <p>{access.summary}</p>
-    <p>{access.installUrl ? <>This install: <a href={access.installUrl}>{access.installUrl}</a> (port {access.port}).</> : <>This install is on port {access.port}.</>}</p>
-    {share ? <p data-share-state={share.state} className={share.state === 'ok' ? undefined : 'amber'}>
-      Machine share link (reusable, shared by every install here): <a href={share.url}>{share.url}</a> <CopyButton text={share.url} label="Copy share link"/>. Made {share.createdOn}; Tailscale expires it {day(share.expiresAt)}.
-      {share.state === 'refresh' && ' It expires within seven days: make a fresh one and paste it below.'}
-      {share.state === 'expired' && ' It has expired: make a fresh one and paste it below before inviting anyone.'}
-    </p> : null}
-    {access.guidance && <p className="amber" data-share-state="missing">{access.guidance}</p>}
-    <form onSubmit={save('team-access/share-link', () => ({ url: link, createdOn: made }), () => { setLink(''); setMade(today()); })}>
-      <label>Tailscale share link<input name="link" value={link} onChange={event => setLink(event.target.value)} required placeholder="https://login.tailscale.com/…"/></label>
-      <label>Made on<input type="date" name="createdOn" value={made} onChange={event => setMade(event.target.value)} required/></label>
-      <button>Save for this machine</button>
-    </form>
-    <MoreDetails summary="Optional: a single-use Tailscale invite per person">
-      <p>Save a Tailscale API access token and each invite makes its own single-use device invite instead of the reusable link. This browser seals it to this machine; only the machine opens it, keeps it in an owner-only file, and it is never shown again.</p>
-      <p>{access.mode === 'api' ? 'A token is saved: invites make single-use Tailscale links.' : 'No token is saved: invites use the machine share link.'}</p>
-      {access.hostKey ? <form onSubmit={save('team-access/tailscale-token', async () => token ? { sealed: await sealForHost(access.hostKey!, token) } : { remove: true }, () => setToken(''))}>
-        <label>Tailscale API token<input type="password" autoComplete="off" value={token} onChange={event => setToken(event.target.value)}/></label>
-        <button>{token ? 'Save token' : 'Remove token'}</button>
-      </form> : <p>The master loop on this machine has not reported yet; the token can be saved once it runs.</p>}
-    </MoreDetails>
-    <MoreDetails summary="Optional: keep shared people on this install's port">
-      <p>A tailnet policy grant for you to apply in the Tailscale admin console: it lets the teammate reach this machine on port {access.port} only.</p>
-      <pre aria-label="ACL example">{access.acl}</pre> <CopyButton text={access.acl} label="Copy grant"/>
-      <p>{access.aclGuidance}</p>
-    </MoreDetails>
-    {error && <p role="alert" className="amber">{error}</p>}
-  </div>;
-}
-
-function InviteSomeone({ api }: Pick<Dashboard, 'api'>) {
-  const [invites, setInvites] = useState<Invitation[]>([]);
-  const [latest, setLatest] = useState<Invited | null>(null);
-  const [retry, setRetry] = useState<{ name: string; role: unknown } | null>(null);
-  const [access, setAccess] = useState<TeamAccess | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  useEffect(() => { api('team-access').then(setAccess, () => setAccess(null)); }, [api]);
-  /** One Invite: with an API token the machine first makes the single-use Tailscale invite, then the Graphyard one; a failure offers a retry or the share link, never half a message. */
-  async function send(body: { name: string; role: unknown; origin: string; share?: 'reusable' }): Promise<boolean> {
-    setError(''); setRetry(null);
-    try {
-      let answer = await api('invites', body);
-      if (answer.pending) {
-        for (;;) {
-          await new Promise(resolve => setTimeout(resolve, 1_000));
-          const state = await api(`team-access/device-invites/${answer.pending}`);
-          if (state.state === 'failed') { setError(state.error); setRetry({ name: body.name, role: body.role }); return false; }
-          if (state.state === 'ready') { answer = await api('invites', { ...body, deviceInvite: answer.pending }); break; }
-        }
-      }
-      const { principal, role, expiresAt, link, message, missing } = answer;
-      setInvites(rows => [...rows, { principal, role, expiresAt }]);
-      setLatest({ principal, role, expiresAt, link, message, missing });
-      return true;
-    } catch (e) { setError((e as Error).message); return false; }
-  }  async function revoke(name: string) {
-    setBusy(true); setError('');
-    try {
-      await api(`invites/${encodeURIComponent(name)}/revoke`, {});
-      setInvites(rows => rows.filter(row => row.principal !== name));
-      setLatest(value => value?.principal === name ? null : value);
-    } catch (e) { setError((e as Error).message); }
-    finally { setBusy(false); }
-  }
-  return <PageSection title="Invite someone" label="Invite someone">
-    {access && <MachineAccess api={api} access={access} setAccess={setAccess}/>}
-    <p>Invite makes one message with both links: the machine's Tailscale share (the reusable link, or a single-use invite when an API token is saved) and this install's own Graphyard sign-in link, single use, valid 24 hours. Viewers can read the yard; maintainers can also file work.</p>
-    <form onSubmit={async event => {
-      event.preventDefault();
-      const form = event.currentTarget, data = new FormData(form);
-      setBusy(true); setError('');
-      try {
-        const invited = await send({ name: String(data.get('name')).trim(), role: data.get('role'), origin: location.origin });
-        if (invited) form.reset();
-      } finally { setBusy(false); }
-    }}>
-      <label>Name<input name="name" required maxLength={100} placeholder="Email or GitHub login"/></label>
-      <label htmlFor="invite-role">Role</label><select id="invite-role" name="role" defaultValue="viewer"><option value="viewer">Viewer</option><option value="maintainer">Maintainer</option></select>
-      <button disabled={busy}>Invite</button>
-    </form>
-    {error && <p role="alert" className="amber">{error}</p>}
-    {retry && <p>
-      <button disabled={busy} onClick={() => void send({ ...retry, origin: location.origin })}>Try again</button>
-      {access?.shareLink && access.shareLink.state !== 'expired' && <> <button disabled={busy} onClick={() => void send({ ...retry, origin: location.origin, share: 'reusable' })}>Use the machine share link instead</button></>}
-    </p>}
-    {latest && <div role="status">
-      <p>One-time sign-in link for {latest.principal} ({latest.role}). Link expires <time dateTime={latest.expiresAt}>{new Date(latest.expiresAt).toLocaleString()}</time>.</p>
-      {latest.message ? <><label htmlFor="invitation-message">Invitation message</label><textarea id="invitation-message" readOnly rows={7} value={latest.message}/> <CopyButton text={latest.message} label="Copy message"/></>
-        : <p className="amber" data-invite-missing>No ready-to-send message yet: {latest.missing}</p>}
-      {latest.link && <><label>Sign-in link<input readOnly value={latest.link}/></label> <CopyButton text={latest.link} label="Copy"/></>}
-    </div>}
-    <h3>Invited from this page</h3>
-    <p className="muted">This list resets when you leave or reload Setup. Revoke ends their sessions and cancels unused links.</p>
-    {invites.length ? <ul aria-label="Invited from this page">{invites.map((invite, index) => <li key={index}>
-      <strong>{invite.principal}</strong> — {invite.role} · Link expires <time dateTime={invite.expiresAt}>{new Date(invite.expiresAt).toLocaleString()}</time> <button disabled={busy} onClick={() => void revoke(invite.principal)}>Revoke</button>
-    </li>)}</ul> : <p>No invitations from this page yet.</p>}
-  </PageSection>;
-}
-
 export default function SetupPage({ status, api, setView }: Pick<Dashboard, 'status' | 'api' | 'setView'>) {
   // The work items, read while this page is open, so the onboarding change shows as the current step (GY-1478).
   const [work, setWork] = useState<any[] | null>(null);
@@ -272,5 +149,5 @@ export default function SetupPage({ status, api, setView }: Pick<Dashboard, 'sta
     const timer = setInterval(read, 15_000);
     return () => { live = false; clearInterval(timer); };
   }, [api]);
-  return <><SetupView status={status} work={work} workUnread={work === null} onConnect={() => { location.hash = 'connect'; setView('agents'); }}/>{status?.actor?.role === 'admin' && status.actor.sessionKind === 'human' && <InviteSomeone api={api}/>}</>;
+  return <SetupView status={status} work={work} workUnread={work === null} onConnect={() => { location.hash = 'connect'; setView('agents'); }}/>;
 }

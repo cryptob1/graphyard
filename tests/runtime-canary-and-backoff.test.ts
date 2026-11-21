@@ -160,7 +160,7 @@ test('unit:runtime-canary-and-backoff — launch failures back off per runtime a
 
   // A launch of the runtime for the item that outlives the failed-launch window clears its back-off; another item's back-off stands.
   const useful = work('x', 'GY-10', { epoch: 1, stage: 'build', ready: true, sessions: [session(t0 - 120_000, { host: 'machine-a', principal: 'worker-0' })] } as Partial<Work>);
-  const reset = harness([useful]);
+  const reset = harness([useful, work('z', 'GY-12', { stage: 'review', ready: false } as Partial<Work>)]);
   reset.state.launchBackoff['opencode:x'] = { failures: 3, reason: 'opencode TUI exited', until: iso(t0 + 240_000) };
   reset.state.launchBackoff['opencode:z'] = { failures: 1, reason: 'opencode TUI exited', until: iso(t0 + 60_000) };
   await reset.cycle(t0);

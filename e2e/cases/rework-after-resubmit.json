@@ -1,0 +1,14 @@
+{
+  "id": "rework-after-resubmit",
+  "title": "An item the loop resubmitted and the trial refused reaches a rework worker on the candidate's branch",
+  "description": "GY-3582: a finished head the loop resubmitted records its submission at an epoch no workspace stands at, so the rework its refused trial grounds had no linked branch to reserve and every launch failed. The command step proves the whole path on a real store: the resubmission, the rework its refusal grounds, the rework claim reserving the candidate's branch (a different branch still refused), master status showing the item at build with the worker, and the worker completing on the same branch.",
+  "tags": ["api", "work", "delivery"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "one dispatch takes the rework of a resubmitted head to a worker that reserves the candidate branch and completes",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/rework-after-resubmit.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

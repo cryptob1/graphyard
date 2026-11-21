@@ -39,12 +39,13 @@ ${trialAdmission}
 # The slot's fd passes to the guardian, so the slot is held until the container is removed.
 slot = admit() if load else None
 docker = ['docker', '--host', spec.get('docker', 'unix:///var/run/docker.sock')]
-# A remote shard (GY-3412) keeps Docker's default seccomp and system paths and runs under CPU, memory and process limits.
+# Tests start nested sandboxes, so seccomp and system paths are unconfined, here and on a remote shard (GY-3549),
+# which also runs under CPU, memory and process limits.
 limits = spec.get('limits')
 args = docker + ['create', '--name', container_name, '-i', '--init',
         '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
-        *(['--cpus=' + str(limits['cpus']), '--memory=' + str(limits['memory']), '--pids-limit=' + str(limits['pids'])] if limits else
-          ['--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined']), '--network=' + spec['network'],
+        '--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined',
+        *(['--cpus=' + str(limits['cpus']), '--memory=' + str(limits['memory']), '--pids-limit=' + str(limits['pids'])] if limits else []), '--network=' + spec['network'],
         *(['--security-opt=apparmor=' + spec['apparmor']] if spec.get('apparmor') else []),
         *(['--cpu-shares=' + str(load['cpuShares'])] if load and load.get('cpuShares') else []),
         '--ulimit', 'core=0', '--user', spec.get('user') or str(os.getuid()) + ':' + str(os.getgid()),

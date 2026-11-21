@@ -86,7 +86,7 @@ test('integration:no-repeat-launch-into-silent-account — holdRepeatedLimitAcco
   const registry = memoryRegistry('machine-a', at, ['env-a', 'env-b'].map(name => ({ name, runtime: 'claude', home: join(dir, name) })), 'reviewer');
   // holdRepeatedLimitAccount reads current holds through observedExhaustions, which only asks the
   // control plane over HTTP; with no URL it reads none and reports the hold to the injected registry.
-  const reviewHold = await holdRepeatedLimitAccount({ ...config, url: undefined }, reviewWork, at, { registry }, 'reviewer');
+  const reviewHold = await holdRepeatedLimitAccount({ ...config, url: undefined }, reviewWork, at, { registry, smoke: async () => ({ ok: false, error: 'Usage limit reached' }) }, 'reviewer');
   assert.equal(reviewHold?.account, 'env-a');
   assert.equal((await registry.document()).accounts.find(account => account.name === 'env-a')!.quota.state, 'exhausted', 'the hold is reported to the registry');
   const reviewProfile = config.reviewers[0]!;

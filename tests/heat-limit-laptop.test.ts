@@ -17,11 +17,12 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // e2e:heat-limit-laptop (GY-3416): the operator's laptop read package 95C and core 96C against a
 // 105C critical while master status showed 64C and nothing throttled — the guard compared each
 // sensor to its own crit-3 (102C). With the limit now min(85C, crit-3), one loop cycle over that
-// same fixture reads the hottest package or core sensor, halves the merge writer's trial cap and
-// holds every new launch: master status shows all three, and the loop's coordination read carries
-// them to the Workers page (browser-tests/workers-heat-limit.spec.ts shows them there).
+// same fixture reads the hottest package or core sensor and halves the merge writer's trial cap;
+// since GY-3501 the reading holds no launch. master status shows both, and the loop's
+// coordination read carries them to the Workers page (browser-tests/workers-heat-limit.spec.ts
+// shows them there).
 
-test('e2e:heat-limit-laptop — with a fixture hwmon reporting package 95C and core 96C against a 105C critical, master status shows the hottest reading, the halved trial cap and launches waiting', async () => {
+test('e2e:heat-limit-laptop — with a fixture hwmon reporting package 95C and core 96C against a 105C critical, master status shows the hottest reading and the halved trial cap, and no launch waits', async () => {
   const sensors = await temporaryDirectory('heat-limit-laptop-hwmon');
   await mkdir(join(sensors, 'hwmon0'));
   await writeFile(join(sensors, 'hwmon0', 'name'), 'coretemp\n');
@@ -51,13 +52,13 @@ test('e2e:heat-limit-laptop — with a fixture hwmon reporting package 95C and c
   const run = async (command: string, args: string[]) => isHerdrCommand(command) ? (herdrSubcommand(args)[1] === 'list' ? JSON.stringify({ agents: [] }) : '') : `${'b'.repeat(40)}\n`;
   const report = await masterStatusReport(root, config, async path => { if (path === 'work-snapshot') return snapshot; throw Object.assign(new Error('absent'), { status: 404 }); }, run);
   assert.equal(report.cpuPressure?.celsius, 96, 'the reading is the hottest package or core sensor, not the cooler one master status once showed');
-  assert.equal(report.cpuPressure?.waiting, 'launches waiting: CPU 96C', 'master status shows launches waiting');
+  assert.equal(report.cpuPressure?.waiting, null, 'master status shows no launch held by the heat');
   assert.deepEqual(report.cpuPressure?.trialCap, { now: 2, full: 4 }, 'master status shows the trial cap halved');
 
-  // The loop's coordination read carries all three to the Workers page.
-  const carried = loopCpu(encodeLoopCpu({ avg60: state.cpuPressure!.avg60, steal: state.cpuPressure!.steal, celsius: state.cpuPressure!.celsius, testBudget: state.cpuPressure!.testBudget, trialCap: state.cpuPressure!.trialCap, waiting: true }));
+  // The loop's coordination read carries both to the Workers page.
+  const carried = loopCpu(encodeLoopCpu({ avg60: state.cpuPressure!.avg60, steal: state.cpuPressure!.steal, celsius: state.cpuPressure!.celsius, testBudget: state.cpuPressure!.testBudget, trialCap: state.cpuPressure!.trialCap, waiting: false }));
   assert.equal(carried?.celsius, 96);
   assert.deepEqual(carried?.trialCap, { now: 2, full: 4 });
-  assert.equal(carried?.waiting, true);
+  assert.equal(carried?.waiting, null, 'the read carries no launches-waiting word');
 });
 

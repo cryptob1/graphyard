@@ -1,0 +1,14 @@
+{
+  "id": "upgrade-backup-before-checkout",
+  "title": "graphyard upgrade backs up the database before it moves the CLI, so a schema change upgrades",
+  "description": "A local install whose server runs the release just before the newest schema generation (schema N) on its own Postgres upgrades to the tip (schema N+1): the backup runs first with the running release's CLI, then the checkout moves, the redeployed server migrates the database to N+1, and /healthz reports the new commit.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Upgrade an install on schema N to a commit with schema N+1",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/upgrade-backup-before-checkout.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

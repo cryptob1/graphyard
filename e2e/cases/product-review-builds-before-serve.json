@@ -1,0 +1,16 @@
+{
+  "id": "product-review-builds-before-serve",
+  "title": "A product review builds the head before serving it, so its dashboard answers",
+  "description": "GY-3581: a product review of a UI change runs the repository's build step in the review checkout before the head's e2e.serve command, so the reviewer session's served dashboard answers GET / with 200 instead of HTTP 500 for a missing dist/. A failing build ends the launch naming its output tail.",
+  "tags": ["review", "product-review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "product review builds the head before serving it",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/product-review-builds-before-serve.test.ts",
+      "timeoutSeconds": 900
+    }
+  ]
+}

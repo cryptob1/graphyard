@@ -10,7 +10,7 @@
 - **Every change is proven.** Workers build, agents review, main trials each head.
 - **Production stays safe.** Main deploys itself; failures revert automatically.
 
-Prerequisites: Linux 7.0+ with Landlock ABI 9+ (`uname -r`; Ubuntu 26.04: `sudo apt install linux-image-oem-7.3`); Node 24+/npm (`node --version`, `npm --version`; Ubuntu/Debian: `curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash - && sudo apt install nodejs`, Arch: `sudo pacman -S nodejs npm`, macOS: `brew install node@24`); Git (`git --version`, `git remote -v`); Docker (`docker version`, `docker compose version`); GitHub CLI (`gh auth status`); bubblewrap (`bwrap --version`); Python (`python3 --version`); Herdr (`herdr --version`; install: `curl -fsSL https://herdr.dev/install.sh | sh`); systemd (`systemctl --user status`). [Setup guide](docs/setup.md).
+Prerequisites: Linux 7.0+ with Landlock ABI 9+ (`uname -r`; Ubuntu 26.04: `linux-image-oem-7.3`); Node 24+/npm (`node --version`, `npm --version`; Ubuntu/Debian: `curl -fsSL https://deb.nodesource.com/setup_24.x | sudo bash - && sudo apt install nodejs`, Arch: `sudo pacman -S nodejs npm`, macOS: `brew install node@24`); Git (`git --version`, `git remote -v`); Docker with Compose (`docker version`, `docker compose version`); GitHub CLI (`gh auth status`); bubblewrap (`bwrap --version`); Python (`python3 --version`); Herdr (`herdr --version`; install: `curl -fsSL https://herdr.dev/install.sh | sh`); systemd (`systemctl --user status`). [Setup guide](docs/setup.md).
 
 ## Quick start
 
@@ -27,7 +27,7 @@ Once published to npm:
 npx @cryptob1/graphyard up --repo OWNER/NAME
 ```
 
-The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. The dashboard's trust strip counts this week's deliveries: verified by running the real app, sent back, reverted. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. A project is onboarded once it serves the real app and has a [feature map](docs/setup.md#onboarding-a-project). Sharing: one machine, many installs, one port each; two locks: tailnet plus per-install sign-in.
+The Setup link connects worker and reviewer accounts, file goals under **New work item**: title and optional description; the master writes the criteria; **Advanced** takes full detail. `graphyard master status`; `graphyard upgrade --plan` then `graphyard upgrade`; `graphyard doctor` verifies. Sharing: **Invite** gives one link that signs a person in once, from any device.
 
 ## Where things run
 

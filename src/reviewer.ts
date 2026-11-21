@@ -8,7 +8,6 @@ import { postDeployReviewSection, singleCaseReviewSection, criteriaVerdictRule }
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -16,7 +15,9 @@ import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, screenDigest, sessionWords, settlementDue, settlementReason, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
 import { accountLaunch, profileAccount, recordObservedExhaustion, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
-import { allocateManagedCheckout, settleCheckout } from './master/worktrees.js';
+import { allocateManagedCheckout, lockfiles, settleCheckout, shareDependencies } from './master/worktrees.js';
+import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
+import { buildArgv, installArgv, packageManager } from './package-manager.js';
 import { loadMasterConfig, loadStoredMasterConfig, } from './master/config.js';
 import { autonomousSession } from './master/dispatch.js';
 import { closeHerdrPane, type HerdrAgent } from './master/herdr.js';
@@ -25,7 +26,7 @@ import { prepareSessionHarness } from './master/harness.js';
 import { profileConcurrency, reviewerProfileSchema, selectReviewerProfile, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { launcherCoordinatorRoot, sessionConfinement } from './master/launch.js';
-import { credentialMaskFor, insideMasterConfinement, type CredentialMask } from './master/confinement.js';
+import { credentialMaskFor, insideMasterConfinement, reviewerCredentialDirectory, type CredentialMask } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
 import { moveOffLoggedOutAccount } from './master/logged-out.js';
 import { underTestRunner } from './runtime-environment.js';
@@ -334,11 +335,6 @@ export function vanishedSettledSession(handle: Pick<SessionHandle, 'id' | 'pane'
   return records.some(record => record.state !== 'pending' && record.requestId === handle.id && record.agentName === handle.agentName);
 }
 
-// Reviewer session bindings live beside the coordinator credential, outside every worktree.
-export function reviewerCredentialDirectory(config?: Pick<MasterConfig, 'credentialFile'>, input?: string) {
-  if (input) return resolve(input);
-  return config ? resolve(config.credentialFile, '../..', 'reviewers') : resolve(process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'reviewers');
-}
 export async function saveReviewerProfile(root: string, profileInput: unknown) {
   const profile = reviewerProfileSchema.parse(profileInput);
   const config = await loadStoredMasterConfig(root);
@@ -1104,6 +1100,20 @@ export async function launchReview(root: string, work: Work, profileName: string
                 // this launch already allocated for the session.
                 const git = dependencies.run ?? defaultChildRun;
                 await git('git', ['-C', root, 'worktree', 'add', '--detach', checkout.worktree, binding.sha]);
+                // GY-3575: the checkout resolves the repository's declared dependencies (its compatible shared install) before the command starts.
+                // GY-3579: a head the shared install cannot answer for (its lockfile differs) installs its own, the frozen contained install a worker's worktree gets.
+                if ((await shareDependencies(root, checkout.worktree)).skipped.length && lockfiles.some(name => existsSync(join(checkout.worktree, name)))) {
+                  const argv = installArgv(packageManager(checkout.worktree)), install = containedInstall(checkout.worktree, argv);
+                  try { await git(install.command, install.args, { cwd: checkout.worktree, env: npmCiEnvironment(), timeoutMs: 600_000 }); }
+                  catch (error: any) { throw new Error(`${argv.join(' ')} failed in the review checkout of ${binding.sha.slice(0, 12)}: ${`${error.stdout ?? ''}${error.stderr ?? ''}`.trim().slice(-1500) || error.message}`); }
+                }
+                // GY-3581: the repository's own build step runs before the command, as the merge trial's does, so a dashboard served from dist/ answers.
+                const manager = packageManager(checkout.worktree), build = buildArgv(manager, null);
+                const scripts = await readFile(join(checkout.worktree, 'package.json'), 'utf8').then(text => JSON.parse(text)?.scripts, () => undefined);
+                if (build && (scripts?.build || (manager.name === 'pnpm' && manager.workspace))) {
+                  try { await git(build[0]!, build.slice(1), { cwd: checkout.worktree, env: runEnvironment(process.env), timeoutMs: 1_200_000 }); }
+                  catch (error: any) { throw new Error(`${build.join(' ')} failed in the review checkout of ${binding.sha.slice(0, 12)}: ${`${error.stdout ?? ''}${error.stderr ?? ''}`.trim().slice(-1500) || error.message}`); }
+                }
                 const served = serveHead(checkout.worktree, commandApplication(declared), { sha: binding.sha, env: runEnvironment(process.env), budgetMs: (declared.readySeconds + 60) * 1000, scratch: join(checkout.directory, '.graphyard', 'scratch'), log: () => {} });
                 try { serving = { url: await served.ready, close: () => served.close().catch(() => {}) }; }
                 catch (error) { await served.close().catch(() => {}); throw error; }

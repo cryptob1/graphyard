@@ -2,7 +2,7 @@ import { productBrief } from './tables/product-brief.js';
 import { loopState } from './tables/loop-state.js';
 import { createHash } from 'node:crypto';
 import type { TableDefinition } from './tables.js';
-import { humanSignInSessions, teamMembers } from './tables/human-sign-in.js';
+import { humanSignInSessions, teamInvites, teamMembers } from './tables/human-sign-in.js';
 import { workerIdentities } from './tables/worker-identities.js';
 import { reporterIdentities } from './tables/reporter-identities.js';
 import { workTables } from './tables/work.js';
@@ -25,7 +25,7 @@ import { sessionUsage } from './tables/session-usage.js';
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
   ...validationTables, ...scenarioTables, ...deliveryTables,
-  ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, sessionUsage, humanSignInSessions, teamMembers, workerIdentities, reporterIdentities, loopState, productBrief,
+  ...schemaGenerationTables, ...planeLivenessTables, ...registryRefusalTables, sessionUsage, humanSignInSessions, teamMembers, teamInvites, workerIdentities, reporterIdentities, loopState, productBrief,
 ];
 
 /** Tables retired from the schema and logical backups. */

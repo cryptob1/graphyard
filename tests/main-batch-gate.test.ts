@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { bootstrapGate, catalogBudgetMs, catalogFits, diagnosticsIntervalMs, gateCauses, gateHoldAttention, gateRunsMaxAgeMs, measuredCatalogMs, gateLimitMs, gateRecordPath, gateSummary, readGateRecord, revertRate, runDiagnostics, runGate, timeoutHold, writeGateRecord, type GatePorts, type GateRecord } from '../src/batch-gate.js';
 import { appendReleaseNote, latestReleaseNote, readReleaseNotes, releaseNote, releaseNotesPath } from '../src/release-notes.js';
 import { RefusedResponse } from '../src/model/refusal.js';
-import { batchGateStep } from '../src/daemon/cycle-batch-gate.js';
+import { batchGateStep, noteBatchGateStopping } from '../src/daemon/cycle-batch-gate.js';
 import type { MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
 import { deployOnce, deployRecordPath, type DeployWatchPorts } from '../src/deploy-watch.js';
@@ -30,7 +30,7 @@ function item(key: string, proofs: string[]): Work {
 }
 
 /** An origin whose main holds a verified base and three merges (GY-1, GY-2, GY-3), and the coordinator checkout. */
-async function fixture(label: string, broken: string | null = null) {
+async function fixture(label: string, broken: string | null = null, deleteEarlierCase = false) {
   const base = await temporaryDirectory(label);
   const origin = join(base, 'origin.git'), pusher = join(base, 'pusher'), coordinator = join(base, 'coordinator');
   git(base, 'init', '-q', '--bare', '-b', 'main', origin);
@@ -47,6 +47,7 @@ async function fixture(label: string, broken: string | null = null) {
   for (const n of [1, 2, 3]) {
     git(pusher, 'checkout', '-q', '-b', `item-${n}`);
     await write({ [`src/f${n}.ts`]: `GY-${n}` === broken ? 'broken\n' : 'ok\n' });
+    if (deleteEarlierCase && n === 3) git(pusher, 'rm', 'e2e/cases/case-1.json');
     git(pusher, 'commit', '-q', '-m', `change ${n}`);
     git(pusher, 'checkout', '-q', 'main');
     git(pusher, 'merge', '-q', '--no-ff', '-m', `Merge GY-${n}: change ${n}`, `item-${n}`);
@@ -142,6 +143,19 @@ test('integration:main-batch-gate — at rollout the served commit is the first 
   assert.equal(await deployOnce(file, ports, () => {}, 'owner/other'), 'deployed', 'a record gating another repository never pins this one');
 });
 
+test('e2e:gate-skips-deleted-bound-cases — a later merge deletes an earlier binding and the batch verifies', async () => {
+  const { coordinator, verified, tip, work } = await fixture('gate-deleted-bound-case', null, true);
+  const loop = reads(coordinator);
+  const { batchGatePorts } = await import('../src/daemon/cycle-batch-gate.js');
+  const record = bootstrapGate(repository, verified);
+  const outcome = await runGate(batchGatePorts({ ...loop.value, git: loop.value.git! }, work), record);
+  assert.equal(outcome.outcome, 'verified');
+  assert.equal(record.verified, tip);
+  assert.deepEqual(loop.trials[0]!.proofs.sort(), ['e2e:case-2', 'e2e:case-3', 'e2e:create-work-item', 'e2e:graphyard-feature-map', 'e2e:smoke']);
+  assert.equal(record.notes!.length, 1);
+  assert.match(record.notes![0]!, /case-1.*GY-1/);
+});
+
 test('integration:batch-gate-survives-restart — a batch in flight when the loop restarts is adopted and finished by the next loop on the same candidate tip, without a new run of its finished steps or a fetch, and a merge that lands meanwhile is verified by the following batch', async () => {
   const { base, coordinator, verified, tip, work } = await fixture('batch-gate-restart', 'GY-2');
   // Rollout: the deploy record's commit is the first verified one, so the first gate cuts verified..tip.
@@ -162,10 +176,11 @@ test('integration:batch-gate-survives-restart — a batch in flight when the loo
     if (commit !== tip) return trial(commit, files, trialItem); // the diagnostics run on the verified commit
     onTip.push({ proofs });
     if (loops === 1 && proofs.length > 1) return trial(commit, files, trialItem); // the cut's one whole run
-    if (loops === 1) { await diagnostics; throw new Error('the loop restarted mid-gate'); } // the failing check's re-run
+    if (loops === 1) { await diagnostics; noteBatchGateStopping(firstCycle.state); throw new Error('the loop restarted mid-gate'); } // the failing check's re-run, killed by the stopping loop
     return trial(commit, files, { ...trialItem, criteria: [] }); // the next loop: the re-run passes, a flake
   };
-  const first = await batchGateStep(cycleWith(loop.value, work));
+  const firstCycle = cycleWith(loop.value, work);
+  const first = await batchGateStep(firstCycle);
   diagnostics = first!.diagnostics;
   await first!.gate;
   assert.equal(fetches, 1, 'the first loop fetched the tip it cut its batch on');
@@ -222,7 +237,7 @@ function gatePorts(landings: ServeLanding[], fails: (commit: string, check: stri
     fetch: async () => reverted.length ? `${'f'.repeat(39)}${reverted.length}` : tip,
     landings: async () => landings,
     files: async () => ['src/a.ts'],
-    catalog: async () => [],
+    catalog: async () => ['create-work-item', 'smoke', ...landings.flatMap(landing => landing.item!.criteria.flatMap(criterion => criterion.proofs.filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4))))],
     core: async () => ['create-work-item', 'smoke'],
     run: async (commit, checks) => {
       runs.push({ commit, checks: [...checks] });
@@ -596,14 +611,14 @@ test('unit:batch-gate-outcome-visible — every settled run is the record\'s las
     assert.equal(gateSummary(record)!.lastOutcome!.tip, tip.slice(0, 12));
     assert.equal(gateSummary(record)!.lastOutcome!.reason, record.lastOutcome!.reason);
   }
-  // A run that throws records an error outcome with the message, and leaves its batch standing for adoption.
+  // A run that throws records an error outcome with the message, and settles its batch (GY-3567).
   {
     const { ports } = gatePorts(batch, () => false, { clock: Date.parse(at) });
     ports.run = async () => { throw new Error('the trial container is gone'); };
     const record = bootstrapGate(repository, verified);
     await assert.rejects(runGate(ports, record), /the trial container is gone/);
     assert.deepEqual([record.lastOutcome!.tip, record.lastOutcome!.outcome, record.lastOutcome!.reason, record.lastOutcome!.finishedAt], [tip, 'error', 'the trial container is gone', at]);
-    assert.equal(record.inFlight?.tip, tip, 'the thrown gate leaves its batch for the next loop to adopt');
+    assert.equal(record.inFlight, null, 'the thrown gate settles its batch');
   }
 
   // End to end on real git: the run in flight names its current step, and the settled outcome is one journal line.
@@ -657,7 +672,7 @@ test('unit:batch-gate-outcome-visible — every settled run is the record\'s las
     const record = readGateRecord(gateRecordPath(coordinator))!;
     assert.deepEqual([record.lastOutcome!.tip, record.lastOutcome!.outcome], [realTip, 'error']);
     assert.match(record.lastOutcome!.reason!, /the trial container is gone/);
-    assert.equal(record.inFlight?.tip, realTip, 'the failed run leaves its batch standing for the next loop to adopt');
+    assert.equal(record.inFlight, null, 'the failed run settles its batch, so the next cycle runs afresh');
     assert.ok(lines.some(line => line.includes('The batch gate failed and runs again next cycle') && line.includes('the trial container is gone')), 'the journal names the error outcome');
   }
 });
