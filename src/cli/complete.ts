@@ -180,7 +180,7 @@ export async function rerunTrialFiles(root: string, files: readonly string[], ru
     // /var/tmp is durable scratch available to confined workers. Keep it short and outside
     // the checkout: fixture sockets have a pathname bound and upward lookups must stay clean.
     // The operator HOME stays read-only, including for runners that relocate tmpfs beneath HOME.
-    // A host whose /var/tmp refuses the directory (a merge trial's, GY-3576) uses its tmpdir.
+    // A trial shard on an added host has a read-only /var/tmp: its tmpdir serves there.
     scratch = await mkdtemp('/var/tmp/gy-r').catch(() => mkdtemp(join(tmpdir(), 'gy-r')));
     const home = join(scratch, 'home'), temporary = join(scratch, 'tmp');
     await mkdir(home); await mkdir(temporary); await chmod(temporary, trialTemporaryMode);
@@ -385,9 +385,8 @@ export const completeCommand: CliCommand = {
     '                                to 10 minutes, so a slow plane strands no finished head. Reports',
     '                                what graphyard verify ran on HEAD and its outcome. Refused while',
     '                                GitHub requests are paused, it waits for the named reset and',
-    '                                submits again (bounded). A verification still waiting for a',
-    '                                slot when the request\'s time runs out is queued: the loop',
-    '                                submits the head, with no blocker',
+    '                                submits again (bounded). No host verification runs here;',
+    '                                the merge trial decides whether the head passes.',
   ],
   run: async (context, work) => {
     // GY-3330: one idempotency key for this attempt and head — a caller's GRAPHYARD_REQUEST_ID,
@@ -399,26 +398,9 @@ export const completeCommand: CliCommand = {
     completeArgs(context.args);
     await checkoutRoot(context, `graphyard complete ${work.key}`);
     const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? `complete:${work.id}:${body.epoch}:${body.head}`;
-    // GY-2517: a rework after a failed merge trial re-runs the trial's failing test files here,
-    // before anything is submitted, so a head that still fails them no longer costs the
-    // serial merge writer another trial slot. Only the item's latest refusal of exactly that shape
-    // names files; every other item runs nothing.
-    const { requestWorkerVerification } = await import('./worker-verification.js');
-    const checked = await requestWorkerVerification(context, work, { mode: 'complete', head: body.head, epoch: body.epoch });
-    // GY-3537: the verification still waits for a slot; the head is recorded and the loop submits it.
-    if ('queued' in checked) { context.print('queued for verification; the loop submits it'); return; }
-    const rerun = checked.rerun;
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
-    // GY-2968: what the rerun set aside travels with the submission, for the control plane to
-    // record on the item's history beside it. GY-3330: the whole submission rides out a control
-    // plane slow past the CLI's own request bound — resent under one key until it answers.
-    const submitted = await submitUntilAnswered(() => submitThroughPause(() => context.api(`work/${work.id}/submit`, {
-      ...body,
-      ...(rerun.flaked.length ? { flaked: rerun.flaked } : {}),
-      ...(rerun.baseFailures.length ? { baseFailures: rerun.baseFailures } : {}),
-      ...(rerun.note ? { rerunUnjudged: rerun.note } : {}),
-    }, requestId)));
+    const submitted = await submitUntilAnswered(() => submitThroughPause(() => context.api(`work/${work.id}/submit`, body, requestId)));
     context.print({ ...submitted, selfVerification: verification });
   },
 };

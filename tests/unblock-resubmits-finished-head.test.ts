@@ -90,11 +90,11 @@ async function assigned(n: number): Promise<Work> {
   return engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test-host', path: worktree, branch }, randomUUID());
 }
 
-/** The worker's own complete: the private verification, here refused by the stubbed trial-host fault. */
+/** The worker's optional verify: the private verification, here refused by the stubbed trial-host fault. */
 async function completeRefusedByHostFault(w: Work) {
   const { head, worktree } = heads.get(w.key)!;
   const context = { repositoryRoot: () => worktree, api: async () => { throw new Error(hostFault); }, print: (value: unknown) => value } as unknown as CliContext;
-  await assert.rejects(requestWorkerVerification(context, w, { mode: 'complete', head, epoch: 1 }), /Trial-host fault/);
+  await assert.rejects(requestWorkerVerification(context, w, { mode: 'verify', head, epoch: 1 }), /Trial-host fault/);
 }
 
 /** `blocked --finished` the way the worker's CLI sends it, from `cwd` (its worktree by default). */

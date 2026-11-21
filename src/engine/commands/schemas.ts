@@ -83,8 +83,6 @@ export const commands = {
   blocked: z.object({ epoch, reason: z.string().max(2000).nullable(), partialWork: partialWorkSchema.optional(), finishedHead: sha.optional() }).strict(),
   // GY-1726: a post-deploy follow-up whose reading cannot exist before `notBefore` ends its attempt
   // and waits for that instant, with no blocker and no intervention: the loop dispatches it then.
-  // GY-3537: complete's verification still waited for a slot: the head is queued for the loop to verify and submit.
-  queue: z.object({ epoch, head: sha }).strict(),
   defer: z.object({ epoch, notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000) }).strict(),
   // GY-3335: the loop's own submission of a finished head a worker named in a blocker its complete
   // failed on. GY-3576: no host verification runs first; the merge trial decides.
