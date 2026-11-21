@@ -129,12 +129,12 @@ test(`${proof} — a launch refusal still backing off stays visible`, async () =
   assert.doesNotMatch(alarm, /50ddae/, 'the expired failure is still not named');
 });
 
-test(`${proof} — an unexplained idle queue still alarms, naming the item with no actor`, async () => {
+test(`${proof} — an idle queue with no launch cause still alarms, naming the gate refusing the ready item`, async () => {
   const f = await fixture({ credentialsHeld: true });
   await f.cycle();
   f.advance(11);
   await f.cycle();
   const alarm = alarmOf(f.state)!;
-  assert.match(alarm, /Cause: GY-1 has no actor: ready, with no lease and no session/);
+  assert.match(alarm, /Cause: GY-1 waits: no free worker account/);
   assert.doesNotMatch(alarm, /50ddae/);
 });

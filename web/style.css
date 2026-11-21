@@ -23,7 +23,7 @@ html[data-theme='daylight']{
 /* Connection recovery must remain accessible on small screens. */
 @media(max-width:650px){.sidebar .sidebar-bottom{display:block;width:100%;margin-top:8px}.sidebar-bottom p{display:none}.sidebar-bottom .text-button{margin-left:12px}.sidebar{flex-wrap:wrap}}
 .history-scroll{max-height:320px;overflow:auto;overscroll-behavior:contain;margin:12px 0}.history-scroll:focus-visible{outline:2px solid var(--up-next);outline-offset:3px}.history-option{display:flex;align-items:center;gap:8px;margin:12px 0}.history-option input{width:auto}.history-scroll .timeline>div{flex-wrap:wrap;overflow-wrap:anywhere}
-.card-meta .assignment-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card-meta .dot,.card-meta .push{flex-shrink:0}.card-meta .push{padding-left:8px}.assignment-details{overflow-wrap:anywhere}.card{cursor:pointer}.card-open{display:block;width:100%;margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;text-align:left}.card-open:focus-visible{outline:2px solid var(--up-next);outline-offset:3px;border-radius:3px}.candidate-link{color:var(--up-next);-webkit-user-select:text;user-select:text}.candidate-link:hover{text-decoration:underline}.candidate-link:focus-visible{outline:2px solid var(--up-next);outline-offset:3px;border-radius:3px}.candidate-details{font-size:12px;overflow-wrap:anywhere}.candidate-details code{display:inline;margin:0;padding:2px 5px}.candidate-details a code{color:inherit;background:var(--border)}
+.card-meta .assignment-label{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.card-meta .dot,.card-meta .push{flex-shrink:0}.card-meta .push{padding-left:8px}.assignment-details{overflow-wrap:anywhere}.card{cursor:pointer}.card-open{display:block;width:100%;min-height:0;margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;text-align:left}.card-open:focus-visible{outline:2px solid var(--up-next);outline-offset:3px;border-radius:3px}.candidate-link{color:var(--up-next);-webkit-user-select:text;user-select:text}.candidate-link:hover{text-decoration:underline}.candidate-link:focus-visible{outline:2px solid var(--up-next);outline-offset:3px;border-radius:3px}.candidate-details{font-size:12px;overflow-wrap:anywhere}.candidate-details code{display:inline;margin:0;padding:2px 5px}.candidate-details a code{color:inherit;background:var(--border)}
 img.mark{display:block;width:32px;height:36px;border:0;border-radius:0;object-fit:contain;flex-shrink:0}
 
 .identity{display:inline-block;border-radius:999px;padding:2px 7px;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}.identity.ai{color:var(--moving);background:color-mix(in srgb,var(--moving) 25%,var(--bg));border:1px solid color-mix(in srgb,var(--moving) 48%,var(--bg))}.identity.human{color:var(--needs-you);background:color-mix(in srgb,var(--needs-you) 29%,var(--bg));border:1px solid color-mix(in srgb,var(--needs-you) 54%,var(--bg))}.identity.undeclared,.identity.none{color:var(--text);background:var(--border);border:1px solid var(--text-3)}.session{display:inline-flex;align-items:center;gap:5px;margin-right:14px;white-space:nowrap}.sidebar-bottom .identity{margin-left:4px}
@@ -142,11 +142,14 @@ img.mark{width:26px;height:26px}
 .work-row:hover{background:var(--raised)}.group-needs-you .work-row{border-top-color:color-mix(in srgb,var(--needs-you) 25%,var(--bg))}
 .row-key{font-size:var(--type-small);color:var(--text-2)}
 .row-main{display:flex;flex-direction:column;gap:var(--space-1);min-width:0}
+.row-meta{display:flex;align-items:center;flex-wrap:wrap;gap:var(--space-2);min-width:0}
 .work-row h3{margin:0;font-size:var(--type-item);font-weight:500;line-height:1.4}
 .row-owner{font-size:var(--type-tiny);color:var(--text-3)}
 .row-sub,.work-row .status-line{margin:0;font-size:var(--type-small);line-height:1.5;color:var(--text-2);overflow-wrap:anywhere}
-.row-lead{margin:0;font-size:var(--type-small);line-height:1.5;color:var(--text-2);overflow-wrap:anywhere}
-.group-needs-you .row-sub{color:color-mix(in srgb,var(--needs-you) 70%,var(--text))}.group-blocked .row-sub{color:color-mix(in srgb,var(--blocked) 75%,var(--text))}
+.row-lead{margin:0;font-size:var(--type-small);line-height:1.5;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media(min-width:1101px){.work-row:is(.group-needs-you,.group-up-next,.group-backlog){grid-template-columns:84px minmax(0,1fr) 170px 90px auto}.work-row:is(.group-needs-you,.group-up-next,.group-backlog) .row-steps{display:none}}
+.work-row .priority-control select{min-height:24px;padding:2px 6px}
+.group-needs-you .row-sub{font-size:var(--type-body);color:var(--text)}.group-blocked .row-sub{color:color-mix(in srgb,var(--blocked) 75%,var(--text))}
 .row-who,.row-time{font-size:var(--type-small);color:var(--text-2)}
 .decide{background:var(--needs-you);border-color:var(--needs-you);color:var(--on-accent)}
 .card-pr{font-family:var(--font-mono);font-size:var(--type-small)}
@@ -260,7 +263,7 @@ img.mark{width:26px;height:26px}
   .row-head{display:none}
   .panel.work-group{border:0;border-radius:0;overflow:visible;gap:var(--space-3);background:transparent}.panel.work-group>h2,.panel.work-group>summary{padding:0}
   .work-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"key time" "main main" "steps steps" "who who" "decide decide";gap:var(--space-2);padding:var(--space-4);border:1px solid var(--border);border-radius:var(--radius-lg);background:var(--surface)}
-  .group-needs-you .work-row{border-color:color-mix(in srgb,var(--needs-you) 45%,var(--bg));background:color-mix(in srgb,var(--needs-you) 6%,var(--bg))}
+  .group-needs-you .work-row{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"key key" "main main" "who who" "time decide";border-color:color-mix(in srgb,var(--needs-you) 45%,var(--bg));background:color-mix(in srgb,var(--needs-you) 6%,var(--bg))}
   .row-key{grid-area:key;color:var(--group);font-size:var(--type-tiny)}.row-time{grid-area:time;text-align:right;font-size:var(--type-tiny)}.row-main{grid-area:main}.row-steps{grid-area:steps}.row-steps:empty{display:none}.row-who{grid-area:who;font-size:var(--type-tiny)}.row-who::before{content:'Next: '}.decide{grid-area:decide}
   .steps-track .step-seg{height:4px}
   .steps-detail{grid-template-columns:repeat(4,minmax(0,1fr))}.time-legend{grid-template-columns:1fr}

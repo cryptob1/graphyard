@@ -1,0 +1,16 @@
+{
+  "id": "stall-cause-is-current",
+  "title": "The stall alarm names the cause that holds work now, not a launch error from hours ago",
+  "description": "A fixture install seeds a launch failure for an item that is since done and a back-off whose until passed hours ago, with ready work and a free worker slot. The loop's cycle deletes both entries the same cycle; after the stall the alarm in master status mentions neither and names each ready item's current dispatch gate in plain words — no free worker account, an exclusive resource and its holder — never 'has no actor', and an item parked on a human decision is not reported.",
+  "tags": ["master"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the stall alarm in master status names the current gate, never the done item's failure or the expired back-off",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/stall-cause-is-current.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
