@@ -45,7 +45,7 @@ export async function requestWorkerVerification(context: CliContext, work: any, 
   try {
     result = await context.api(`work/${work.id}/worker-verification`, { ...input, head, epoch: input.epoch ?? work.lease?.epoch });
   } finally { clearInterval(progress); }
-  // GY-3537: still waiting for a slot when the request's time ran out; the loop verifies and submits.
+  // GY-3537: still waiting for a slot when the request's time ran out; the loop submits the head.
   if ('queued' in result) return result;
   if (result.record.head !== head) throw new Error('The private trial returned a different head');
   await written(root, result.record);

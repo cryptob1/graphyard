@@ -32,7 +32,7 @@ export async function workerVerification(services: Services, actor: Principal, i
   catch (error) {
     // GY-3537: complete's verification still waits for a slot when the request's time runs out: the
     // head is recorded as finished and queued, the worker's attempt ends with no blocker, and the
-    // loop runs the verification and submits the head once a slot frees.
+    // loop submits the head, and its merge trial runs the tests.
     if (!(error instanceof VerificationStillWaiting) || input.mode !== 'complete') throw error;
     await services.engine.execute(actor, 'queue', work.id, { epoch: input.epoch, head: input.head }, `queue:${work.id}:${input.epoch}:${input.head}`);
     return { queued: true };
