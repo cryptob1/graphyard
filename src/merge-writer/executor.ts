@@ -505,9 +505,8 @@ const childOutput = (error: unknown) => { const failed = error as { stdout?: unk
 /**
  * The trial (trial.ts `runTrial`) on the merge commit, with the test selection
  * widened to the files carrying the item's proofs and the run reported as TAP, so the verdict counts
- * each proof's executed and failed cases (AC-2). The child runner is decorated, never the trial:
- * the declared selection gains the proof files it lacks, and every shard's test run gets the TAP reporter on stdout,
- * which `runTrial` still reads its failing files from; the proofs are counted over all the shards.
+ * each proof's executed and failed cases (AC-2): the declared selection gains the proof files it lacks, and every
+ * shard's test run, here or on a compute host, gets the TAP reporter on stdout (`reporter`); the proofs are counted over all the shards.
  */
 export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialRun> {
   const inner = input.run ?? defaultChildRun;
@@ -537,11 +536,9 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
     try { const out = String(await invoke()); if (own === epoch) tap += `${out}\n`; return out; }
     catch (error) { if (own === epoch) tap += `${childOutput(error)}\n`; throw error; }
   };
+  // GY-3577: every test shard, on this machine or a compute host, reports TAP on stdout, which `runTrial` still reads its failing files from.
+  const reporter = { args: ['--test-reporter=tap', '--test-reporter-destination=stdout'], output: (out: string) => { tap += `${out}\n`; } };
   const run: ChildRun = async (command, args, options) => {
-    const at = args.indexOf('--files-from');
-    if (at >= 0) {
-      return capture(() => inner(command, [...args.slice(0, at), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at)], options));
-    }
     // GY-2960: a repository check's npm test/typecheck output is the TAP the base-failure attribution reads for cases.
     if (command === 'npm' && (args[0] === 'test' || (args[0] === 'run' && (args[1] === 'test' || args[1] === 'typecheck')))) {
       return capture(() => inner(command, args, options));
@@ -558,7 +555,7 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   }));
   let verdict: TrialRun, leftover: string | undefined;
   const onAttempt = (index: number) => { epoch++; tap = ''; byRunner = {}; files = []; input.onAttempt?.(index); };
-  try { verdict = await runTrial({ ...input, run, selectFiles, onAttempt, countProofs }); }
+  try { verdict = await runTrial({ ...input, run, reporter, selectFiles, onAttempt, countProofs }); }
   catch (error) {
     // A checkout that would not go is reported beside the verdict it reached, not in place of it.
     if (error instanceof TrialCleanupError && error.verdict) { verdict = error.verdict; leftover = error.message; }
@@ -576,7 +573,7 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   // Only the run on the base tip reads counts: attribution reads failing files, so it spends no runner's time.
   const retest = async (sha: string, failing: string[], e2eProofs: readonly string[] = [], counting?: 'count', e2eFrom?: string) => {
     only = failing;
-    try { const rerun = await runTrial({ ...rerunInput, selectFiles, e2eProofs, ...(e2eFrom ? { e2eFrom } : {}), mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt, ...(counting ? { countProofs } : {}) }); return { run: rerun, tap, proofs: counted() }; }
+    try { const rerun = await runTrial({ ...rerunInput, selectFiles, e2eProofs, ...(e2eFrom ? { e2eFrom } : {}), mergeSha: sha, changedFiles: failing, run, reporter, onAttempt: rerunAttempt, ...(counting ? { countProofs } : {}) }); return { run: rerun, tap, proofs: counted() }; }
     catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap, proofs: counted() } : null; }
   };
   const ownProofFiles = discovered ?? input.proofFiles;

@@ -1,0 +1,14 @@
+{
+  "id": "resubmit-without-verify",
+  "title": "The loop resubmits a finished head straight to its merge trial, with no host verification run",
+  "description": "GY-3576: a worker blocked on a host fault names its finished head; after master unblock, with every host heavy-job slot held, one loop cycle submits that head through the production resubmit effect and the real engine. No heavy-job slot is taken, no action in master status names a worker verification, and the item goes on to review, proofs and its merge trial, which runs the tests and decides.",
+  "tags": ["api", "work", "delivery"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "one cycle after the unblock submits the finished head with every heavy-job slot held",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/resubmit-without-verify.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
