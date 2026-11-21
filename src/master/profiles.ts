@@ -348,7 +348,7 @@ export const masterRunSchema = z.object({
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
   // GY-3446: temporary limits the master sets when another project on the host asks this install to
   // back off (`master config trialCap=2 launchHotCelsius=80 until=TIME`): at most this many merge
-  // trials at once, and launches wait from this CPU average. Each only tightens its default and is
+  // trials at once, and the trial cap halves under this CPU average. Each only tightens its default and is
   // ignored once `until` passes.
   trialCap: temporaryLimit(z.number().int().min(1).max(maxMergeWriterParallel)).optional(),
   launchHotCelsius: temporaryLimit(z.number().int().min(40).max(trialHotCelsius)).optional(),

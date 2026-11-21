@@ -1,0 +1,15 @@
+{
+  "id": "gate-error-settles-batch",
+  "title": "A batch gate that throws settles its batch and runs afresh",
+  "description": "Runs the real gate over detached trial runs: a gate run that fails on a host fault records an error and settles its batch, each later cycle launches a fresh run on main's tip instead of replaying the finished one, and once the fault is gone the fresh run verifies main with no edit to the gate record (GY-3567).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a fresh gate run verifies once the host fault is gone",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:gate-error-settles-batch tests/gate-error-settles-batch.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

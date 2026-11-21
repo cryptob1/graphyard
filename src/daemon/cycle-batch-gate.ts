@@ -150,9 +150,23 @@ export const pinningProof = (key: string) =>
 /** The proof a gate filing owes once the batch gate passes again; the loop records it itself (GY-3443). */
 export const repairedProof = 'manual:batch-gate-repaired';
 
-/** A batch gate filing's item: its pinning test is named from its check. */
-export const gateFiledItem = (input: { title: string; description: string; key: string }, baseBranch: string) =>
-  faultItem({ title: input.title, description: input.description, proof: pinningProof(input.key), repaired: { text: 'The batch gate passes again', proof: repairedProof }, reason: `Filed by the batch gate on ${baseBranch}` });
+/**
+ * The E2E proof a gate filing binds (GY-3568): Graphyard's own filings keep create-work-item, the
+ * case its install has always run; every other repository binds its own — the failing case itself
+ * when the check is one, else a new case named like the pinning proof, which the fix adds to that
+ * repository's catalog.
+ */
+export const gateFiledE2e = (key: string, repository: string): { proof: string; clause: string } => {
+  if (repository.toLowerCase() === graphyardRepository) return { proof: 'e2e:create-work-item', clause: 'creating a work item still works' };
+  const check = key.slice(key.indexOf(':') + 1);
+  return check.startsWith('e2e:')
+    ? { proof: check, clause: `the E2E case ${check.slice(4)} passes again` }
+    : { proof: `e2e:${pinningProof(key).slice('unit:'.length)}`, clause: `a new E2E case ${pinningProof(key).slice('unit:'.length)} passes` };
+};
+
+/** A batch gate filing's item: its pinning test and its E2E case are named from its check and the gated repository. */
+export const gateFiledItem = (input: { title: string; description: string; key: string }, baseBranch: string, repository: string) =>
+  faultItem({ title: input.title, description: input.description, proof: pinningProof(input.key), repaired: { text: 'The batch gate passes again', proof: repairedProof }, e2e: gateFiledE2e(input.key, repository), reason: `Filed by the batch gate on ${baseBranch}` });
 
 /**
  * GY-3443: while the gate's last outcome is verified, every open item owing `manual:batch-gate-repaired`
@@ -178,7 +192,7 @@ async function recordRepaired(record: GateRecord, work: readonly Work[], attest:
 export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> }, work: readonly Work[], trusted: () => string | null = () => null): GatePorts & { diagnose: DiagnosePort } {
   const git = reads.git;
   const file = async (input: { title: string; description: string; key: string }) => {
-    const created = await reads.createWork?.(gateFiledItem(input, reads.baseBranch), input.key);
+    const created = await reads.createWork?.(gateFiledItem(input, reads.baseBranch, reads.gate?.repository ?? ''), input.key);
     return { item: created?.key ?? null };
   };
   const catalog = async (commit: string) => {
@@ -439,7 +453,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       } catch (error) {
         // The stop killed the gate's children, so the failure is no outcome: nothing is written or logged.
         if (stopped.has(cycle.state)) return;
-        // The failed run's outcome is the record's last (GY-3141): write it beside the batch left standing for the next loop.
+        // The failed run's outcome is the record's last (GY-3141); its batch is settled, so the next cycle runs afresh (GY-3567).
         await mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) })).catch(() => undefined);
         note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`);
       }

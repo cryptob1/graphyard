@@ -10,7 +10,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { heavyRunLabel } from './helpers/run-tests.js';
 import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
 import { mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { cpuPressureStep, cpuWaiting } from '../src/daemon/cpu-pressure.js';
+import { cpuPressureStep, cpuWaiting, trialCapNow } from '../src/daemon/cpu-pressure.js';
 import type { TrialRunHandle } from '../src/merge-writer/trial-run.js';
 import type { MergePorts, MergeTrialRun } from '../src/merge-writer/executor.js';
 import { foldMergeLedger } from '../src/model-boundary/merge-ledger.js';
@@ -24,6 +24,7 @@ import type { Work } from '../src/model.js';
 // GY-3446: when another project on the host asks Graphyard to back off overnight (Huck: at most 2
 // trials, throttle at 80C), the master sets a temporary trial cap and heat limit for its install,
 // and a host-wide strict heavy-job cap every install shares; each reverts on its own at its expiry.
+// GY-3501: the heat limit halves merge trials sooner; it holds no launch.
 
 const start = Date.parse('2030-09-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -87,7 +88,7 @@ function world() {
 const reading = (config: MasterConfig, state: DaemonState, now: number, celsius: number) => cpuPressureStep({ config, state, now: () => now, log: () => {},
   effects: { cpuPressure: async () => ({ pressure: 'some avg10=1.00 avg60=10.00 avg300=1.00 total=1', stat: null, celsius }) } as never });
 
-test('integration:temporary-trial-limits — trialCap=2 and launchHotCelsius=80 set with an expiry hold trials to 2 and launches at 80C, show on master status, revert at expiry, and looser values are refused', { timeout: 60_000 }, async () => {
+test('integration:temporary-trial-limits — trialCap=2 and launchHotCelsius=80 set with an expiry hold trials to 2 and halve them from 80C, show on master status, revert at expiry, and looser values are refused', { timeout: 60_000 }, async () => {
   const root = await install(), expiry = start + 8 * 3600_000;
   // Looser than the defaults, or with no expiry, is refused.
   assert.throws(() => masterSettingsFromArgs(['trialCap=2'], start), /until=TIME/);
@@ -107,17 +108,19 @@ test('integration:temporary-trial-limits — trialCap=2 and launchHotCelsius=80 
   await sleep(50);
   assert.deepEqual(yard.launches, ['GY-1', 'GY-2'], 'no more than two merge trials at once');
   assert.deepEqual(state.cpuPressure?.trialCap, { now: 2, full: 2 });
-  // An 80C average makes launches wait under the temporary limit; the default (85C) would not.
-  await reading(master, state, start + 61_000, 80);
-  assert.equal(cpuWaiting(state), 'launches waiting: CPU 80C');
+  // A 77C average halves trials under the temporary 80C limit; the default (85C) would not.
+  await reading(master, state, start + 61_000, 77);
+  assert.equal(cpuWaiting(state), null, 'heat holds no launch (GY-3501)');
+  assert.equal(trialCapNow(state, 2), 1, 'the temporary heat limit halves the trial cap at 77C');
   const shown = await status(root, master, start);
   assert.deepEqual(shown.temporaryLimits.trialCap, { value: 2, until: iso(expiry) });
   assert.deepEqual(shown.temporaryLimits.launchHotCelsius, { value: 80, until: iso(expiry) });
 
-  // Past the expiry both revert to their defaults: the full cap of 4, and 80C no longer holds launches.
+  // Past the expiry both revert to their defaults: the full cap of 4, and 77C halves nothing.
   const later = expiry + 60_000, cool = emptyDaemonState(master);
-  await reading(master, state, later, 80);
-  assert.equal(cpuWaiting(state), null, 'the default heat limit applies again');
+  await reading(master, state, later, 77);
+  assert.equal(cpuWaiting(state), null);
+  assert.equal(trialCapNow(state, 4), 4, 'the default heat limit halves nothing at 77C');
   await reading(master, cool, later, 60);
   await yard.cycle(master, cool, later);
   await until(() => yard.launches.length >= 4, 'the default cap starts the other two');

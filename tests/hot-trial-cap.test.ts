@@ -14,7 +14,7 @@ import type { Work } from '../src/model.js';
 
 // GY-3401: on vishrog (24 cores, 99C) the GY-3373 guard stopped new launches but trials and
 // sessions already running kept the host at its limit. Now, while the CPU temperature the guard
-// reads sits at the trial halving limit (GY-3416: 5C under the launch limit), trials already
+// reads sits at the trial halving limit (GY-3416: 5C under the 85C heat limit), trials already
 // running finish, the merge writer starts no trial beyond half its cap, and the full cap returns
 // once the reading drops below it. Driven through the merge writer's own step over detached trial
 // runs (the fixture of merge-writer-refills-slots).
@@ -133,7 +133,7 @@ test(`${proof} — at the halving limit running trials finish, no trial starts b
   assert.deepEqual(world.launches, ['GY-1', 'GY-2', 'GY-3'], 'cool: three due heads start under the cap of 4');
   assert.deepEqual(state.cpuPressure?.trialCap, { now: 4, full: 4 });
 
-  // The sensor reaches the halving limit (GY-3416: 5C under the 85C launch limit) and three more heads are due.
+  // The sensor reaches the halving limit (GY-3416: 5C under the 85C heat limit) and three more heads are due.
   reading(state, world, trialHalfCelsius);
   world.submitted = 6;
   await cycle();
