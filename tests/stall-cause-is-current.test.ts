@@ -41,7 +41,7 @@ async function fixture() {
   state.launchBackoff['any:id-GY-3440'] = { failures: 1, reason: expiredError, until: at(start - 7 * 60 * minute) };
   const work: Work[] = [
     item('GY-3446', { stage: 'done', ready: false }),
-    item('GY-3440', { stage: 'review', ready: false, submission: { head: 'a'.repeat(40) }, sessions: [{ id: 'worker-a:1', kind: 'implementation', state: 'finished', principal: 'worker-a', host: 'stall-host', startedAt: at(start - 30 * minute), workTree: { at: at(start) } }] } as Partial<Work>),
+    item('GY-3440', { stage: 'review', ready: false, submission: { head: 'a'.repeat(40) }, sessions: [{ id: 'worker-a:1', kind: 'implementation', state: 'finished', principal: 'worker-a', host: 'stall-host', startedAt: at(start - 30 * minute), workTree: { at: at(start) } }] } as unknown as Partial<Work>),
     // Ready, claimable, but no worker account is free: launches are held by the credential probe.
     item('GY-3518'),
     // Ready, refused: its exclusive resource is held by an item in flight.
@@ -72,15 +72,17 @@ async function status(config: MasterConfig, state: DaemonState, work: Work[]) {
   return masterStatusReport(root, config, (async (path: string) => path === 'work-snapshot' ? { work, now: new Date().toISOString() } : { messages: [] }) as any, run);
 }
 
+const alarmOf = (state: DaemonState) => state.actions[stallAlarmKey]?.detail;
+
 for (const proof of ['integration:stall-cause-is-current', 'e2e:stall-cause-is-current'])
 test(`${proof} — a done item's launch failure and an expired back-off are deleted and never named; the alarm names each ready item's current gate`, async () => {
   const f = await fixture();
   await f.cycle();
   assert.deepEqual(f.state.launchBackoff, {}, 'the done item\'s entry and the expired entry are deleted the same cycle');
-  assert.equal(f.state.actions[stallAlarmKey], undefined, 'no alarm before 10 minutes pass');
+  assert.equal(alarmOf(f.state), undefined, 'no alarm before 10 minutes pass');
   f.advance(61);
   await f.cycle();
-  const alarm = f.state.actions[stallAlarmKey]?.detail ?? '';
+  const alarm = alarmOf(f.state) ?? '';
   assert.doesNotMatch(alarm, /done item failed|worktree|dispatch error/, 'neither old launch failure is a cause');
   assert.match(alarm, /Cause: GY-3518 waits: no free worker account/, 'the claimable item names the gate that refuses it');
   assert.match(alarm, /GY-3501 waits: exclusive resource e2e\/TIMINGS\.md is held by GY-3486/, 'the refused item names the resource and its holder');
