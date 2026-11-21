@@ -259,8 +259,8 @@ export function remoteShardSession(input: { root: string; sha: string; image: st
   };
 }
 
-/** One trial's shard record, for master status: wall time, shards run and run remotely, waits while a host idled, and each host's reading. */
-export interface RemoteShardRun { at: string; wallMs: number; shards: number; remote: number; queuedWhileIdle: number; host: string; celsius: number | null; hosts: { name: string; away: boolean; reason?: string; celsius: number | null; freeCores: number }[] }
+/** One trial's shard record, for master status: what ran them, wall time, shards run and run remotely, waits while a host idled, and each host's reading. */
+export interface RemoteShardRun { /** GY-3526: the worker verification that ran them; absent for a merge trial. */ label?: string; at: string; wallMs: number; shards: number; remote: number; queuedWhileIdle: number; host: string; celsius: number | null; hosts: { name: string; away: boolean; reason?: string; celsius: number | null; freeCores: number }[] }
 export const remoteShardRecordPath = (root: string) => join(root, '.graphyard', 'remote-shards.json');
 const keptRuns = 20;
 
@@ -288,6 +288,7 @@ export function remoteShardSummary(runs: readonly RemoteShardRun[]) {
     queuedWhileHostIdle: runs.reduce((sum, run) => sum + run.queuedWhileIdle, 0),
     peakCelsius: { host: latest.host, celsius: peaks.length ? Math.max(...peaks) : null },
     hosts: latest.hosts.map(host => ({ ...host, state: host.away ? 'away' : 'ready' })),
+    latest: { run: latest.label ?? 'merge trial', shards: latest.shards, remote: latest.remote },
   };
 }
 
