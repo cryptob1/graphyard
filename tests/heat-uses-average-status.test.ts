@@ -12,10 +12,10 @@ import { herdrSubcommand, isHerdrCommand } from '../src/master/herdr.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // e2e:heat-uses-average (GY-3532): two minutes of loop cycles over a fixture hwmon whose package
-// holds 91C leave master status showing the latest sample beside the 120 s mean, and the waiting
-// line names the mean and the limit.
+// holds 91C leave master status showing the latest sample beside the 120 s mean; since GY-3501 the
+// reading holds no launch.
 
-test('e2e:heat-uses-average — master status shows the latest CPU sample and the 120 s mean, and the waiting line names the mean', async () => {
+test('e2e:heat-uses-average — master status shows the latest CPU sample and the 120 s mean, and no launch waits on them', async () => {
   const sensors = await temporaryDirectory('heat-uses-average-hwmon');
   await mkdir(join(sensors, 'hwmon0'));
   await writeFile(join(sensors, 'hwmon0', 'name'), 'coretemp\n');
@@ -40,5 +40,5 @@ test('e2e:heat-uses-average — master status shows the latest CPU sample and th
   const report = await masterStatusReport(root, config, async path => { if (path === 'work-snapshot') return snapshot; throw Object.assign(new Error('absent'), { status: 404 }); }, run);
   assert.equal(report.cpuPressure?.latestCelsius, 92, 'master status shows the latest sample');
   assert.equal(report.cpuPressure?.meanCelsius, 91, 'and the 120 s mean');
-  assert.equal(report.cpuPressure?.waiting, 'launches waiting: CPU averages 91C over 2 min; limit 85C');
+  assert.equal(report.cpuPressure?.waiting, null, 'no launch waits on the heat');
 });

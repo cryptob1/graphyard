@@ -1,0 +1,14 @@
+{
+  "id": "gate-image-from-trialled-commit",
+  "title": "A batch gate builds the trial image from the commit it gates",
+  "description": "A fixture repository whose base commit's graphyard.trial.Dockerfile does not build gets a tip that repairs it; the gate's changed files do not name the file. With a stub docker first on PATH, the real batch-gate trial of the tip builds the tip's own Dockerfile, runs the preMerge check 'gofake verify' in that image and passes, instead of building the parent's broken copy and reporting a trial-host fault.",
+  "tags": ["trial", "batch-gate", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "a batch gate of a tip repairing a broken trial Dockerfile verifies the tip",
+    "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:gate-image-from-trialled-commit tests/repository-trial-image.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

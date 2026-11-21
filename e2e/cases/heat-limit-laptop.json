@@ -1,20 +1,20 @@
 {
   "id": "heat-limit-laptop",
-  "title": "A hot laptop throttles: master status and Workers show the reading, the halved trial cap and launches waiting",
-  "description": "GY-3416: with a fixture hwmon reporting package 95C and core 96C against a 105C critical — a reading the guard once compared to its own crit-3 (102C) and never held — the limit is min(85C, crit-3): master status carries the hottest package or core sensor (96C), the trial cap halved from 4 to 2 and one launches-waiting line, and the Workers page shows the same three beside the sessions.",
+  "title": "A hot laptop throttles: master status and Workers show the reading and the halved trial cap",
+  "description": "GY-3416: with a fixture hwmon reporting package 95C and core 96C against a 105C critical — a reading the guard once compared to its own crit-3 (102C) and never held — the limit is min(85C, crit-3): master status carries the hottest package or core sensor (96C) and the trial cap halved from 4 to 2, holding no launch since GY-3501, and the Workers page shows the same two beside the sessions.",
   "tags": ["dispatch", "dashboard"],
   "target": "any",
   "required": false,
   "steps": [
     {
       "kind": "command",
-      "name": "master status shows the hot reading, the halved trial cap and launches waiting",
+      "name": "master status shows the hot reading and the halved trial cap",
       "run": "node --import tsx tests/helpers/run-tests.ts tests/heat-limit-laptop.test.ts",
       "timeoutSeconds": 300
     },
     {
       "kind": "command",
-      "name": "the hot reading, halved trial cap and launches waiting on the served Workers page",
+      "name": "the hot reading and halved trial cap on the served Workers page",
       "run": "npm run test:browser -- browser-tests/workers-heat-limit.spec.ts",
       "timeoutSeconds": 420
     }

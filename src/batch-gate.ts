@@ -307,8 +307,9 @@ function gatedCases(flight: GateRecord['inFlight']): Record<string, 'pass' | 'fa
  * tip: merges that landed meanwhile ride the next batch.
  */
 export function runGate(ports: GatePorts, record: GateRecord): Promise<GateOutcome> {
-  // A settled gate frees its batch; one that threw leaves it standing for the next loop to adopt.
-  // Either way the run's outcome is the record's last (GY-3141), so status names why it ended.
+  // A settled gate frees its batch, and so does one that threw (GY-3567): the next cycle cuts a fresh
+  // batch from main with a fresh run. The run's outcome is the record's last (GY-3141). A loop stop
+  // writes nothing, so a restart still adopts the batch as last checkpointed.
   const finishedAt = () => new Date(ports.now()).toISOString();
   return gateFlight(ports, record).then(
     outcome => {
@@ -319,6 +320,7 @@ export function runGate(ports: GatePorts, record: GateRecord): Promise<GateOutco
     },
     error => {
       record.lastOutcome = { tip: record.inFlight?.tip ?? null, outcome: 'error', reason: error instanceof Error ? error.message : String(error), finishedAt: finishedAt() };
+      record.inFlight = null;
       throw error;
     });
 }

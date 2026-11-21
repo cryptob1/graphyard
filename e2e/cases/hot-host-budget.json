@@ -1,7 +1,7 @@
 {
   "id": "hot-host-budget",
   "title": "Hot host: master status and the Workers page show each session's test budget and the halved trial cap",
-  "description": "With a CPU sensor at 96C (well over the launch guard's 85C limit) and three sessions running, one loop cycle records the test parallelism a session launched now gets, floor(cores / running sessions) and never below 2, and the merge writer's trial cap halved from 4 to 2. Master status shows both, and the Workers page shows them beside CPU pressure and temperature at 1280 px and 390 px.",
+  "description": "With a CPU sensor at 96C (well over the trial cap's 85C halving limit) and three sessions running, one loop cycle records the test parallelism a session launched now gets, floor(cores / running sessions) and never below 2, and the merge writer's trial cap halved from 4 to 2. Master status shows both, and the Workers page shows them beside CPU pressure and temperature at 1280 px and 390 px.",
   "tags": ["dispatch", "dashboard"],
   "target": "any",
   "required": false,

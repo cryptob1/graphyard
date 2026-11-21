@@ -1,0 +1,15 @@
+{
+  "id": "gate-filing-repository-catalog",
+  "title": "A gate filing in a managed repository binds that repository's own E2E case",
+  "description": "Runs the real batch gate over a managed repository whose catalog holds one case: a test check and the catalog case both fail as known reds, and each filing binds a case that repository can hold — the failing case itself, or a new case named like the pinning proof — so create's E2E rule accepts it there.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "known reds the gate files in a managed repository pass create's E2E rule",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:gate-filing-repository-catalog tests/gate-filing-repository-catalog.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

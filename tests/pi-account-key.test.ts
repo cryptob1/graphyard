@@ -175,7 +175,7 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
       /No healthy agent account for producer.*pi-a is not logged in: No API key found for zai\./s);
     assert.deepEqual((await pi.runs()).map(entry => entry.smoke), [true], 'the smoke test ran, and no session was chosen');
     const account = registry.current().accounts[0];
-    assert.equal(account.quota.state, 'exhausted'); assert.equal(account.quota.reason, 'No API key found for zai. Use /login to log into a provider.', 'Pi\'s own error, on one line');
+    assert.equal(account.quota.state, 'broken'); assert.equal(account.quota.reason, 'No API key found for zai. Use /login to log into a provider.', 'Pi\'s own error, on one line');
     assert.equal(registry.current().sessions.length, 0, 'no session was selected on the account');
     assert.match(fleetView(registry.current(), Date.now()).accounts[0].ineligible!, /is not logged in: No API key found for zai/);
 
@@ -205,7 +205,7 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
   const chosen = await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: alone.client, quota: false, cacheMs: 0, smoke: async account => { tested.push(account.name); return account.name === 'pi-x' ? { ok: false, error: '401 invalid api key' } : { ok: true, error: null }; } });
   assert.deepEqual(tested.sort(), ['pi-x', 'pi-y']);
   assert.equal(chosen?.account.name, 'pi-y', 'the account that failed is passed over for the next');
-  assert.match(chosen!.skipped[0].reason, /pi-x quota is exhausted.*401 invalid api key/);
+  assert.match(chosen!.skipped[0].reason, /pi-x is broken.*401 invalid api key/);
 
   // Concurrent launches that each read the registry before the first result is folded share one
   // smoke test of the untested account and report the same result (GY-463).
@@ -282,9 +282,9 @@ test('unit:account-smoke-gate — a failed smoke test is retested once its delay
   piFleet(registry, config.hostId, [{ name: 'pi-r', home: await piHome('pi-r', null) }]);
   let outage = true;
   const tested: number[] = [], smoke = async () => { tested.push(1); return outage ? { ok: false, error: '503 provider unavailable' } : { ok: true, error: null }; };
-  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /pi-r quota is exhausted.*503 provider unavailable/);
+  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /pi-r is broken.*503 provider unavailable/);
   outage = false;
-  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /quota is exhausted/, 'within the delay the failure stands untested');
+  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /is broken/, 'within the delay the failure stands untested');
   assert.equal(tested.length, 1);
   const later = Date.now() + smokeRetestMs + 1_000;
   const chosen = await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke, now: () => later });
@@ -314,8 +314,8 @@ test('unit:account-smoke-gate — the producer preflight reads an expired smoke 
   const smoke = async () => (outage ? { ok: false, error: '503 provider unavailable' } : { ok: true, error: null });
   // The first launch fails the smoke test, and the failure folds into the registry.
   await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }),
-    /pi-p quota is exhausted.*503 provider unavailable/);
-  assert.equal(registry.current().accounts[0].quota.state, 'exhausted');
+    /pi-p is broken.*503 provider unavailable/);
+  assert.equal(registry.current().accounts[0].quota.state, 'broken');
   // The dispatch's preflight is what kept the role shut: inspectProfileAccounts reads
   // fleetRoleHealth before any launch, so with the failure fresh every profile of the role reads
   // unavailable — no launch, and the retest selectFleetSession runs never fires.
@@ -323,8 +323,8 @@ test('unit:account-smoke-gate — the producer preflight reads an expired smoke 
   const preflight = (now?: () => number): FleetProbe => ({ registry: registry.client, quota: false, cacheMs: 0, smoke, ...(now ? { now } : {}) });
   const fresh = await inspectProfileAccounts(config, 'producer', [{ name: 'producer-profile' }], health, preflight());
   assert.equal(fresh['producer-profile'].available, false);
-  assert.match(fresh['producer-profile'].reason!, /pi-p quota is exhausted.*503 provider unavailable/);
-  assert.match((chooseSession(registry.current(), { role: 'producer', host: config.hostId }, Date.now()) as { reason: string }).reason, /quota is exhausted/);
+  assert.match(fresh['producer-profile'].reason!, /pi-p is broken.*503 provider unavailable/);
+  assert.match((chooseSession(registry.current(), { role: 'producer', host: config.hostId }, Date.now()) as { reason: string }).reason, /is broken/);
   // Once the failure has aged past the delay the preflight admits a launch again — the launch is
   // what runs the retest — while the choice itself still refuses until a fresh pass is folded.
   const later = Date.now() + smokeRetestMs + 1_000;

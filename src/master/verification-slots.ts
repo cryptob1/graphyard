@@ -428,6 +428,26 @@ export async function withHeavyJob<T>(label: string, job: () => Promise<T>, opti
 }
 
 /**
+ * GY-3526: one heavy job made of parts that run now and then, several at once — a worker check's
+ * shards on this machine. One slot covers every part running: the first to start takes it, the
+ * last to end gives it back, and while no part runs on this machine the job holds none.
+ */
+export function sharedHeavyJob(label: string, options: Parameters<typeof withHeavyJob>[2] = {}) {
+  type Held = { release: () => void; inherited?: Record<string, string> };
+  let parts = 0, slot: Promise<Held> | null = null;
+  return async <T>(part: () => Promise<T>): Promise<T> => {
+    parts++;
+    try {
+      // A part's children carry the slot's mark as a whole held job's do, so a suite inside takes no second slot.
+      const { inherited } = await (slot ??= new Promise<Held>((taken, failed) => { withHeavyJob(label, () => new Promise<void>(release => taken({ release, inherited: inheritedVariables.getStore() })), options).catch(failed); }));
+      return await (inherited ? inheritedVariables.run(inherited, part) : part());
+    } finally {
+      if (--parts === 0 && slot) { const held = slot; slot = null; (await held.catch(() => null))?.release(); }
+    }
+  };
+}
+
+/**
  * Whether a command is a heavy job: a package manager's whole `test` script, no files or arguments
  * selecting part of it (GY-3447: builds, type checks and selected tests run at once; any test script under a strict cap). A checkout that
  * carries Graphyard's own runner (tests/helpers/run-tests.ts) is left to it: the runner takes the slot.

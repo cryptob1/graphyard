@@ -236,6 +236,7 @@ test('unit:accounts-page-groups-by-plan — accounts that draw on one plan are g
     usage: [{ window: '5h', percent: 100, resetsAt: iso(hour) }],
     resetsAt: iso(hour),
     reason: '5h token limit reached',
+    since: iso(-minute),
   }, { actor: 'coordinator', at: iso(-minute) });
 
   const piIneligibility = accountIneligibility(initial, piAccount, now, HOST);
