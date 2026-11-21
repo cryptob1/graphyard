@@ -225,20 +225,26 @@ test('invalid login remains on login; whitespace is trimmed and loading never cl
   await expect(page.getByRole('main').locator('.top-bar .project-name').getByText('fixture/repository', { exact: true })).toBeVisible();
 });
 
+// GY-3468: each change of connection is seen on the dashboard's next 5 s poll. Waiting those polls out
+// in real time took 20-27 s of the 30 s budget under gate load and failed 6 of 48; the page clock
+// jumps past the poll interval instead, so the next read starts at once. A loaded host still takes
+// seconds to answer that read and render it, so each wait allows the settled 15 s.
+const nextPoll = (page: Page) => page.clock.runFor(5000), settled = { timeout: 15_000 };
 test('connection loss labels stale data, recovers, and revoked sessions clear the dashboard', async ({ page }) => {
+  await page.clock.install();
   const state = await fixture(page); await login(page);
   const connection = page.locator('.sidebar .connection');
-  await expect(connection).toHaveText('Live');
+  await expect(connection).toHaveText('Live', settled);
   await expect(connection).toHaveAttribute('title', /^Last update /);
-  state.offline = true;
-  await expect(connection).toHaveText('Offline · retrying', { timeout: 10000 });
+  state.offline = true; await nextPoll(page);
+  await expect(connection).toHaveText('Offline · retrying', settled);
   await expect(page.getByRole('alert')).toContainText('stale');
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toBeVisible();
-  state.offline = false;
-  await expect(connection).toHaveText('Live', { timeout: 10000 });
+  state.offline = false; await nextPoll(page);
+  await expect(connection).toHaveText('Live', settled);
   await expect(page.getByRole('alert')).toHaveCount(0);
-  state.unauthorized = true;
-  await expect(page.getByLabel('Access token')).toBeVisible({ timeout: 10000 });
+  state.unauthorized = true; await nextPoll(page);
+  await expect(page.getByLabel('Access token')).toBeVisible(settled);
   await expect(page.getByRole('heading', { name: 'Browser fixture' })).toHaveCount(0);
 });
 

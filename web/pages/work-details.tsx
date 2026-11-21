@@ -299,7 +299,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         {(item.warnings ?? []).map(warning => <p className="amber" key={warning}>{warning}</p>)}
         {item.criteria.map(ac => { const own = proofs.filter(p => p.criterion === ac.id); const met = own.length > 0 && own.every(p => p.status === 'passed');
           return <div className={`criterion ${met ? 'criterion-met' : 'criterion-pending'}`} key={ac.id}>
-            <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="mono">{ac.id}</span> <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></summary><p>{ac.text}</p></details>
+            <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="criterion-line"><span className="mono">{ac.id}</span> · <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></span></summary><p>{ac.text}</p></details>
             <ul className="proof-markers">{own.map(p => <li key={p.proof} className={`marker-${marker[p.status]?.tone ?? 'pending'}`}>{marker[p.status]?.symbol ?? '○'} <Term term="proof">{p.proof}</Term> {marker[p.status]?.word ?? p.status}</li>)}</ul></div>; })}</section>
     </details>
     {item.preview && <PreviewPanel preview={item.preview}/>}
