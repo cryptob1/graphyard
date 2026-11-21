@@ -13,6 +13,7 @@ import { workerVerificationPump } from '../src/daemon/worker-verification.js';
 import { runWorkerVerification } from '../src/merge-writer/worker-verification.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { completeCommand } from '../src/cli/complete.js';
+import { requestWorkerVerification } from '../src/cli/worker-verification.js';
 import type { CliContext } from '../src/cli/context.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 
@@ -68,7 +69,7 @@ test('integration:restart-required', () => assert.equal(answer, 42));
     if (!response.ok) throw new Error(`${response.status}: ${JSON.stringify(result)}`);
     return result;
   };
-  const start = () => api(`work/${work.id}/worker-verification`, { head, epoch: 1, mode: 'complete' }, worker.token).then(value => ({ value, error: null }), error => ({ value: null, error }));
+  const start = () => api(`work/${work.id}/worker-verification`, { head, epoch: 1, mode: 'verify' }, worker.token).then(value => ({ value, error: null }), error => ({ value: null, error }));
   const pending = async (token = host.token) => (await api('work-snapshot', undefined, token)).workerVerifications;
   const result = { record: { key: work.key, head, clean: true, at: new Date().toISOString(), ran: [], outstanding: [] }, rerun: { flaked: [], baseFailures: [] } };
   return { root, git, head, work, store, api, start, pending, result, worker, host, peer, master };
@@ -88,7 +89,7 @@ test('integration:verification-survives-loop-restart — a restarted pump reject
   const restarted = workerVerificationPump(f.root, () => 'test', f.api, () => f.root);
   await restarted();
   const interrupted = await abandoned;
-  assert.match(String(interrupted.error), /409.*restart.*retry complete/);
+  assert.match(String(interrupted.error), /409.*restart.*retry verify/);
   assert.match(String(interrupted.error), new RegExp(f.head));
   assert.equal((await f.store.events(f.work.id)).filter(event => event.kind === 'work.self-verified').length, 0);
   const retry = f.start();
@@ -129,14 +130,14 @@ test('integration:verification-coordinator-status — master and coordinator see
   assert.deepEqual(await f.pending(), []);
 });
 
-test('e2e:verification-survives-loop-restart — complete retries its preserved head through real validation and leaves independent gates intact', { timeout: 180_000 }, async t => {
+test('e2e:verification-survives-loop-restart — optional verify retries its preserved head through real validation, then complete submits and leaves independent gates intact', { timeout: 180_000 }, async t => {
   const f = await fixture(t);
   const printed: any[] = [];
   const context = { args: ['1', '--head', f.head], repositoryRoot: () => f.root,
     api: (path: string, body?: unknown) => f.api(path, body, f.worker.token), print: (value: any) => printed.push(value) } as unknown as CliContext;
-  const startComplete = () => completeCommand.run(context, f.work).then(() => null, error => error);
+  const startComplete = () => requestWorkerVerification(context, f.work, { mode: 'verify', head: f.head, epoch: 1 }).then(() => null, error => error);
   const abandoned = startComplete();
-  await until(async () => (await f.pending()).length === 1, 'complete queued');
+  await until(async () => (await f.pending()).length === 1, 'verify queued');
   const [old] = await f.api('worker-verifications/take', { host: 'test' });
   let executions = 0;
   const restarted = workerVerificationPump(f.root, () => 'test', f.api, () => f.root, undefined, async (...args) => {
@@ -144,7 +145,7 @@ test('e2e:verification-survives-loop-restart — complete retries its preserved 
     return runWorkerVerification(...args);
   });
   await restarted();
-  assert.match(String(await abandoned), /restart.*retry complete/);
+  assert.match(String(await abandoned), /restart.*retry verify/);
   assert.equal(f.git('rev-parse', 'HEAD'), f.head);
   const completed = startComplete();
   await until(async () => (await f.pending()).length === 1, 'retry queued');
@@ -153,6 +154,7 @@ test('e2e:verification-survives-loop-restart — complete retries its preserved 
   const completionError = await completed;
   if (completionError) throw completionError;
   assert.equal(executions, 1);
+  await completeCommand.run(context, f.work);
   const recorded = (await f.store.list()).find(work => work.id === f.work.id)!;
   assert.equal(recorded.candidate?.sha, f.head); assert.equal(recorded.submission?.epoch, 1);
   assert.equal(recorded.lease, null); assert.equal(recorded.pipeline?.attempts.length, 1);
