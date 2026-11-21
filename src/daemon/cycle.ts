@@ -14,7 +14,7 @@ import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { checkoutTrustLine, type CheckoutTrustFleet } from '../harness.js';
 import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
-import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
+import { dispatchSort, inPipeline, resourceConflicts, sharedResources } from '../coordination.js';
 import { capacityRefusal } from '../fleet.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterCauses, masterCausePrompt, messageCauses } from './master-stalled-delivery.js';
@@ -792,7 +792,7 @@ async function dispatchStep(cycle: Cycle) {
  */
 async function releaseBacklog(cycle: Cycle, allowed: number) {
   const { config, effects, snapshot, clock } = cycle;
-  let slots = allowed - snapshot.work.filter(item => item.stage !== 'done' && (item.ready || inFlight(item, clock))).length;
+  let slots = allowed - snapshot.work.filter(item => inPipeline(item, snapshot.work, clock)).length;
   const identity = config.operatorAgent ? { id: config.operatorAgent.id, role: 'operator-agent' as const } : undefined;
   const candidates = snapshot.work
     .filter(item => item.criteria.length > 0 && item.stage !== 'done' && !item.ready && !item.hold && !item.blocker && !loopOwnedRefusal(item) && !ownerHoldRefusal(item, identity)
@@ -803,19 +803,19 @@ async function releaseBacklog(cycle: Cycle, allowed: number) {
     if (slots <= 0 && !item.yardRepair) continue;
     // An item sharing an exclusive resource with one in flight or released waits until that one lands.
     if (resourceConflicts(item, snapshot.work, clock).length || snapshot.work.some(other => other.id !== item.id && other.stage !== 'done' && other.ready && sharedResources(item, other).length)) continue;
-    const key = `release:${item.id}:${item.revision}`, inPipeline = snapshot.work.filter(entry => entry.stage !== 'done' && (entry.ready || inFlight(entry, clock))).length;
+    const key = `release:${item.id}:${item.revision}`, filled = snapshot.work.filter(entry => inPipeline(entry, snapshot.work, clock)).length;
     try {
       const overCap = !!item.yardRepair && slots <= 0;
       const reason = overCap
-        ? `${item.key} is a yard repair, so the loop releases it past the pipeline cap: ${inPipeline} item(s) in flight of concurrency ${allowed} and every dependency of ${item.key} is done`
-        : `The loop keeps the pipeline full: ${inPipeline} item(s) in flight of concurrency ${allowed}, every dependency of ${item.key} is done, and backlog means work this next`;
+        ? `${item.key} is a yard repair, so the loop releases it past the pipeline cap: ${filled} item(s) in flight of concurrency ${allowed} and every dependency of ${item.key} is done`
+        : `The loop keeps the pipeline full: ${filled} item(s) in flight of concurrency ${allowed}, every dependency of ${item.key} is done, and backlog means work this next`;
       const released = await effects.release!(item, reason) as Work | undefined;
       const index = snapshot.work.findIndex(entry => entry.id === item.id);
       if (index >= 0 && released && typeof released === 'object' && 'ready' in released) snapshot.work[index] = released;
       if (!item.yardRepair) slots -= 1;
       await note(cycle, key, 'judgement', item.key, 'done', overCap
-        ? `Released yard repair ${item.key} past the pipeline cap: ${inPipeline} item(s) in flight of concurrency ${allowed} and every dependency is done`
-        : `Released ${item.key} to keep the pipeline full: ${inPipeline} item(s) in flight of concurrency ${allowed} and every dependency is done`, config.operatorAgent?.id ?? null);
+        ? `Released yard repair ${item.key} past the pipeline cap: ${filled} item(s) in flight of concurrency ${allowed} and every dependency is done`
+        : `Released ${item.key} to keep the pipeline full: ${filled} item(s) in flight of concurrency ${allowed} and every dependency is done`, config.operatorAgent?.id ?? null);
     }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not release ${item.key} from backlog: ${message(error)}`, config.operatorAgent?.id ?? null); }
   }

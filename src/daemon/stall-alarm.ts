@@ -83,7 +83,7 @@ export function stallAlarm(readings: StallReadings): string | null {
   if (stalled)
     lines.push(`${ready.length} ready item(s) (${ready.slice(0, 5).map(item => item.key).join(', ')}) and ${freeSlots} free worker slot(s), but no launch since ${iso(since)}. Cause: ${stallCauses(readings).join('; ')}`);
   const merging = new Set([...state.mergeWriter.queue.map(entry => entry.key), ...(state.mergeWriter.inFlights ?? []).map(entry => entry.key), ...(state.mergeWriter.inFlight ? [state.mergeWriter.inFlight.key] : [])]);
-  const idle = open.filter(item => item.ready && item.stage !== 'done' && !item.blocker && !item.hold && !parkedOnHuman(item) && !live(item, now) && !merging.has(item.key)
+  const idle = open.filter(item => item.ready && item.stage !== 'done' && !item.blocker && !item.hold && !parkedOnHuman(item) && !item.dependencies.some(id => open.some(other => other.id === id)) && !live(item, now) && !merging.has(item.key)
     && !(stalled && ready.includes(item)) && now - Date.parse(item.updatedAt) >= noActorMs);
   for (const item of idle.slice(0, 5)) lines.push(item.stage === 'ready' && readings.gates?.get(item.key) || `${item.key} has no actor: at ${item.stage} with no lease and no session, unchanged since ${item.updatedAt}`);
   return lines.length ? `Stall: ${lines.join(' ')}` : null;

@@ -6,6 +6,7 @@ import { observationWindowHold, type Stage, type Work } from './work.js';
 import { loopObservationProofs } from './loop-observation.js';
 import { pathScopesOverlap } from './documentation-glob.js';
 import { loopOwned } from './loop-owned.js';
+import { parkedOnHuman } from './human-request.js';
 import { behindBaseHold } from './behind-base.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from './base-refresh.js';
 
@@ -54,6 +55,15 @@ const claimedNow = (work: Work, now: number) => !!work.lease && Date.parse(work.
  * worker, ordered by `dispatchOrder`, like a ready item.
  */
 export const inFlight = (work: Work, now: number) => work.stage !== 'done' && (claimedNow(work, now) || !!work.submission && !work.reworkRequested);
+/**
+ * GY-3503: what holds an item off the pipeline, as assertDispatchable refuses it — an unanswered
+ * human request or an unfinished dependency. Such an item fills no concurrency slot and raises no stall.
+ */
+export const waitsOffPipeline = (work: Work, all: readonly Work[]) =>
+  parkedOnHuman(work) || work.dependencies.some(id => all.find(item => item.id === id)?.stage !== 'done');
+/** In the pipeline: in flight, or released and not held off it (`waitsOffPipeline`). */
+export const inPipeline = (work: Work, all: readonly Work[], now: number) =>
+  work.stage !== 'done' && (inFlight(work, now) || work.ready && !waitsOffPipeline(work, all));
 /** The paths an item is judged on for overlap reporting: the files its candidate was observed to change. */
 export function exclusionPaths(work: Work): string[] {
   return work.candidate ? [...new Set(work.observation?.files ?? [])] : [];
