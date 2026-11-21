@@ -1,13 +1,13 @@
 // Deployment artifacts stay at their original paths for processes that already loaded them.
 // Only current moves; neither the source tree nor node_modules of a published CLI is rebuilt.
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
-import { copyFile, mkdir, readFile, readdir, readlink, rename, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, readlink, rename, stat, symlink, unlink } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import { directoryBytes } from '../daemon/leftovers.js';
 import { livePaths } from '../session-processes.js';
 import { cliCommit } from '../protocol-version.js';
-import { recordedCommit, releaseIdentityPath } from '../release.js';
+import { recordCommit, recordedCommit } from '../release.js';
 
 // GY-3214: the paths and the create-once step live in plain JavaScript, which the published npm package runs before any dependency is installed.
 import { cliReleasePath, currentCliPath, installLauncherPath, prepareCliRelease } from '../../bin/cli-release.mjs';
@@ -145,7 +145,7 @@ export async function sweepCliReleases(directory: string, run: ChildRun, procRoo
 export function servedCliRelease(directory: string) {
   let root: string;
   try { root = realpathSync(currentCliPath(directory)); } catch { return null; }
-  const commit = cliCommit(root) ?? (/^[0-9a-f]{40}$/i.test(basename(root)) ? basename(root).toLowerCase() : null);
+  const commit = cliCommit(root) ?? recordedCommit(root) ?? (/^[0-9a-f]{40}$/i.test(basename(root)) ? basename(root).toLowerCase() : null);
   return commit ? { root, commit } : null;
 }
 
@@ -157,8 +157,5 @@ export function servedCliRelease(directory: string) {
 export async function repairCliStamp(directory: string) {
   const served = servedCliRelease(directory), was = served && recordedCommit(served.root);
   if (!served || was === served.commit) return null;
-  const file = releaseIdentityPath(served.root);
-  await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, served.commit);
-  return { file, commit: served.commit, was };
+  return { file: recordCommit(served.root, served.commit), commit: served.commit, was };
 }
