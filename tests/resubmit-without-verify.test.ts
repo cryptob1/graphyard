@@ -13,6 +13,7 @@ import { emptyDaemonState } from '../src/daemon/state.js';
 import { daemonEffects, type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema } from '../src/master.js';
 import { acquireVerificationSlot, heldSlots, setStrictCap, slotsDirectoryVariable } from '../src/master/verification-slots.js';
+import { trialHotCelsius } from '../src/merge-writer/trial-load.js';
 import type { Principal, Work } from '../src/model.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -53,10 +54,14 @@ test(`${proof} — with every heavy-job slot held, the loop submits a recorded f
   work = await engine.execute(operator, 'unblock', work.id, { reason: 'the trial host is repaired' }, randomUUID());
 
   // Every heavy-job slot on this host is held by another project's job.
-  const slots = join(base, 'heavy-jobs'), saved = process.env[slotsDirectoryVariable];
+  // GY-3585: the sensor this fixture reads is its own and reads hot, as the host's did when the test failed.
+  const slots = join(base, 'heavy-jobs'), hwmon = join(base, 'hwmon'), saved = process.env[slotsDirectoryVariable];
+  await mkdir(join(hwmon, 'hwmon0'), { recursive: true });
+  await writeFile(join(hwmon, 'hwmon0', 'name'), 'k10temp\n'); await writeFile(join(hwmon, 'hwmon0', 'temp1_input'), `${trialHotCelsius * 1000}\n`);
   process.env[slotsDirectoryVariable] = slots;
+  // The other job holds its slot before the cap stands: a strict cap starts nothing on a hot CPU, this fixture included.
+  const other = await acquireVerificationSlot({ directory: slots, label: 'merge trial (other project)', project: 'other', hwmon });
   setStrictCap(slots, { value: 1, until: new Date(Date.now() + 3_600_000).toISOString() }, 'test');
-  const other = await acquireVerificationSlot({ directory: slots, label: 'merge trial (other project)', project: 'other' });
   t.after(() => { other.release(); if (saved === undefined) delete process.env[slotsDirectoryVariable]; else process.env[slotsDirectoryVariable] = saved; });
 
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', repository: 'owner/project',
