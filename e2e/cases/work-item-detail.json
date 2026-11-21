@@ -1,7 +1,7 @@
 {
   "id": "work-item-detail",
   "title": "An item's detail page shows its criteria",
-  "description": "GET /api/work/ID \u2014 the read the item's dashboard page is built on \u2014 answers the item with its criteria, proofs and gates by id and by key, and opening the item from the Work view in the dashboard shows its criterion.",
+  "description": "GET /api/work/ID \u2014 the read the item's dashboard page is built on \u2014 answers the item with its criteria, proofs and gates by id and by key, and opening the item from the Work view in the dashboard shows its criterion by id and text.",
   "tags": [
     "api",
     "dashboard",
@@ -122,8 +122,9 @@
     },
     {
       "kind": "browser",
+      "name": "the criterion shows with its id, so an operator can follow each criterion's repair (GY-3551)",
       "action": "expectText",
-      "text": "The detail page shows this criterion"
+      "text": "AC-1 \u00b7 The detail page shows this criterion"
     }
   ]
 }
