@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type CliCommand } from './registry.js';
@@ -179,7 +180,8 @@ export async function rerunTrialFiles(root: string, files: readonly string[], ru
     // /var/tmp is durable scratch available to confined workers. Keep it short and outside
     // the checkout: fixture sockets have a pathname bound and upward lookups must stay clean.
     // The operator HOME stays read-only, including for runners that relocate tmpfs beneath HOME.
-    scratch = await mkdtemp('/var/tmp/gy-r');
+    // A remote shard's container has a read-only root with only /tmp and /run writable (GY-3577).
+    scratch = await mkdtemp('/var/tmp/gy-r').catch(() => mkdtemp(join(tmpdir(), 'gy-r')));
     const home = join(scratch, 'home'), temporary = join(scratch, 'tmp');
     await mkdir(home); await mkdir(temporary); await chmod(temporary, trialTemporaryMode);
     // A NODE_TEST_CONTEXT inherited from an enclosing test run suppresses the child's runner.
@@ -297,7 +299,11 @@ const rerunNote = (reason: string, output: string): RerunNote => ({ note: `pre-s
 const judged = (rerun: { ok: boolean; output: string; timedOut?: true }, files: readonly string[], what: string): { cases: RerunCase[]; note?: RerunNote } => {
   if (rerun.timedOut) return { cases: [], note: rerunNote(`${what} exceeded ${boundText(rerunBound.ms)} and was killed`, rerun.output) };
   const cases = rerunFailingCases(rerun.output, files);
-  if (!rerun.ok && !cases.length) return { cases: [], note: rerunNote(`${what} failed without naming a failing case`, rerun.output) };
+  if (!rerun.ok && !cases.length) {
+    // GY-3577: a run that never started says why — the spawn error, else the output's first error line.
+    const why = rerun.output.split('\n').map(line => line.trim()).find(line => /error/i.test(line) || /\bE[A-Z]{4,}\b/.test(line));
+    return { cases: [], note: rerunNote(`${what} failed without naming a failing case${why ? `: ${why}` : ''}`, rerun.output) };
+  }
   return { cases };
 };
 
