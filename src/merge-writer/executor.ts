@@ -499,6 +499,7 @@ export interface MergeTrialInput extends RunTrialInput {
    */
   discoverProofFiles?: (options: { timeoutMs?: number }) => Promise<readonly string[]>;
 }
+const tapReporter = ['--test-reporter=tap', '--test-reporter-destination=stdout'];
 const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => /^tests\/[\w./-]+\.test\.ts$/.test(line));
 const childOutput = (error: unknown) => { const failed = error as { stdout?: unknown; stderr?: unknown }; return `${typeof failed.stdout === 'string' ? failed.stdout : ''}${typeof failed.stderr === 'string' ? failed.stderr : ''}`; };
 
@@ -537,11 +538,9 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
     try { const out = String(await invoke()); if (own === epoch) tap += `${out}\n`; return out; }
     catch (error) { if (own === epoch) tap += `${childOutput(error)}\n`; throw error; }
   };
+  // GY-3517: every test shard carries the TAP reporter, so a shard a compute host ran (its argv inside the `sh -c` that sends it there) is counted too.
   const run: ChildRun = async (command, args, options) => {
-    const at = args.indexOf('--files-from');
-    if (at >= 0) {
-      return capture(() => inner(command, [...args.slice(0, at), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at)], options));
-    }
+    if (args.some(arg => arg.includes(tapReporter[0]))) return capture(() => inner(command, args, options));
     // GY-2960: a repository check's npm test/typecheck output is the TAP the base-failure attribution reads for cases.
     if (command === 'npm' && (args[0] === 'test' || (args[0] === 'run' && (args[1] === 'test' || args[1] === 'typecheck')))) {
       return capture(() => inner(command, args, options));
@@ -558,7 +557,7 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   }));
   let verdict: TrialRun, leftover: string | undefined;
   const onAttempt = (index: number) => { epoch++; tap = ''; byRunner = {}; files = []; input.onAttempt?.(index); };
-  try { verdict = await runTrial({ ...input, run, selectFiles, onAttempt, countProofs }); }
+  try { verdict = await runTrial({ ...input, run, selectFiles, onAttempt, countProofs, testArgs: tapReporter }); }
   catch (error) {
     // A checkout that would not go is reported beside the verdict it reached, not in place of it.
     if (error instanceof TrialCleanupError && error.verdict) { verdict = error.verdict; leftover = error.message; }
@@ -572,7 +571,7 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   // A rerun's attempts start their TAP afresh like the trial's, so each run reads only its own answering attempt.
   const rerunAttempt = () => { epoch++; tap = ''; byRunner = {}; };
   // A rerun of failing test files (or a run on the base tip) re-runs no E2E case: the head's bound cases were judged by the first attempt, whose counts stand.
-  const rerunInput = { ...input, e2eProofs: [] as const };
+  const rerunInput = { ...input, e2eProofs: [] as const, testArgs: tapReporter };
   // Only the run on the base tip reads counts: attribution reads failing files, so it spends no runner's time.
   const retest = async (sha: string, failing: string[], e2eProofs: readonly string[] = [], counting?: 'count', e2eFrom?: string) => {
     only = failing;

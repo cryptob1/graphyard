@@ -749,6 +749,8 @@ export interface RunTrialInput {
   e2eOrigins?: Record<string, string>;
   /** GY-3170: called once the repository's checks have answered, whatever they said, with the checkout still in place, so a caller can count proofs with the repository's own runner. */
   countProofs?: (checkout: { root: string; scratch: string; runner: (command: string, args: string[]) => Promise<unknown>; git: ChildRun }) => Promise<void>;
+  /** GY-3517: runner options every test shard carries, on this machine and on a compute host alike (the merge writer's TAP reporter). */
+  testArgs?: readonly string[];
   /** GY-2997: paths every child that runs the merge's code — install, build, tests, the E2E serve — must not read (`trialHiddenPaths`); they run under `trialConfinement`. */
   hidden?: readonly string[];
   /** GY-3209: starts a check's declared Compose services; `startCheckServices` unless a test injects a fake. */
@@ -1459,7 +1461,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const group = shards[index]!, entries: string[] = [];
       try {
         const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
-        const argv = (list: string, records: string) => [...check.argv.slice(1), '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'];
+        const argv = (list: string, records: string) => [...check.argv.slice(1), ...(input.testArgs ?? []), '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'];
         const shardAt = now();
         let tests: Ended, recordText: string;
         try {
