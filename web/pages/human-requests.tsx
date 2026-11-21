@@ -6,6 +6,7 @@ import { answerableHumanProof } from '../../src/model/human-proof';
 import { humanAsk } from '../../src/model/human-ask';
 import type { Dashboard } from './dashboard';
 import { EmptyState, PageHeader } from '../components/page-layout';
+import { hostsNeedingUpdate, hostUpdateCommand } from '../components/top-bar';
 
 /**
  * What waits on the human, and nothing else: every action the server will take from the
@@ -36,13 +37,17 @@ export default function HumanRequestsPage({ work, status, observedAt, action, bu
   const actor = status?.actor;
   // GY-3299: worker-pool growth the loop could not do caps how many items run at once until its cause is fixed.
   const growth: string | null = typeof status?.setup?.workerGrowth === 'string' ? status.setup.workerGrowth : null;
-  const open = requests.length + (growth ? 1 : 0);
+  // GY-3517: compute machines whose host helper is too old for this release take no trial work until their owner updates them.
+  const outdated = hostsNeedingUpdate(status);
+  const open = requests.length + (growth ? 1 : 0) + (outdated.length ? 1 : 0);
   return <>
     <PageHeader title="Needs you" fact={open ? `${open} ${open === 1 ? 'action waits' : 'actions wait'} on you.` : 'Nothing is waiting on you.'}>
       Agents decide everything except goals and priorities, spending money or opening third-party accounts, and issuing credentials to people. You can give your decision to any agent, which records your own words. You can reverse a relayed answer here. An item that reaches one waits here without holding a worker; everything else is the Master's, on the Master page.</PageHeader>
     {actor && <p className="muted signed-in-as">Signed in as <strong>{actor.displayName ?? actor.id}</strong> · {signedInAs(actor)}</p>}
     {growth && <div className="card human-request" data-worker-growth><div className="card-top"><strong>Worker pool cannot grow</strong></div><p>{growth}</p></div>}
-    {requests.length === 0 ? !growth && <EmptyState title="All clear.">Goals, money, accounts and credentials for people come here when an item needs one of them.</EmptyState>
+    {outdated.length > 0 && <div className="card human-request" data-host-update-request><div className="card-top"><strong>Compute machines need an update</strong></div>
+      <p>{outdated.join(', ')} {outdated.length === 1 ? 'takes' : 'take'} no trial work until updated. Run <span className="mono">{hostUpdateCommand}</span>, then the script it prints on each with sudo.</p></div>}
+    {requests.length === 0 ? !growth && !outdated.length && <EmptyState title="All clear.">Goals, money, accounts and credentials for people come here when an item needs one of them.</EmptyState>
       : <div className="cards">{requests.map(row => <RequestCard key={row.request.id} row={row} refusal={refusalFor(row)} busy={busy} open={() => setSelected(row.id)} signIn={signOut}
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}</div>}
     {work.flatMap(item => (item.humanProofs ?? []).filter(check => check.answer?.ownerSaid).map(check => <section className="panel" key={check.id}>

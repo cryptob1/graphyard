@@ -5,13 +5,14 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { hostShimDigest, hostShimScript } from '../src/host-shim.js';
+import { readHostReadings } from '../src/hosts.js';
 import { outdatedShimAttention, readRemoteShardRuns, readShardHosts, remoteShardSummary } from '../src/merge-writer/remote-shards.js';
 import { runTrial } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { dockerCreates, shardHosts, shardRepository, type ShardHostsFixture } from './helpers/shard-hosts.js';
 
 // GY-3476 AC-1: a merge trial with one added host whose installed graphyard-host-shim is older than this
-// release (its probe prints another digest). That host gets no shard, every shard runs here with the
+// release (its probe prints another digest and, GY-3517, lacks a verb the trial uses). That host gets no shard, every shard runs here with the
 // one-host verdict, and master status names the host away — "older than this release: run graphyard
 // host prepare" — with an attention line. With this release's shim the same host takes shards again.
 
@@ -59,8 +60,8 @@ test(`${proof} — a host whose shim reports another digest takes no shard, read
   const one = await trial([]);
   assert.equal(one.result.build, 'pass', one.result.logTail);
 
-  // The host runs a shim from another release: the same verbs, another digest.
-  await writeFile(hosts.shim, hostShimScript.replace(hostShimDigest, '0'.repeat(64)));
+  // The host runs a shim from an older release: another digest, and none of the verbs this release's trials use (GY-3517).
+  await writeFile(hosts.shim, hostShimScript.replace(hostShimDigest, '0'.repeat(64)).replace(/^ *echo "verbs .*"\n/m, ''));
   const stale = await trial([target]);
   assert.equal(stale.result.build, 'pass', stale.result.logTail);
   assert.deepEqual({ passed: stale.result.tests.passed, failed: stale.result.tests.failed, files: stale.result.tests.files },
@@ -71,7 +72,9 @@ test(`${proof} — a host whose shim reports another digest takes no shard, read
   const host = remoteShardSummary(runs)!.hosts.find(entry => entry.name === target)!;
   assert.equal(host.state, 'away');
   assert.match(host.reason ?? '', /older than this release: run graphyard host prepare/);
-  const attention = outdatedShimAttention(runs);
+  // GY-3517: the attention line follows the loop's latest probe of the host.
+  const probes = async () => { const file = join(hosts.root, 'hosts.json'); await writeFile(file, JSON.stringify([{ target, addedAt: 'x' }])); return readHostReadings([], { file, run }); };
+  const attention = outdatedShimAttention(await probes());
   assert.equal(attention.length, 1);
   assert.match(attention[0]!.text, new RegExp(`^${target}`));
   assert.match(attention[0]!.next, /graphyard host prepare/);
@@ -82,5 +85,5 @@ test(`${proof} — a host whose shim reports another digest takes no shard, read
   assert.equal(current.result.build, 'pass', current.result.logTail);
   assert.ok(current.lines.some(line => line.remote), `the host took shards with the current shim: ${JSON.stringify(current.lines)}`);
   assert.equal(remoteShardSummary(readRemoteShardRuns(repository.root))!.hosts.find(entry => entry.name === target)!.state, 'ready');
-  assert.deepEqual(outdatedShimAttention(readRemoteShardRuns(repository.root)), []);
+  assert.deepEqual(outdatedShimAttention(await probes()), []);
 });
