@@ -551,6 +551,20 @@ export async function recordCouldNotRunReview(config: Pick<MasterConfig, 'url' |
   const response = await fetch(`${config.url}/api/work/${encodeURIComponent(work.id)}/product-review`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `product-could-not-run:${review.sha}:${createHash('sha256').update(review.reason).digest('hex').slice(0, 16)}` }, body: JSON.stringify({ reviewer: review.reviewer, sha: review.sha, baseSha: review.baseSha, verdict: 'could-not-run', findings: review.reason.slice(0, 65_536), screenshots: [] }), signal: AbortSignal.timeout(30_000) });
   if (!response.ok) throw new Error(`The control plane refused the could-not-run record for ${work.key} (${response.status})`);
 }
+/** GY-3580: the declared serve addresses product reviews on this host are serving, or waiting their turn on, each with the last turn taken. */
+const serveTurns = new Map<string, Promise<void>>();
+/** The addresses a product review is serving a head on now: another product review launches once its address is free. */
+export const servedReviewAddresses = () => [...serveTurns.keys()];
+/** Waits until no earlier review serves on `url`, then holds it until the returned release is called. */
+async function serveTurn(url: string): Promise<() => void> {
+  const earlier = serveTurns.get(url) ?? Promise.resolve();
+  let release!: () => void;
+  const turn = earlier.then(() => new Promise<void>(resolve => { release = resolve; }));
+  serveTurns.set(url, turn);
+  void turn.then(() => { if (serveTurns.get(url) === turn) serveTurns.delete(url); });
+  await earlier;
+  return release;
+}
 /** GY-3331: the head's own e2e.serve declaration, read from the graphyard.json its commit holds; null when the head declares none (or its policy does not parse). */
 export async function headServeDeclaration(root: string, sha: string, run: ChildRun = defaultChildRun): Promise<E2eServe | null> {
   let text: string;
@@ -1107,9 +1121,11 @@ export async function launchReview(root: string, work: Work, profileName: string
                   try { await git(install.command, install.args, { cwd: checkout.worktree, env: npmCiEnvironment(), timeoutMs: 600_000 }); }
                   catch (error: any) { throw new Error(`${argv.join(' ')} failed in the review checkout of ${binding.sha.slice(0, 12)}: ${`${error.stdout ?? ''}${error.stderr ?? ''}`.trim().slice(-1500) || error.message}`); }
                 }
+                // GY-3580: a review whose head serves on the address another review's head is serving waits its turn; the address frees when that session ends.
+                const release = await serveTurn(declared.url);
                 const served = serveHead(checkout.worktree, commandApplication(declared), { sha: binding.sha, env: runEnvironment(process.env), budgetMs: (declared.readySeconds + 60) * 1000, scratch: join(checkout.directory, '.graphyard', 'scratch'), log: () => {} });
-                try { serving = { url: await served.ready, close: () => served.close().catch(() => {}) }; }
-                catch (error) { await served.close().catch(() => {}); throw error; }
+                try { serving = { url: await served.ready, close: () => served.close().catch(() => {}).finally(release) }; }
+                catch (error) { await served.close().catch(() => {}); release(); throw error; }
               } else noApp = true;
             }
           }
