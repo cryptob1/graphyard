@@ -25,7 +25,7 @@ function registry(): AgentRegistry {
     reason: 'settings pages fixture',
   }, { actor: 'coordinator', at: new Date(NOW - 2 * hour).toISOString() }).registry;
   const resetsAt = new Date(NOW + 70 * hour).toISOString();
-  foldObservation(document.accounts[0], { loggedIn: true, state: 'exhausted', usage: [{ window: '7d', percent: 100, resetsAt }], resetsAt, reason: 'weekly window spent' }, { actor: 'coordinator', at: new Date(NOW - hour).toISOString() });
+  foldObservation(document.accounts[0], { loggedIn: true, state: 'exhausted', usage: [{ window: '7d', percent: 100, resetsAt }], resetsAt, reason: 'weekly window spent', since: new Date(NOW - hour).toISOString() }, { actor: 'coordinator', at: new Date(NOW - hour).toISOString() });
   document.accounts[1].smoke = { result: 'fail', reason: 'the model refused the smoke prompt', at: new Date(NOW - 10 * 60_000).toISOString(), by: 'coordinator' };
   return document;
 }

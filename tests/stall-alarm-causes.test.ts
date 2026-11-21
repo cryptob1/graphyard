@@ -110,7 +110,7 @@ test(`${proof} — launches waiting on heat are the named cause`, async () => {
 
 test(`${proof} — every eligible worker account out of quota is the named cause`, async () => {
   const resets = new Date(start + 5 * 3_600_000).toISOString();
-  const quota = { loggedIn: true, state: 'exhausted', usage: [], resetsAt: resets, reason: 'weekly limit', identity: null, observedAt: null, observedBy: null, source: 'probe' };
+  const quota = { loggedIn: true, state: 'exhausted', usage: [], resetsAt: resets, reason: 'weekly limit', since: new Date(start).toISOString(), identity: null, observedAt: null, observedBy: null, source: 'probe' };
   const alarm = await stalled(await fixture({ registry: {
     accounts: [{ name: 'claude-a', enabled: true, quota }, { name: 'codex-b', enabled: true, quota }, { name: 'spare', enabled: false, quota: { ...quota, state: 'available' } }] as any,
     roles: [{ name: 'worker', accounts: ['claude-a', 'codex-b', 'spare'], concurrency: 2 }] as any,

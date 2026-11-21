@@ -10,7 +10,7 @@ import { notCovered, servedPreviewCases } from '../merge-writer/served-previews.
 import { relandItemFor, revertMergeCommit, serveLandings, serveRangeCommits, trialAndPushRevert } from '../merge-writer/serve-revert.js';
 import { gateTrialKey, trialStartOwner, trialStartWaiting } from '../merge-writer/trial-load.js';
 import { heavyTrial, trialShareAllowance, type MergeWriterReads } from './cycle-merge-writer.js';
-import { criterionProofs, e2eProofsOf } from '../merge-writer/executor.js';
+import { criterionProofs, e2eProofsOf, openFlakyItem } from '../merge-writer/executor.js';
 import type { Cycle } from './cycle.js';
 import { actionLine } from './run.js';
 import { actionDetailMax, message, storeAction } from './state.js';
@@ -216,7 +216,7 @@ export function batchGatePorts(reads: MergeWriterReads & { git: NonNullable<Merg
       return { revertSha: revert.revertSha };
     },
     file,
-    flaky: check => work.find(item => item.stage !== 'done' && item.title === `Flaky check on main: ${check}`)?.key ?? null,
+    flaky: check => openFlakyItem(work, check)?.key ?? null,
     // The full suite (a package.json change selects every test) and the whole catalog, each its own trial so the catalog's time is its own; then the preview cases, in a repository that holds them.
     diagnose: async commit => {
       const suite = await trialFailures(reads, commit, ['build', 'affected'], ['package.json'], gateLimitMs, trusted);
@@ -439,7 +439,7 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
       } catch (error) {
         // The stop killed the gate's children, so the failure is no outcome: nothing is written or logged.
         if (stopped.has(cycle.state)) return;
-        // The failed run's outcome is the record's last (GY-3141): write it beside the batch left standing for the next loop.
+        // The failed run's outcome is the record's last (GY-3141); its batch is settled, so the next cycle runs afresh (GY-3567).
         await mergeGateRecord(file, latest => ({ ...current, ...diagnosticFields(latest, current) })).catch(() => undefined);
         note('batch-gate', 'failed', `The batch gate failed and runs again next cycle: ${message(error)}`);
       }

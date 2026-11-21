@@ -44,7 +44,7 @@ function registryFixture(): AgentRegistry {
   // exhausted account carries a reset per window where the provider states one, and each
   // observation carries the moment it was read and that a probe read it.
   foldObservation(registry.accounts.find(account => account.name === 'claude-a')!,
-    { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 62, resetsAt: iso(40 * minute) }, { window: '7d', percent: 18, resetsAt: null }], resetsAt: iso(40 * minute), reason: 'weekly window spent' },
+    { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 62, resetsAt: iso(40 * minute) }, { window: '7d', percent: 18, resetsAt: null }], resetsAt: iso(40 * minute), reason: 'weekly window spent', since: iso(-minute) },
     { actor: 'coordinator', at: iso(-5 * minute) });
   foldObservation(registry.accounts.find(account => account.name === 'claude-b')!,
     { loggedIn: true, state: 'available', usage: [{ window: '5h', percent: 12, resetsAt: null }], resetsAt: null, reason: null },
@@ -137,7 +137,7 @@ function declutterFleet(names: string[], roles: { name: Role; accounts: string[]
     roles, reason: 'declutter fixture',
   }, { actor: 'operator', at: iso(-3 * hour) }).registry;
   for (const account of registry.accounts) foldObservation(account, spent.includes(account.name)
-    ? { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 4, resetsAt: null }, { window: '7d', percent: 100, resetsAt: spentUntil }], resetsAt: spentUntil, reason: 'weekly window spent' }
+    ? { loggedIn: true, state: 'exhausted', usage: [{ window: '5h', percent: 4, resetsAt: null }, { window: '7d', percent: 100, resetsAt: spentUntil }], resetsAt: spentUntil, reason: 'weekly window spent', since: iso(-minute) }
     : { loggedIn: true, state: 'available', usage: account.name === 'unreported' ? [] : [{ window: '5h', percent: 31, resetsAt: iso(2 * hour) }], resetsAt: null, reason: null },
   { actor: 'coordinator', at: iso(-minute) });
   registry.sessions = live.map(([role, account, work], index) => ({ id: `00000000-0000-4000-8000-0000000132${String(index).padStart(2, '0')}`, role, account, runtime: 'claude', model: 'opus', host: HOST, work, principal: 'agent',

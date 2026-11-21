@@ -27,13 +27,13 @@ test('integration:zai-usage-read — windows are named by the provider\'s type a
   assert.deepEqual(credit.windows.map(window => [window.window, window.percent]), [['7d', 100], ['5h', 4]]);
 });
 
-test('integration:zai-usage-read — a refusal\'s zoneless reset is Beijing time whatever the host\'s zone; the endpoint\'s own nextResetTime wins', async () => {
+test('integration:zai-usage-read — a refusal\'s zoneless reset is Beijing time whatever the host\'s zone; the live refusal\'s own reset holds the account (GY-3555)', async () => {
   const notice = 'Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-11-20 12:49:15';
   const now = Date.parse('2026-11-18T00:00:00Z');
   for (const runtime of ['opencode', 'pi']) assert.equal(runtimeResetTime(notice, runtime, now), '2026-11-20T04:49:15.000Z', runtime);
   assert.equal(parseZaiUsage({ code: 1310, message: notice }).resetsAt, '2026-11-20T04:49:15.000Z');
 
-  // A live request refused with the text, while the endpoint answered its own reset for the spent window.
+  // A live request refused with the text, while the usage endpoint answered another reset: the live request decides (GY-3555).
   const home = await temporaryDirectory('zai-endpoint-reset');
   await mkdir(join(home, 'opencode'), { recursive: true });
   await writeFile(join(home, 'opencode/auth.json'), JSON.stringify({ 'zai-coding-plan': { key: 'spent-key' } }));
@@ -45,7 +45,8 @@ test('integration:zai-usage-read — a refusal\'s zoneless reset is Beijing time
   const { quota } = await observeAccount(account, registry.runtimes[0], { fetch: probe, cacheMs: 0, opencodeAuth: null, opencodeModels: null, now: () => now,
     smoke: async () => ({ ok: false, error: notice }) }, registry.accounts, 'zai/glm-5.1');
   assert.equal(quota.state, 'exhausted');
-  assert.equal(quota.resetsAt, endpointReset, 'the endpoint\'s own reset, not the refusal text\'s');
+  assert.equal(quota.resetsAt, '2026-11-20T04:49:15.000Z', 'the reset the refusal states, in Beijing time');
+  assert.notEqual(quota.resetsAt, endpointReset);
 });
 
 test('integration:zai-usage-read — a key answering no limits stays unknown after an exhausted account, and never inherits its windows', async () => {
@@ -64,7 +65,8 @@ test('integration:zai-usage-read — a key answering no limits stays unknown aft
     const { quota } = await observeAccount(account, runtime, { fetch: probe, cacheMs: 0, opencodeAuth: null, opencodeModels: null, now: () => now, smoke: async () => ({ ok: true, error: '' }) }, registry.accounts, 'zai/glm-5.1');
     foldObservation(account, quota, { actor: 'coordinator', at });
   }
-  assert.equal(opencode.quota.state, 'exhausted');
+  assert.deepEqual(opencode.quota.usage.map(window => window.percent), [100], 'the spent key reads its own window');
+  assert.equal(opencode.quota.state, 'available', 'its own live request passed (GY-3555: a usage reading never holds)');
   assert.equal(pi.quota.state, 'unknown');
   assert.deepEqual(pi.quota.usage, []);
   assert.equal(pi.quota.reason, 'this key reports no allowance');

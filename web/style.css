@@ -284,6 +284,7 @@ img.mark{width:26px;height:26px}
 .health.live{color:var(--shipped)}.health.live .health-dot{background:var(--shipped);border-color:var(--shipped)}
 .health.stale{color:var(--needs-you)}.health.stale .health-dot{border-color:var(--needs-you)}
 .workers-note{margin:var(--space-3) 0}
+.availability{list-style:none;margin:0;padding:0;font-size:12px}.availability li{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:var(--space-2) 0;border-bottom:1px solid var(--border);color:var(--text-2)}.availability li[data-state=held]{color:var(--needs-you)}.availability li[data-state=broken]{color:var(--blocked)}
 /* GY-3314: the Workers table is one compact line per agent — the name, the item with its title
    truncated in place, a state of at most three words, the age — never taller than 44 px, with
    nothing clipped at the right edge. A row unfolds its session's live view in the row below. */
