@@ -299,7 +299,11 @@ const rerunNote = (reason: string, output: string): RerunNote => ({ note: `pre-s
 const judged = (rerun: { ok: boolean; output: string; timedOut?: true }, files: readonly string[], what: string): { cases: RerunCase[]; note?: RerunNote } => {
   if (rerun.timedOut) return { cases: [], note: rerunNote(`${what} exceeded ${boundText(rerunBound.ms)} and was killed`, rerun.output) };
   const cases = rerunFailingCases(rerun.output, files);
-  if (!rerun.ok && !cases.length) return { cases: [], note: rerunNote(`${what} failed without naming a failing case`, rerun.output) };
+  if (!rerun.ok && !cases.length) {
+    // GY-3577: a run that never started says why — the spawn error, else the output's first error line.
+    const why = rerun.output.split('\n').map(line => line.trim()).find(line => /error/i.test(line) || /\bE[A-Z]{4,}\b/.test(line));
+    return { cases: [], note: rerunNote(`${what} failed without naming a failing case${why ? `: ${why}` : ''}`, rerun.output) };
+  }
   return { cases };
 };
 

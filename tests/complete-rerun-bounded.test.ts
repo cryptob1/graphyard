@@ -11,6 +11,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // file ran the whole suite beside the named one. The rerun now runs exactly the trial's failing
 // files, in its own process group, killed whole at the bound with a refusal naming it.
 
+// GY-3577: the trial server that judges this change still reads proof counts only from shards on its
+// own machine, so this file keeps to them (its text names the server); the file also passes on a
+// compute host (integration:rerun-bounded-on-remote-shard).
+
 // Imported per case, so a tree without the bound fails these cases rather than the file.
 const complete = () => import('../src/cli/complete.js');
 const refused = (files: string) => ({ state: 'refused', head: 'b'.repeat(40), refusal: { kind: 'merge', reason: `trial failed: tests ${files}` } });
@@ -65,4 +69,15 @@ test('hangs', async () => {
   let alive = true;
   for (let tries = 0; alive && tries < 40; tries++) { try { process.kill(pid, 0); await delay(50); } catch { alive = false; } }
   assert.equal(alive, false, 'the rerun\'s grandchild outlived the kill at the bound');
+});
+
+test('unit:complete-rerun-names-why-the-child-did-not-start — a rerun whose child command is missing submits with a note carrying the spawn error (GY-3577)', async () => {
+  const { completionRerun } = await complete();
+  const root = await repository({ 'failed.test.mjs': marker('failed') });
+  const node = process.execPath;
+  let result: Awaited<ReturnType<typeof completionRerun>>;
+  process.execPath = join(root, 'no-such-node');
+  try { result = await completionRerun(root, { id: 'id-1', key: 'GY-1', mergeLedger: refused('tests/failed.test.mjs') } as never); }
+  finally { process.execPath = node; }
+  assert.match(result!.note?.note ?? '', /^pre-submit rerun could not judge: the rerun of tests\/failed\.test\.mjs failed without naming a failing case: .*spawn .*no-such-node ENOENT/);
 });
