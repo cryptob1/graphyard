@@ -1,0 +1,14 @@
+{
+  "id": "selection-skips-meta-readers",
+  "title": "A trial of a new test file, a new e2e case and a source edit runs fewer than 60 test files",
+  "description": "In a clone of this repository, a commit adds one test file and one e2e case and edits one source file. The selection the merge writer's trial runs (scripts/ci-tests.mjs affected with the base tip) leaves out the tests that only list tests/ or e2e/cases/, so it holds the new test and fewer than 60 test files; the batch gate, selecting with no base, still runs the listing tests.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Select the trial's tests for a new test file, a new e2e case and a source edit",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/selection-skips-meta-readers.test.ts",
+    "timeoutSeconds": 300
+  }]
+}
