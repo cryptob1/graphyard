@@ -16,6 +16,8 @@ interface Pending {
   job: WorkerVerificationJob; executor?: string; requestedAt: number;
   /** The host's launcher lines so far (GY-3332): what the waiting worker's `verify` prints. */
   lines: string[];
+  /** GY-3525: what every caller asking for this same verification awaits. */
+  identity: string; result: Promise<WorkerVerificationResult | WorkerCheckResult>;
   resolve: (result: WorkerVerificationResult | WorkerCheckResult) => void; reject: (error: Error) => void;
 }
 const queues = new WeakMap<Services, Map<string, Pending>>();
@@ -26,16 +28,32 @@ function queue(services: Services) {
 }
 /** How long a request waits for its verification; a field so a test can shorten it. */
 export const verificationQueue = { waitMs: workerVerificationTimeoutMs };
+/** GY-3525: a repeated request for the same work, lease epoch, head and inputs joins the pending one; changed inputs run their own.
+ * A caller whose time runs out leaves a running verification in place for its repeat to join; a queued one no host took is dropped. */
+const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical)
+  : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value as object).sort().map(key => [key, canonical((value as Record<string, unknown>)[key])])) : value;
+const identityOf = (job: Omit<WorkerVerificationJob, 'id'>) => JSON.stringify(canonical(
+  [job.work.id, job.work.criteria, job.host, job.branch, job.baseBranch, { ...job.input, preserves: job.input.preserves?.length ? job.input.preserves : undefined }]));
 export async function dispatchWorkerVerification<Result extends WorkerVerificationResult | WorkerCheckResult = WorkerVerificationResult>(services: Services, job: Omit<WorkerVerificationJob, 'id'>): Promise<Result> {
-  const pending = queue(services), id = randomUUID();
+  const pending = queue(services);
+  const identity = identityOf(job);
+  let entry = [...pending.values()].find(candidate => candidate.identity === identity);
+  if (!entry) {
+    const id = randomUUID();
+    let resolve!: Pending['resolve'], reject!: Pending['reject'];
+    const result = new Promise<WorkerVerificationResult | WorkerCheckResult>((yes, no) => { resolve = yes; reject = no; });
+    result.catch(() => undefined); // Every caller may have given up before it settles.
+    entry = { job: { ...job, id }, requestedAt: Date.now(), lines: [], identity, result, resolve, reject };
+    pending.set(id, entry);
+  }
+  const joined = entry;
   let timer: NodeJS.Timeout;
-  try {
-    return await new Promise<Result>((resolve, reject) => {
-      const entry: Pending = { job: { ...job, id }, requestedAt: Date.now(), lines: [], resolve: resolve as Pending['resolve'], reject };
-      timer = setTimeout(() => reject(new Refusal('Host worker verification timed out', 504)), verificationQueue.waitMs);
-      pending.set(id, entry);
-    });
-  } finally { clearTimeout(timer!); pending.delete(id); }
+  const timeout = new Promise<never>((_, reject) => { timer = setTimeout(() => {
+    const error = new Refusal('Host worker verification timed out', 504);
+    if (!joined.executor && pending.get(joined.job.id) === joined) { pending.delete(joined.job.id); joined.reject(error); }
+    reject(error);
+  }, verificationQueue.waitMs); });
+  try { return await Promise.race([joined.result, timeout]) as Result; } finally { clearTimeout(timer!); }
 }
 /** A new loop rejects only its predecessor's assigned requests; queued work stays queued. */
 export function restartWorkerVerifications(services: Services, actor: Principal, body: unknown) {

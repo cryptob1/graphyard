@@ -1,0 +1,11 @@
+{
+  "id": "worker-verification-request-reuse",
+  "title": "A repeated verify waits on the one host verification already queued for it",
+  "description": "GY-3525: a worker's verify is interrupted while host admission waits and is run again for the same head and lease epoch. Against a real control plane, isolated Postgres and the host pump, only one verification is queued and executed; the repeat receives its result, records it, and complete submits the head through the unchanged review and acceptance gates.",
+  "tags": ["verification", "verify"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "repeated and interrupted verify requests share one host verification", "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:worker-verification-request-reuse tests/worker-verification-request-reuse.test.ts", "timeoutSeconds": 300 }
+  ]
+}
