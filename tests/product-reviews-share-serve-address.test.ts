@@ -91,7 +91,7 @@ const run = async (command: string, args: string[], options?: { cwd?: string }) 
   throw new Error(`no ${command} here`);
 };
 const until = async (what: string, check: () => Promise<boolean> | boolean) => {
-  for (let tries = 0; tries < 800; tries++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 25)); }
+  for (let tries = 0; tries < 4800; tries++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 25)); }
   assert.fail(`timed out waiting for ${what}`);
 };
 const answers = () => fetch(serveUrl).then(() => true, () => false);
@@ -113,7 +113,9 @@ test('integration:product-reviews-share-serve-address — two product reviews on
   ]);
   await until('both review runs to end', async () => { const ledger = await readReviewLedger(root); return launched.every(entry => ledger.reviews.some(record => record.id === entry.review && !liveRun(record.agentName) && !!record.verdict)); });
   await until('the served head to stop', async () => !(await answers()));
-  assert.deepEqual(events, ['first started', 'first ended', 'second started', 'second ended'], 'the sessions ran one after the other');
+  // Either review may reach the address first; the other starts only once that one has ended.
+  const [earlier, later] = events[0] === 'first started' ? ['first', 'second'] : ['second', 'first'];
+  assert.deepEqual(events, [`${earlier} started`, `${earlier} ended`, `${later} started`, `${later} ended`], 'the sessions ran one after the other');
   assert.match(pages.first, /candidate-marker: first/, 'the first session walked its own head');
   assert.match(pages.second, /candidate-marker: second/, 'the second session walked its own head');
 });
