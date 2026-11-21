@@ -34,18 +34,19 @@ export async function workerVerification(services: Services, actor: Principal, i
     // GY-3537: complete's verification still waits for a slot when the request's time runs out: the
     // head is recorded as finished and queued, the worker's attempt ends with no blocker, and the
     // loop runs the verification and submits the head once a slot frees.
-    if (!(error instanceof VerificationStillWaiting) || input.mode !== 'complete') {
-      const reason = maskSecrets(error instanceof Error ? error.message : String(error)).slice(0, 8000);
-      await services.engine.store.transaction(async (db, now) => {
-        const current = (await lockedWork(db, [id])).find(entry => entry.id === work.id);
-        if (!current) return;
-        activeLease(current, actor, input.epoch, now);
-        await save(db, current, actor.id, 'work.self-verification-failed', now, { epoch: input.epoch, head: input.head, mode: input.mode, error: reason });
-      }).catch(() => {});
-      throw error;
+    if (error instanceof VerificationStillWaiting) {
+      if (input.mode !== 'complete') throw error;
+      await services.engine.execute(actor, 'queue', work.id, { epoch: input.epoch, head: input.head }, `queue:${work.id}:${input.epoch}:${input.head}`);
+      return { queued: true };
     }
-    await services.engine.execute(actor, 'queue', work.id, { epoch: input.epoch, head: input.head }, `queue:${work.id}:${input.epoch}:${input.head}`);
-    return { queued: true };
+    const reason = maskSecrets(error instanceof Error ? error.message : String(error)).slice(0, 8000);
+    await services.engine.store.transaction(async (db, now) => {
+      const current = (await lockedWork(db, [id])).find(entry => entry.id === work.id);
+      if (!current) return;
+      activeLease(current, actor, input.epoch, now);
+      await save(db, current, actor.id, 'work.self-verification-failed', now, { epoch: input.epoch, head: input.head, mode: input.mode, error: reason });
+    }).catch(() => {});
+    throw error;
   }
   demand(result.record.head === input.head, 'Verification returned a different head', 409);
   await services.engine.store.transaction(async (db, now) => {

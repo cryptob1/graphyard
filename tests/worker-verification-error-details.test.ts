@@ -34,6 +34,16 @@ test('integration:worker-verification-error-details — a failing verification s
   assert.doesNotMatch(deadline.message, /ghp_abcdef/, 'stdout secret is masked');
   assert.doesNotMatch(deadline.message, /sk-ant-api03-1234567890/, 'stderr secret is masked');
 
+  // GY-3150 / GY-3506: mask before slicing the 4000-char tail so a label straddling the boundary cannot leak its value.
+  const boundary = await verificationStep(process.execPath, ['-e',
+    'process.stdout.write("x".repeat(50) + "token=sk-ant-api03-boundarystdout1234567890\\n" + "y".repeat(3960)); ' +
+    'process.stderr.write("x".repeat(50) + "api_key=sk-ant-api03-boundarystderr1234567890\\n" + "z".repeat(3960)); ' +
+    'process.exit(1);',
+  ], {}, () => {}).then(() => null, error => error as Error);
+  assert.ok(boundary, 'boundary secret exit must reject');
+  assert.doesNotMatch(boundary.message, /boundarystdout1234567890/, 'stdout secret across slice boundary is masked');
+  assert.doesNotMatch(boundary.message, /boundarystderr1234567890/, 'stderr secret across slice boundary is masked');
+
   const exited = await verificationStep('sh', ['-c', 'echo "runner out detail"; echo "runner err detail" >&2; exit 2'], {}, () => {}).then(() => null, error => error as Error);
   assert.ok(exited, 'non-zero exit must reject');
   assert.match(exited.message, /exit status 2/);

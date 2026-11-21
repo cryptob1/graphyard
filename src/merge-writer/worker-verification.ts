@@ -38,11 +38,11 @@ export async function verificationStep(command: string, args: string[], options:
       : failed.status != null ? `exit status ${failed.status}`
         : failed.signal ? `stopped by ${failed.signal}`
           : 'timed out';
-    const header = String(failed.message ?? `Command failed: ${command}`).split('\n')[0];
-    const stderr = String(failed.stderr ?? '').trim().slice(-4000);
-    const stdout = String(failed.stdout ?? '').trim().slice(-4000);
+    const header = maskSecrets(String(failed.message ?? `Command failed: ${command}`)).split('\n')[0];
+    const stderr = maskSecrets(String(failed.stderr ?? '')).trim().slice(-4000);
+    const stdout = maskSecrets(String(failed.stdout ?? '')).trim().slice(-4000);
     const streams = [stderr ? `stderr:\n${stderr}` : '', stdout ? `stdout:\n${stdout}` : ''].filter(Boolean).join('\n');
-    throw new Error(maskSecrets(`${header} (${ended})${streams ? `\n${streams}` : ''}`));
+    throw new Error(`${header} (${ended})${streams ? `\n${streams}` : ''}`);
   }
 }
 
