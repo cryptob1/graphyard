@@ -152,7 +152,7 @@ export function trialFailureTests(refusal: { kind: string; reason: string } | nu
   }
   return [...files];
 }
-/** The rerun runs under the trial's own bound: its failing files are a subset of what the trial ran (GY-2517). */
+/** The rerun runs under the trial's own bound: its failing files are a subset of what the trial ran (GY-2517). The bound is one deadline for the whole rerun, its retry and base run included (GY-3551). */
 export const rerunBound = { ms: trialTimeoutMinutes * 60_000 };
 const boundText = (ms: number) => ms % 60_000 === 0 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`;
 /**
@@ -173,7 +173,7 @@ export function rerunCommand(root: string, files: readonly string[]): [string, s
  * `timedOut` marks a run the bound ended — GY-2980: a fault of the run, judged beside every other
  * rerun fault, never a refusal by itself.
  */
-export async function rerunTrialFiles(root: string, files: readonly string[], run: ChildRun = defaultChildRun): Promise<{ ok: boolean; output: string; timedOut?: true }> {
+export async function rerunTrialFiles(root: string, files: readonly string[], run: ChildRun = defaultChildRun, deadline = Date.now() + rerunBound.ms): Promise<{ ok: boolean; output: string; timedOut?: true }> {
   const [command, args] = rerunCommand(root, files);
   let scratch: string | undefined;
   try {
@@ -188,7 +188,7 @@ export async function rerunTrialFiles(root: string, files: readonly string[], ru
     const { NODE_TEST_CONTEXT: _, ...inherited } = process.env;
     const env = { ...inherited, ...trialHomeVariables(home), ...trialTemporaryVariables(temporary),
       PATH: [dirname(process.execPath), inherited.PATH].filter(Boolean).join(delimiter) };
-    return { ok: true, output: await run(command, args, { cwd: root, env, timeoutMs: rerunBound.ms, group: true }) };
+    return { ok: true, output: await run(command, args, { cwd: root, env, timeoutMs: Math.max(1, deadline - Date.now()), group: true }) };
   }
   catch (error: any) {
     const output = `${error.stdout ?? ''}${error.stderr ?? ''}` || (error instanceof Error ? error.message : String(error));
@@ -267,7 +267,7 @@ export function rerunFailingCases(output: string, files: readonly string[]): Rer
  * they fail, with the output captured. The base's own files answer, never this change's; a tree
  * that cannot be extracted answers null, and the caller refuses rather than accept unverified.
  */
-export async function rerunBaseFiles(root: string, base: string, files: readonly string[], run: ChildRun = defaultChildRun): Promise<{ ok: boolean; output: string } | null> {
+export async function rerunBaseFiles(root: string, base: string, files: readonly string[], run: ChildRun = defaultChildRun, deadline = Date.now() + rerunBound.ms): Promise<{ ok: boolean; output: string } | null> {
   let scratch: string;
   try { await mkdir(join(root, '.graphyard', 'verify'), { recursive: true }); scratch = await mkdtemp(join(root, '.graphyard', 'verify', 'rerun-')); } catch { return null; }
   const tree = join(scratch, 'tree');
@@ -276,7 +276,7 @@ export async function rerunBaseFiles(root: string, base: string, files: readonly
     const extract = spawnSync('sh', ['-c', 'git archive --format=tar "$1" | tar -x -C "$2"', 'sh', base, tree], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
     if (extract.status !== 0 || extract.error) return null;
     try { await symlink(await realpath(join(root, 'node_modules')), join(tree, 'node_modules')); } catch { /* no dependencies installed */ }
-    return await rerunTrialFiles(tree, files, run);
+    return await rerunTrialFiles(tree, files, run, deadline);
   } finally { await rm(scratch, { recursive: true, force: true }); }
 }
 
@@ -320,7 +320,7 @@ const judged = (rerun: { ok: boolean; output: string; timedOut?: true }, files: 
  * refusal: the submission carries a note (`pre-submit rerun could not judge: <reason>`, with the
  * run's last 20 lines) and the merge trial judges the head as for any submission.
  */
-export async function judgeRerun(root: string, work: { key: string; criteria?: { proofs?: readonly string[] }[]; mergeLedger?: { baseTip?: string | null } | null }, failing: readonly string[], rerun: { ok: boolean; output: string; timedOut?: true }, run: ChildRun = defaultChildRun): Promise<{ flaked: RerunCase[]; baseFailures: RerunCase[]; note?: RerunNote }> {
+export async function judgeRerun(root: string, work: { key: string; criteria?: { proofs?: readonly string[] }[]; mergeLedger?: { baseTip?: string | null } | null }, failing: readonly string[], rerun: { ok: boolean; output: string; timedOut?: true }, run: ChildRun = defaultChildRun, deadline = Date.now() + rerunBound.ms): Promise<{ flaked: RerunCase[]; baseFailures: RerunCase[]; note?: RerunNote }> {
   const first = judged(rerun, failing, `the rerun of ${failing.join(', ')}`);
   if (first.note) return { flaked: [], baseFailures: [], note: first.note };
   const cases = first.cases;
@@ -331,7 +331,7 @@ export async function judgeRerun(root: string, work: { key: string; criteria?: {
     throw new Error(`complete refused: the merge trial's failing tests still fail on this head: ${cases.map(locateRerunCase).join(', ')}:\n${rerun.output.trimEnd().slice(-4000)}`);
   // Just the failing cases' files retry; the whole refusal list only when a case's file went unnamed.
   const retryFiles = outside.every(found => found.file) ? [...new Set(outside.map(found => found.file!))] : [...failing];
-  const retryRun = await rerunTrialFiles(root, retryFiles, run);
+  const retryRun = await rerunTrialFiles(root, retryFiles, run, deadline);
   const retry = judged(retryRun, retryFiles, `the retry of ${retryFiles.join(', ')}`);
   if (retry.note) return { flaked: [], baseFailures: [], note: retry.note };
   const flaked = outside.filter(found => !retry.cases.some(repeated => repeated.case === found.case));
@@ -341,7 +341,7 @@ export async function judgeRerun(root: string, work: { key: string; criteria?: {
   // tip, else the merge base with the base branch's remote tip.
   const base = typeof work.mergeLedger?.baseTip === 'string' && /^[0-9a-f]{40}$/.test(work.mergeLedger.baseTip) ? work.mergeLedger.baseTip.toLowerCase() : changeBase(root);
   if (!base) return { flaked, baseFailures: [], note: rerunNote('the base to compare the failing cases against could not be resolved here', retryRun.output) };
-  const onBase = await rerunBaseFiles(root, base, retryFiles, run);
+  const onBase = await rerunBaseFiles(root, base, retryFiles, run, deadline);
   if (!onBase) return { flaked, baseFailures: [], note: rerunNote(`the base ${base.slice(0, 12)} could not be run to compare`, retryRun.output) };
   const baseRun = judged(onBase, retryFiles, `the base run of ${retryFiles.join(', ')}`);
   if (baseRun.note) return { flaked, baseFailures: [], note: baseRun.note };
@@ -364,12 +364,13 @@ export async function completionRerun(root: string, work: any) {
     let rerun: { flaked: RerunCase[]; baseFailures: RerunCase[]; note?: RerunNote } = { flaked: [], baseFailures: [] };
     if (failing.length) {
       console.error(`complete re-runs the merge trial's failing tests on this head before submitting: ${failing.join(', ')}`);
-      const first = await rerunTrialFiles(root, failing);
+      const deadline = Date.now() + rerunBound.ms;
+      const first = await rerunTrialFiles(root, failing, defaultChildRun, deadline);
       // GY-2968: a failing case outside the item's proofs retries once on the head and once on the
       // base before anything is refused — a flake or a base failure is recorded, not a refusal.
       // GY-2980: a fault of the rerun itself is no refusal either — the note travels with the
       // submission and the merge trial judges the head.
-      if (!first.ok) rerun = await judgeRerun(root, work, failing, first);
+      if (!first.ok) rerun = await judgeRerun(root, work, failing, first, defaultChildRun, deadline);
       if (rerun.note) console.error(rerun.note.note);
       if (rerun.flaked.length) console.error(`complete records the flaked ${rerun.flaked.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
       if (rerun.baseFailures.length) console.error(`complete records the base failures ${rerun.baseFailures.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
