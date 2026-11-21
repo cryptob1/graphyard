@@ -1,0 +1,15 @@
+{
+  "id": "gate-wait-no-freeze",
+  "title": "A batch gate waiting for a slot pauses no new work",
+  "description": "Every host heavy-job slot is held and the real batch gate waits for one: the loop cycle still launches a free worker on the ready item, master status shows the gate's waiting line beside the claimed item, and the gate takes the next slot that frees and verifies main (GY-3518).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a waiting gate leaves implementation launches running and status shows both",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:gate-wait-no-freeze tests/gate-wait-no-freeze.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

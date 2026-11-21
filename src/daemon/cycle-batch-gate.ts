@@ -426,6 +426,8 @@ export async function batchGateStep(cycle: Pick<Cycle, 'state' | 'effects' | 'sn
     const current = record;
     gateRuns.set(cycle.state, ended);
     gateStarts.set(cycle.state, { since: cycle.now(), started: false });
+    // GY-3518: a gate waiting for its slot pauses no implementation launch; it still takes the next slot that frees.
+    live.waiting = ports.waiting;
     live.gate = (async () => {
       try {
         // A timed-out run starts again at once: runGate cleared its batch, so the retry is cut from
