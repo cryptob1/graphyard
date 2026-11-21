@@ -1,0 +1,16 @@
+{
+  "id": "parked-human-not-dispatch",
+  "title": "An item parked on a human request is shown as waiting on that request, and no longer holds a pipeline slot",
+  "description": "A fixture install at concurrency 2 holds item A parked on a human request with no blocker, item B released and depending on A, and item C independent in the backlog. The loop's cycle releases and launches C; master status shows A waiting on the request (never 'a launch is requested'), lists the request once in attention with its age, marked overdue past an hour, and the exact answer command; answering the request makes A dispatchable at once.",
+  "tags": ["master"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a parked item waits on its request, holds no slot, and the independent item is released and launched",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/parked-human-not-dispatch.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

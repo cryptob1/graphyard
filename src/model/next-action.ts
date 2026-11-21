@@ -9,6 +9,9 @@ import { loopObservationProofs, loopObservation, observationPass } from './loop-
 import { dispatchIneligibility } from './mechanical-proofs.js';
 import { reviewNeed } from './dispatch.js';
 import { leadHoldRefusal } from './delegation.js';
+import { answerCommand, describeHumanRequest, parkedOnHuman } from './human-request.js';
+import { humanAsk } from './human-ask.js';
+import { formatAge } from './duration.js';
 // The vocabulary lives in `action-kinds.ts` and the accounting vocabulary in
 // `action-account.ts`; each is re-exported here so what an item needs next is still read from
 // one place. `action-account.ts` is the one exception: it imports the computation below, so it
@@ -80,6 +83,12 @@ export function computeAccount(work: Work, all: Work[], now: Date): Computed {
   // is ready, which is a goal-setting call and not an action anyone runs. Its refusal still maps
   // (to `attention`); the item simply raises none until it is released.
   if (work.stage !== 'done' && !work.criteria.length) return waits({ kind: 'session', on: 'master', detail: 'Waiting on the master: writing the criteria' }, 'ready', 'Waiting on the master: writing the criteria');
+  // GY-3503: an unanswered human request is the one thing the item waits on, blocker or not: never a dispatch.
+  if (work.stage !== 'done' && parkedOnHuman(work)) {
+    const request = work.humanRequest!;
+    return waits({ kind: 'human', on: 'operator', detail: `${key} waits on you: ${humanAsk(request)} (asked ${formatAge(request.at, now.getTime())} ago); ${answerCommand(key, request)} resumes it` },
+      'ready', describeHumanRequest(request));
+  }
   if (!work.ready) return waits({ kind: 'human', on: 'operator', detail: `${key} has not been released from the backlog; releasing it is a goals-and-priorities decision, which is the operator's` },
     'ready', 'Not released from backlog');
 
