@@ -159,12 +159,11 @@ export interface DaemonEffects {
   /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`). */
   rework?: (work: Work, reason: string, binding?: string) => Promise<unknown>;
   /**
-   * GY-3335: resubmits one finished head a worker named in a blocker its own complete failed on:
-   * runs the same verification complete runs on this host, then submits the head as the item's
-   * next attempt (`POST work/:id/resubmit`) — or clears the record when the verification failed
-   * on the change, so the item goes to a worker. Absent, such items wait for a worker as today.
+   * GY-3335, GY-3576: submits one finished head a worker named in a blocker its own complete failed
+   * on, as the item's next attempt (`POST work/:id/resubmit`), with no host verification run: the
+   * merge trial decides. Absent, such items wait for a worker as today.
    */
-  resubmit?: (work: Work, head: string) => Promise<{ submitted: boolean; detail: string }>;
+  resubmit?: (work: Work, head: string) => Promise<string>;
   /** Records one real-world check on Needs you for the item's head (GY-2986). */
   askHumanProof?: (work: Work, proof: string) => Promise<unknown>;
   /** Releases one backlog item with the master's own operator-agent identity (`POST work/:id/ready`, GY-2991): the dispatch step keeps the pipeline full itself. Absent, nothing is released; `master release` stays for an out-of-order pull. */

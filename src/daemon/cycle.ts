@@ -674,11 +674,10 @@ async function dispatchStep(cycle: Cycle) {
   // names for the cycle, with one standing attention line (untrustedCheckoutRoles).
   const refusedRoles = await untrustedCheckoutRoles(cycle, registry);
   // GY-3335: a finished head a blocked worker named is the loop's to resubmit: once the master has
-  // unblocked the item, the launcher beside this cycle re-runs complete's verification on the host
-  // and submits the head as the next attempt, so no worker session and no worker slot is spent
-  // re-running complete on unchanged work. While the record stands the item is not claimable
-  // (assertDispatchable); a verification that fails on the change clears it and the item goes to a
-  // worker as today.
+  // unblocked the item, the launcher beside this cycle submits the head as the next attempt, so no
+  // worker session is spent re-running complete on unchanged work. GY-3576: no host verification
+  // runs first; the merge trial runs the tests and decides. While the record stands the item is
+  // not claimable (assertDispatchable).
   if (effects.resubmit) for (const item of open) {
     const finished = item.finishedBlockerHead;
     if (!finished || !item.ready || item.blocker || item.hold || item.lease || item.submission && !item.reworkRequested) continue;
@@ -807,19 +806,17 @@ async function releaseBacklog(cycle: Cycle, allowed: number) {
 }
 
 /**
- * GY-3335: one finished-head resubmission on the launcher: the verification `complete` runs on
- * this host, then the submit through the control plane. A fault of the run or the plane is one
- * failed action retried next cycle; the fault the 2026-11-14 host move left every item with.
+ * GY-3335: one finished-head resubmission on the launcher: the submit through the control plane.
+ * A fault of the plane is one failed action retried next cycle.
  */
 async function resubmitFinishedHead(cycle: Cycle, item: Work, finished: NonNullable<Work['finishedBlockerHead']>, sink: DaemonAction[]) {
   const { state, effects, now } = cycle;
   const key = `resubmit:${item.id}:${finished.head}:${finished.epoch}`;
   const attempts = (state.actions[key]?.attempts ?? 0) + 1;
   const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: finished.epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
-  await entry('started', `Resubmitting ${item.key}'s finished head ${finished.head.slice(0, 12)}: the verification complete runs, then the submit, with no worker session`);
+  await entry('started', `Resubmitting ${item.key}'s finished head ${finished.head.slice(0, 12)} with no worker session`);
   try {
-    const outcome = await effects.resubmit!(item, finished.head);
-    await entry('done', outcome.detail);
+    await entry('done', await effects.resubmit!(item, finished.head));
   } catch (error) {
     await entry('failed', `Could not resubmit ${item.key}'s finished head ${finished.head.slice(0, 12)}: ${message(error)}; it is retried next cycle`);
   }
