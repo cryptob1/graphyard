@@ -4,8 +4,8 @@ import type { Ctx } from './types.js';
 
 /**
  * GY-3537: complete's verification still waited for a slot when the request's time ran out. The
- * head is recorded as finished and queued, the attempt ends with no blocker, and the loop runs the
- * verification and submits the head once a slot frees (the finished-head resubmit of GY-3335).
+ * head is recorded as finished and queued, the attempt ends with no blocker, and the loop submits
+ * the head (the finished-head resubmit of GY-3335); its merge trial runs the tests (GY-3576).
  */
 export function run(c: Ctx) {
   const { actor, data, now, work } = c;

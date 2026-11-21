@@ -114,7 +114,7 @@ test(`${proof} — with every slot held, complete returns queued without a block
     workers: [{ name: 'worker-1', principal: 'graphyard-worker-1', agentName: 'gy-worker-1', mode: 'launch', kind: 'codex', credentialFile: join(base, 'worker-1.token') }],
     run: { masterHeartbeatMinutes: 240 } });
   const asLoop = async (path: string, data: unknown) => { const [, id, command] = path.split('/'); return engine.execute(coordinator, command as never, id, data, randomUUID()); };
-  const production = daemonEffects(checkout, () => config, { snapshot: async () => ({ work: [queued], now: new Date().toISOString() }), mutate: asLoop, verify });
+  const production = daemonEffects(checkout, () => config, { snapshot: async () => ({ work: [queued], now: new Date().toISOString() }), mutate: asLoop });
   const launches: string[] = [];
   const effects: DaemonEffects = {
     snapshot: async () => ({ work: [queued], now: new Date().toISOString() }),

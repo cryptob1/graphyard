@@ -1,7 +1,7 @@
 {
   "id": "unblock-resubmits-finished-head",
   "title": "A finished head blocked only by a host fault is resubmitted when the fault clears, without waiting for a worker slot",
-  "description": "GY-3335: a worker whose complete fails on a stubbed trial-host fault blocks naming its committed head; after master unblock, with the worker role at its concurrency limit, the loop re-runs complete's verification and submits that exact head itself, and the item reaches review without any worker launch. A blocker that names no finished head, or a verification that fails on the change, sends the item to a worker as today. The command step proves the whole path on a real store: the blocked record, the cycle's resubmission through the production effect wiring, the engine's submit as the next attempt, and both worker-as-today refusals.",
+  "description": "GY-3335: a worker whose complete fails on a stubbed trial-host fault blocks naming its committed head; after master unblock, with the worker role at its concurrency limit, the loop submits that exact head itself, and the item reaches review without any worker launch. A blocker that names no finished head sends the item to a worker as today. The command step proves the whole path on a real store: the blocked record, the cycle's resubmission through the production effect wiring, the engine's submit as the next attempt, and the worker-as-today refusal.",
   "tags": ["api", "work", "delivery"],
   "target": "any",
   "required": false,
