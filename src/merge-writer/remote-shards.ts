@@ -70,9 +70,9 @@ export interface ShardPlacement { ran: string[]; queuedWhileIdle: number; droppe
 /**
  * Run `count` shards across `hosts` (this machine first). Each shard goes to the host with room under
  * its heat limit that has the most real free CPU left once its running shards (`breadth` cores each)
- * are counted, so one trial's shards spread across hosts and none waits while a host has room. With
- * no host able to take one and none running, it goes to this machine, whose launcher waits on heat as
- * before. `pinned` (GY-3419) names shards that may run only on this machine: a shard holding a
+ * are counted, so one trial's shards spread across hosts and none waits while a host has room. This
+ * machine's reading never takes it out (GY-3588): it keeps its room, and its launcher waits on heat.
+ * `pinned` (GY-3419) names shards that may run only on this machine: a shard holding a
  * local-only test file never reaches a host, which could not run it. A host that throws
  * `HostDroppedError` takes no more shards this trial and its shard is
  * re-queued first. `stopped` ends placement once a shard ended the trial; running shards are awaited.
@@ -82,10 +82,10 @@ export async function runShardsOnHosts<R>(input: { count: number; hosts: readonl
   const running = new Map(input.hosts.map(host => [host.name, 0]));
   const inFlight = new Set<Promise<void>>();
   let queuedWhileIdle = 0, failure: { error: unknown } | null = null;
-  const usable = (host: PlacedHost<R>) => !dropped.has(host.name) && underHeatLimit(host.reading);
+  // GY-3588: this machine is always usable up to its room; its launcher holds each container start while a sensor is hot.
+  const usable = (host: PlacedHost<R>) => host === input.hosts[0] || !dropped.has(host.name) && underHeatLimit(host.reading);
   const left = (host: PlacedHost<R>) => realFreeCores(host.reading) - running.get(host.name)! * input.breadth;
-  const pick = (index: number) => input.hosts.filter(host => usable(host) && (!input.pinned?.[index] || host === input.hosts[0]) && running.get(host.name)! < host.room).reduce<PlacedHost<R> | undefined>((best, host) => !best || left(host) > left(best) ? host : best, undefined)
-    ?? (inFlight.size ? undefined : input.hosts[0]);
+  const pick = (index: number) => input.hosts.filter(host => usable(host) && (!input.pinned?.[index] || host === input.hosts[0]) && running.get(host.name)! < host.room).reduce<PlacedHost<R> | undefined>((best, host) => !best || left(host) > left(best) ? host : best, undefined);
   const start = (host: PlacedHost<R>, index: number) => {
     running.set(host.name, running.get(host.name)! + 1);
     const flight: Promise<void> = input.run(host, index).then(() => { ran[index] = host.name; }, error => {
