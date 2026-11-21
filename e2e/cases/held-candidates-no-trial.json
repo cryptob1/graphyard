@@ -1,0 +1,15 @@
+{
+  "id": "held-candidates-no-trial",
+  "title": "While main is red, the base repair gets the trial slot before older ordinary items",
+  "description": "Runs the real merge writer cycle with a base failure standing on main: the filed base repair is trialled while an ordinary item queued earlier, which touches what the failing test reads, starts no trial; the ordinary item is trialled once main is green (GY-3563).",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the base repair is trialled first; the earlier ordinary item waits for a green main",
+      "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=e2e:held-candidates-no-trial tests/red-base-only-fix-trials.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}

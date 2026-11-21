@@ -1,4 +1,4 @@
-// Concern: GY-3140, GY-3451 — while a base failure stands on main, the merge writer trials only a head that can repair it.
+// Concern: GY-3140, GY-3451 — while a base failure stands on main, the merge writer trials only hotfixes and base repairs (GY-3563).
 import type { MergeLedgerState } from '../model/merge-ledger.js';
 import { parseBaseFailureReason } from './executor.js';
 
@@ -57,18 +57,4 @@ async function scopeOf(git: Git, tip: string, files: string[]) {
   const key = `${tip}:${files.join(',')}`;
   if (!scopes.has(key)) { if (scopes.size >= 8) scopes.clear(); scopes.set(key, await baseFailureScope(git, tip, files)); }
   return scopes.get(key)!;
-}
-
-/**
- * The heads of `heads` a trial would be wasted on: while `failure` stands on `tip`, a head whose
- * own change (against its merge base with the tip) touches neither the failing tests nor any file
- * they select. A head that touches them is the possible repair and is trialled.
- */
-export async function heldByBaseFailure(git: Git, tip: string, failure: { scope: Set<string> }, heads: readonly { id: string; head: string }[]): Promise<Set<string>> {
-  const held = new Set<string>();
-  for (const { id, head } of heads) {
-    const changed = (await git(['diff', '--name-only', `${tip}...${head}`])).split('\n').map(line => line.trim()).filter(Boolean);
-    if (!changed.some(file => failure.scope.has(file))) held.add(id);
-  }
-  return held;
 }

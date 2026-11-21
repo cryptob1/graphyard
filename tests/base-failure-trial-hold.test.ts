@@ -12,8 +12,8 @@ import type { Observation, Work } from '../src/model/work.js';
 
 // GY-3140: main failed unit:model-purity and the merge writer kept trialling unrelated heads for
 // 20-30 minutes each, only to refuse every one with the base failure. While a base failure is
-// recorded on main's current tip, a head that touches neither the failing tests nor the files they
-// select starts no trial: it is refused at once with the base failure and trialled once main moves on.
+// recorded on main's current tip, a head that is neither a hotfix nor a base repair starts no trial
+// (GY-3563): it is refused at once with the base failure and trialled once main moves on.
 
 const start = Date.parse('2030-06-01T00:00:00Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -59,7 +59,7 @@ function substitutedGit(tip: { at: string }): ChildRun {
   };
 }
 
-test('unit:base-failure-holds-unrelated-trials — while main fails, only the head touching the failing test is trialled; the rest are refused at once and trialled once main moves on', async () => {
+test('unit:base-failure-holds-unrelated-trials — while main fails, only the base repair is trialled; the rest are refused at once and trialled once main moves on', async () => {
   const tip = { at: broken }, trialled: string[] = [], recorded: { key: string; event: any }[] = [], performed: any[] = [];
   const reads = mergeWriterReads(config, '/repo/checkout', substitutedGit(tip), {
     base: 'main',
@@ -69,7 +69,7 @@ test('unit:base-failure-holds-unrelated-trials — while main fails, only the he
   const state = emptyDaemonState(config);
   // GY-3 is the head whose trial found the base failure (since returned to its worker); GY-1 (older, so first in the queue) touches nothing the failing test selects; GY-2 is the repair.
   const recorder = item('w3', 'GY-3', earlier, start - 9_000, { mergeLedger: refusedOn('GY-3', earlier, reason), reworkRequested: true });
-  const work = [item('w1', 'GY-1', unrelated, start - 5_000), item('w2', 'GY-2', repair, start - 1_000), recorder];
+  const work = [item('w1', 'GY-1', unrelated, start - 5_000), item('w2', 'GY-2', repair, start - 1_000, { title: `Base branch main fails unit test: ${failingTest}` }), recorder];
   let clock = start;
   const step = async () => { clock += 1000; await mergeWriterStep({ state, effects: { mergeWriter: reads, persist: async () => {}, rework: async () => {} }, now: () => clock, snapshot: { work }, performed } as unknown as Cycle); await mergeWriterIdle(state); };
 
@@ -77,7 +77,7 @@ test('unit:base-failure-holds-unrelated-trials — while main fails, only the he
   assert.deepEqual(trialled, ['GY-2'], 'only the repair head is trialled while main fails');
   const held = recorded.filter(entry => entry.key === 'GY-1');
   assert.deepEqual(held.map(entry => entry.event), [{ kind: 'refused', head: unrelated, reason }], 'the unrelated head is refused at once with the base failure, no intent and no trial');
-  assert.match(state.actions[`merge-writer-base-hold:GY-1:${unrelated}`]!.detail, /touches neither the failing tests nor the files they select/);
+  assert.match(state.actions[`merge-writer-base-hold:GY-1:${unrelated}`]!.detail, /the trial slots go to its hotfixes and base repairs/);
   assert.ok(recorded.some(entry => entry.key === 'GY-2' && entry.event.kind === 'pushed'), 'the repair head is trialled and lands');
 
   // The ledger now holds the refusal; a second cycle on the same broken tip neither trials nor refuses it again.

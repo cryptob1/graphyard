@@ -1,7 +1,7 @@
 {
   "id": "red-base-fix-first",
   "title": "While main is red, the fixing item merges first and the others wait for a green base",
-  "description": "Runs the real merge writer cycle with a base failure recorded on main and main moved on still red: the item changing what the failing test reads and the master's hotfix are trialled and merge, the unrelated item starts no trial and is shown waiting for a green base, and it merges once main carries the fix (GY-3451).",
+  "description": "Runs the real merge writer cycle with a base failure recorded on main and main moved on still red: the filed base repair and the master's hotfix are trialled and merge, the unrelated item starts no trial and is shown waiting for a green base, and it merges once main carries the fix (GY-3451).",
   "target": "any",
   "required": false,
   "steps": [

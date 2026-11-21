@@ -26,7 +26,7 @@ import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '..
 import { slotsDirectoryVariable, testMergeLabel, waitStep, withHeavyJob } from '../master/verification-slots.js';
 import { adoptTrialRun, finishedTrialRun, launchTrialRun, stopTrialRun, trialRunsDirectory, type TrialRunHandle, type TrialRunRequest } from '../merge-writer/trial-run.js';
 import { loadProjectDelivery } from '../model-boundary/project-applications.js';
-import { heldByBaseFailure, standingBaseFailure } from '../merge-writer/base-failure-hold.js';
+import { standingBaseFailure } from '../merge-writer/base-failure-hold.js';
 import { baseFailureHoldMs, baseFailurePrefix, isBaseRepair, isHotfix, criterionProofs, pushPassedTrial, mergeHeads, type HeadResult, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, mergeWriterRemote, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialAheadOfReviewPrefix, trialRefusalHeld, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../merge-writer/executor.js';
 import { graphyardVerifiedRef, publishedVersion } from '../release.js';
 import { message, storeAction, type DaemonState } from './state.js';
@@ -187,10 +187,10 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
 }
 
 /**
- * GY-3140, GY-3451: the due heads a recorded base failure holds out of trial, and that failure's
- * reason. The failure stands until main changes the failing tests or the files they select
- * (`standingBaseFailure`), so a merge that leaves main red frees nothing. A hotfix or base repair
- * item is the master's own base fix and is never held. Nothing is held when no base failure is
+ * GY-3140, GY-3451, GY-3563: the due heads a recorded base failure holds out of trial, and that
+ * failure's reason. While the failure stands (`standingBaseFailure`: until main changes the failing
+ * tests or the files they select) only hotfixes and base repairs are trialled, so the trial slots go
+ * to what turns main green; every other head waits. Nothing is held when no base failure is
  * recorded, the checkout cannot be read, or the reads carry no git.
  */
 async function baseFailureHolds(reads: MergeWriterReads, ledger: Readonly<Record<string, MergeLedgerState>>, due: readonly Work[]): Promise<{ held: Set<string>; reason: string }> {
@@ -199,8 +199,7 @@ async function baseFailureHolds(reads: MergeWriterReads, ledger: Readonly<Record
   try {
     const git = reads.git, tip = (await reads.fetch()).toLowerCase(), failure = await standingBaseFailure(args => git(args), ledger, tip);
     if (!failure) return none;
-    const heads = due.filter(work => !isHotfix(work) && !isBaseRepair(work)).map(work => ({ id: work.id, head: work.candidate!.sha.toLowerCase() }));
-    return { held: await heldByBaseFailure(args => git(args), tip, failure, heads), reason: failure.reason };
+    return { held: new Set(due.filter(work => !isHotfix(work) && !isBaseRepair(work)).map(work => work.id)), reason: failure.reason };
   } catch { return none; }
 }
 
@@ -1099,7 +1098,7 @@ export async function mergeWriterStep(cycle: Cycle) {
       const queue = mergeQueue(free.filter(item => !held.has(item.key)), ledger, now());
       // GY-3353: every head keeps its oldest-first place, a timed-out one included: moved behind each newer arrival, it never came round again.
       const ordered = queue.queue;
-      // GY-3140, GY-3451: while a base failure stands on main, a head that cannot repair it starts no trial: it is refused with the base failure at once and stays queued, shown waiting for a green base, and is trialled once main changes what fails.
+      // GY-3140, GY-3451, GY-3563: while a base failure stands on main, a head that is neither a hotfix nor a base repair starts no trial: it is refused with the base failure at once and stays queued, shown waiting for a green base, and is trialled once main changes what fails.
       const holding = await baseFailureHolds(reads, ledger, queue.due);
       const summary = ordered.slice(0, mergeWriterKeptQueue).map(entry => holding.held.has(entry.id) ? { ...entry, waiting: `a green ${reads.baseBranch}: ${holding.reason}`.slice(0, 500) } : entry);
       if (JSON.stringify(summary) !== JSON.stringify(writer.queue)) { writer.queue = summary; changed = true; }
@@ -1111,7 +1110,7 @@ export async function mergeWriterStep(cycle: Cycle) {
         if (prior?.state === 'refused' && prior.head === head && prior.refusal?.reason === holding.reason) continue;
         await record(work, { kind: 'refused', head, reason: holding.reason });
         performed.push(storeAction(state, `merge-writer-base-hold:${work.key}:${head}`, { kind: 'merge', work: work.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
-          detail: `Held ${work.key} head ${head} without a trial: ${reads.baseBranch} fails and the head touches neither the failing tests nor the files they select (${holding.reason.slice(0, 500)}); it waits for a green ${reads.baseBranch} and is trialled once ${reads.baseBranch} changes what fails` }));
+          detail: `Held ${work.key} head ${head} without a trial: ${reads.baseBranch} fails and the trial slots go to its hotfixes and base repairs (${holding.reason.slice(0, 500)}); it waits for a green ${reads.baseBranch} and is trialled once ${reads.baseBranch} changes what fails` }));
         changed = true;
       }
       const runnable = ordered.filter(entry => !holding.held.has(entry.id));
