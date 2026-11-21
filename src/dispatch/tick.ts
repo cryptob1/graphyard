@@ -10,7 +10,7 @@ import { withLaunchedRuntime } from '../master/launch.js';
 import { boundedLaunch, launchBoundMs } from '../master/launch-bound.js';
 import { capacityRefusal } from '../fleet.js';
 import { WorkerSandboxError } from '../worker-sandbox.js';
-import { answeredByPendingReview, LauncherUnavailableError, UnknownReviewerProfileError, unpostedVerdict } from '../reviewer.js';
+import { answeredByPendingReview, LauncherUnavailableError, servedReviewAddresses, UnknownReviewerProfileError, unpostedVerdict } from '../reviewer.js';
 import { launchRefusalProbeDue, owedPostMergeReviews, postMergeRefusalProbeMs } from '../model/post-merge-review.js';
 import { answeredByPendingSession, independentProducerProfiles, sessionRetry } from '../producer.js';
 import { unexercisedFindings } from '../model/mechanical-proofs.js';
@@ -405,12 +405,12 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     if (!session('review', item, request, reviews)) { /* settled, or waiting to relaunch */ }
     // The review ledger starts one session per head: a code review still under way on this head is
     // answered first, and the product review launches once it settles — its verdict, or the rework
-    // that replaces the head, settles this request beside it. There is no other wait: the trial a
-    // head serves by cannot run while the review gate holds for this very review, and a repository
-    // with no previewable application never serves the head at all. The reviewer walks the served
-    // app against the head's diff instead, as the product prompt's fallback names.
+    // that replaces the head, settles this request beside it. GY-3580: product reviews also take
+    // turns on a served head's address, so the tick goes on while one serves. A repository with no
+    // previewable application never serves the head; the reviewer walks the app against its diff.
     else if (reviews.some(record => record.state === 'pending' && record.key === item.key && record.sha === request.sha && record.requestId !== request.id))
       wait('review', item, request, `the product review of ${item.key} waits for the reviewer session already judging ${request.sha.slice(0, 12)}; the ledger starts one session per head`);
+    else if (servedReviewAddresses().length) wait('review', item, request, `the product review of ${item.key} takes its turn: another product review is serving its head on ${servedReviewAddresses()[0]}`);
     else if (spent('review')) wait('review', item, request, capacityWait('review'));
     else if (!effects.launchProductReview) wait('review', item, request, 'this dispatcher launches no product reviews');
     else if (!retryable(request)) wait('review', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[request.id].nextAt}`}`);

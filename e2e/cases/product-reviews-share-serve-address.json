@@ -1,0 +1,16 @@
+{
+  "id": "product-reviews-share-serve-address",
+  "title": "Product reviews that serve on the same address take turns",
+  "description": "GY-3580: two items reaching product review together, whose heads declare the same e2e.serve URL, both get a reviewer session: the second waits for the first review to stop serving, then serves its own head, with no 'already answers before the serve command starts' launch failure. An address another application holds still fails the launch with that message.",
+  "tags": ["review", "product-review"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "product reviews on one serve address take turns",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/product-reviews-share-serve-address.test.ts",
+      "timeoutSeconds": 900
+    }
+  ]
+}
