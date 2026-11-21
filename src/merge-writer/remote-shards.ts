@@ -25,15 +25,12 @@ export const realFreeCores = (reading: HostReading) => Math.max(0, reading.cores
 export const underHeatLimit = (reading: HostReading) => !reading.away && (reading.celsius === null || reading.celsius < reading.limit);
 
 /**
- * GY-3419: the words a test file names when it needs what a remote shard lacks — the Docker
- * socket or the network: servers and sockets, requests, databases, SSH, browsers, e2e machinery.
- * A shard on an added host runs with no network and no Docker socket, so such a file there would
- * fail as a red verdict that measures neither the merge nor the host. Naming any word keeps the
- * file on this machine; over-marking only costs a host shards, under-marking reads as a false failure.
- * GY-3549: a shard may start nested sandboxes (bwrap, the trial runner), as a local trial can;
- * the sandboxed benchmarks still stay here for their pinned interpreter.
+ * GY-3419, GY-3522: the words a test file names when it needs what a remote shard lacks — the
+ * database, the Docker socket, nested confinement (bwrap, unshare, landlock; the hard-math
+ * benchmarks run under it with a pinned interpreter) or a browser. Naming one keeps the file on
+ * this machine. Servers, sockets and requests on loopback work on a host, so their words do not.
  */
-export const localOnlyTestPattern = /docker|compose|network|socket|ssh|scp|postgres|mysql|redis|database|withDatabase|server|listen|connect|fetch|http|url|browser|playwright|chromium|firefox|webkit|selenium|puppeteer|e2e|benchmarks|hard-math/i;
+export const localOnlyTestPattern = /postgres|withDatabase|docker|bwrap|unshare|landlock|hard-math|playwright|chromium/i;
 /** Whether a test file's text may run on a remote shard: it names none of the local-only words. */
 export const remoteableTestFile = (text: string) => !localOnlyTestPattern.test(text);
 

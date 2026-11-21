@@ -1,0 +1,14 @@
+{
+  "id": "drop-worker-host-verification",
+  "title": "Complete submits directly to review and the merge trial",
+  "description": "With all heavy-job slots occupied, complete submits the head without worker verification. Master status records none, and the real merge trial refuses the deliberately failing candidate.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Submit without host verification and refuse a failing merge trial",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/drop-worker-host-verification.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

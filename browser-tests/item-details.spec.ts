@@ -39,4 +39,6 @@ test('integration:item-details — an item page opens on its plain summary and f
   await expect(details).toHaveAttribute('open', '');
   await expect(details.locator('.item-description')).toHaveText('Full API detail.');
   await expect(details.getByRole('region', { name: 'Requirements' })).toContainText('API works');
+  // GY-3551: each criterion shows with its id, so an operator can follow each criterion's repair.
+  await expect(details.getByText('AC-1 · API works', { exact: true })).toBeVisible();
 });

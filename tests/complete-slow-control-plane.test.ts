@@ -59,8 +59,6 @@ async function slowPlane(head: string, first: { answerAfterMs: number } | { appl
     if (req.url === '/healthz') return send({});
     let raw = ''; for await (const chunk of req) raw += chunk;
     if (req.method === 'GET' && req.url === '/api/work/GY-1') return send(work);
-    if (req.method === 'POST' && req.url === '/api/work/id-1/worker-verification')
-      return send({ record: { key: 'GY-1', head, clean: true, at: new Date().toISOString(), ran: [], outstanding: [] }, rerun: { flaked: [], baseFailures: [] } });
     if (req.method === 'POST' && req.url === '/api/work/id-1/submit') {
       const key = req.headers['idempotency-key'];
       submissions.push({ key: key as string | undefined, body: JSON.parse(raw) });

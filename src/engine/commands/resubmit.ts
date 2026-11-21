@@ -11,10 +11,9 @@ import type { Ctx, Prepare } from './types.js';
 
 /**
  * GY-3335: the loop resubmits, as the item's next attempt, the finished head a worker named in a
- * blocker its own `complete` failed on — a fault of the host, never the change. The loop runs the
- * same verification `complete` runs on its host and posts the outcome here: a passing verification
- * submits the recorded head with every gate after it unchanged (review, proofs, merge trial), and
- * one that failed on the change clears the record so the item goes to a worker as today. Only the
+ * blocker its own `complete` failed on — a fault of the host, never the change. GY-3576: no host
+ * verification runs first; the recorded head is submitted with every gate after it unchanged
+ * (review, proofs, merge trial), and its merge trial refuses a head whose tests fail. Only the
  * loop may do this, and only a head the item's record names — one a worker committed and its own
  * blocker named, never one the loop produced.
  */
@@ -29,12 +28,6 @@ export async function run(c: Ctx) {
   demand(!work.blocker, `${work.key} is still blocked; master unblock clears it first`, 409);
   demand(!work.lease, `${work.key} holds a lease; only its holder submits`, 409);
   demand(!work.submission || work.reworkRequested, `${work.key} is already submitted`, 409);
-  if (data.failed) {
-    // The verification failed on the change itself: the record is spent and the item goes to a
-    // worker as today. The command's own ledger entry carries the failure's reason.
-    work.finishedBlockerHead = null;
-    return;
-  }
   demand(observation, `${data.head.slice(0, 12)} could not be observed from the control plane's object store`, 422);
   const workspace = work.workspaces.find(entry => entry.epoch === record.epoch);
   demand(workspace, `The attempt that recorded ${data.head.slice(0, 12)} registered no workspace`, 409);
@@ -62,7 +55,7 @@ export async function run(c: Ctx) {
  * workspace names the branch, and the worker who recorded the head stays its author.
  */
 export async function prepare({ engine, actor, id, key, data }: Prepare) {
-  if (data.failed || !id) return null;
+  if (!id) return null;
   if (await readReceipt(engine.store.leasePool, actor, key)) return null;
   const work: Work | undefined = (await engine.store.leasePool.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document;
   const record = work?.finishedBlockerHead;
