@@ -21,18 +21,19 @@ test('unit:gate-filing-repository-catalog — a filing outside Graphyard binds t
   // An e2e check binds the failing case itself, which the repository's catalog already holds.
   assert.deepEqual(filing('known-red:e2e:sign-in').criteria[1]!.proofs, [repaired, 'e2e:sign-in']);
   // Any other check binds a new case named like the pinning proof, which the fix adds.
-  assert.deepEqual(filing('known-red:test:secret-scan').criteria[1]!.proofs, [repaired, 'e2e:secret-scan-pinned']);
+  assert.deepEqual(filing('known-red:test:secret-scan').criteria[1]!.proofs, [repaired, 'e2e:test-secret-scan-pinned']);
   assert.deepEqual(filing('flake:test:tests/board-queue.test.ts').criteria[1]!.proofs, [repaired, 'e2e:board-queue-pinned']);
   assert.deepEqual(filing('diagnostic:build').criteria[1]!.proofs, [repaired, 'e2e:build-pinned']);
   assert.equal(pinningProof('known-red:test:tests/board-queue.test.ts'), 'unit:board-queue-pinned', 'the new case is named like the pinning proof');
-  assert.equal(filing('known-red:test:secret-scan').criteria[1]!.text, 'The batch gate passes again and a new E2E case secret-scan-pinned passes', 'the criterion says what the case is');
+  assert.equal(filing('known-red:test:secret-scan').criteria[1]!.text, 'The batch gate passes again and a new E2E case test-secret-scan-pinned passes', 'the criterion says what the case is');
   assert.equal(filing('known-red:e2e:sign-in').criteria[1]!.text, 'The batch gate passes again and the E2E case sign-in passes again');
   // Graphyard's own filings stay unchanged.
   const own = gateFiledItem({ key: 'known-red:test:tests/board-queue.test.ts', title: 'Known red on main: test:tests/board-queue.test.ts', description: 'Red.' }, 'main', 'cryptob1/Graphyard');
   assert.deepEqual(own.criteria[1]!.proofs, [repaired, 'e2e:create-work-item']);
   assert.equal(own.criteria[1]!.text, 'The batch gate passes again and creating a work item still works');
   // The control plane's own faults are filed to Graphyard and keep create-work-item.
-  assert.deepEqual(controlPlaneUpgradeItem({ failedStep: 'health', verified: 'a'.repeat(40) }).criteria[1]!.proofs, ['manual:control-plane-current', 'e2e:create-work-item']);
+  const record = { failedStep: 'health', verified: 'a'.repeat(40) } as Parameters<typeof controlPlaneUpgradeItem>[0];
+  assert.deepEqual(controlPlaneUpgradeItem(record).criteria[1]!.proofs, ['manual:control-plane-current', 'e2e:create-work-item']);
   // The gate's own port passes the gated repository through.
   const filed: { criteria: { proofs: string[] }[] }[] = [];
   const reads = {
@@ -73,14 +74,14 @@ test('e2e:gate-filing-repository-catalog — a known red the gate files in a man
   git(base, 'clone', '-q', origin, coordinator);
 
   // Both a test check and the catalog case fail on the tip and on the verified commit: known reds.
-  const filings: { item: Record<string, unknown>; key: string }[] = [];
+  const filings: { item: ReturnType<typeof gateFiledItem>; key: string }[] = [];
   const reads = {
     baseBranch: 'main', now: () => Date.parse('2030-04-01T00:00:00Z'),
     fetch: async () => { git(coordinator, 'fetch', '-q', 'origin', 'main'); return git(coordinator, 'rev-parse', 'origin/main'); },
     git: async (args: readonly string[]) => execFileSync('git', ['-C', coordinator, ...args], { encoding: 'utf8', env }),
     trial: async () => ({ build: 'pass', tests: { passed: 1, failed: ['tests/slow.test.ts'], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {},
       e2e: [{ proof: 'e2e:fixture-red', executed: 1, failed: 1, missing: false, failingStep: null, output: [] }] }),
-    createWork: async (item: Record<string, unknown>, key: string) => { filings.push({ item, key }); return { key: 'GY-101' }; },
+    createWork: async (item: ReturnType<typeof gateFiledItem>, key: string) => { filings.push({ item, key }); return { key: 'GY-101' }; },
     gate: { root: coordinator, repository },
   } as unknown as MergeWriterReads & { git: NonNullable<MergeWriterReads['git']> };
   // A catalog the diagnostics measured cheap runs whole, so its catalog-only case is a check too.
@@ -92,12 +93,12 @@ test('e2e:gate-filing-repository-catalog — a known red the gate files in a man
   assert.ok(catalog.includes('fixture-red'), 'the repository holds the failing case');
 
   // The test check binds a new case the repository can hold: create's own parse accepts the filing.
-  const test = filings.find(entry => entry.key === 'known-red:test:tests/slow.test.ts')!.item;
-  assert.deepEqual(test['criteria']![1]!['proofs'], ['manual:batch-gate-repaired', 'e2e:slow-pinned']);
+  const testFiling = filings.find(entry => entry.key === 'known-red:test:tests/slow.test.ts')!.item;
+  assert.deepEqual(testFiling.criteria[1]!.proofs, ['manual:batch-gate-repaired', 'e2e:slow-pinned']);
   assert.ok(!catalog.includes('slow-pinned'), 'the case is new: the fix adds it to the repository');
-  commands.create.parse({ ...test, reason: 'Filed by the batch gate on main' });
+  commands.create.parse({ ...testFiling, reason: 'Filed by the batch gate on main' });
   // The e2e check binds the failing case itself, which the repository's catalog holds.
-  const red = filings.find(entry => entry.key === 'known-red:e2e:fixture-red')!.item;
-  assert.deepEqual(red['criteria']![1]!['proofs'], ['manual:batch-gate-repaired', 'e2e:fixture-red']);
-  commands.create.parse({ ...red, reason: 'Filed by the batch gate on main' });
+  const redFiling = filings.find(entry => entry.key === 'known-red:e2e:fixture-red')!.item;
+  assert.deepEqual(redFiling.criteria[1]!.proofs, ['manual:batch-gate-repaired', 'e2e:fixture-red']);
+  commands.create.parse({ ...redFiling, reason: 'Filed by the batch gate on main' });
 });
