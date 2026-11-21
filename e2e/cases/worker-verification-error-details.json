@@ -1,0 +1,9 @@
+{
+  "id": "worker-verification-error-details",
+  "title": "Failing confined host verification exposes exit status and masked output without breaking proof enforcement",
+  "description": "Forces a confined verify.mjs runner failure through graphyard verify, confirms the verification response and durable history carry the exit status and masked stdout/stderr while normal cleanup removes the allocation, and confirms successful verification still enforces required proofs before complete submits.",
+  "tags": ["workers", "verification"],
+  "target": "any",
+  "required": false,
+  "steps": [{ "kind": "command", "name": "Run completion-path verification error details regression", "run": "node --import tsx --test --test-name-pattern=e2e:worker-verification-error-details tests/worker-verification-error-details.test.ts", "timeoutSeconds": 180 }]
+}
