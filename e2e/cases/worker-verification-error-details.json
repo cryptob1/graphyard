@@ -1,9 +1,9 @@
 {
   "id": "worker-verification-error-details",
-  "title": "A proof that hangs against the base no longer fails worker verification opaquely",
-  "description": "A real private trial verifies a head whose proof passes but hangs on the base: the stopped base run is recorded and the verification returns its result instead of an opaque verify.mjs failure, while a proof that hangs on HEAD still fails the verification.",
+  "title": "Failing confined host verification exposes exit status and masked output without breaking proof enforcement",
+  "description": "Forces a confined verify.mjs runner failure through the completion path, confirms the completion response and durable history carry the exit status and masked stdout/stderr while normal cleanup removes the allocation, and confirms successful verification still enforces required proofs.",
   "tags": ["workers", "verification"],
   "target": "any",
   "required": false,
-  "steps": [{ "kind": "command", "name": "Verify a head whose proof hangs on the base", "run": "node --import tsx --test --test-name-pattern=e2e:worker-verification-error-details tests/worker-verification-error-details.test.ts", "timeoutSeconds": 480 }]
+  "steps": [{ "kind": "command", "name": "Run completion-path verification error details regression", "run": "node --import tsx --test --test-name-pattern=e2e:worker-verification-error-details tests/worker-verification-error-details.test.ts", "timeoutSeconds": 180 }]
 }
