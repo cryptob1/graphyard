@@ -14,7 +14,7 @@ export interface WorkerVerificationJob {
 }
 interface Pending {
   job: WorkerVerificationJob; executor?: string; requestedAt: number;
-  /** The host's launcher lines so far (GY-3332): what the waiting worker's `complete` prints. */
+  /** The host's launcher lines so far (GY-3332): what the waiting worker's `verify` prints. */
   lines: string[];
   resolve: (result: WorkerVerificationResult | WorkerCheckResult) => void; reject: (error: Error) => void;
 }
@@ -26,19 +26,13 @@ function queue(services: Services) {
 }
 /** How long a request waits for its verification; a field so a test can shorten it. */
 export const verificationQueue = { waitMs: workerVerificationTimeoutMs };
-/** GY-3537: the request's time ran out while its verification had not started: no host took it, or its last line is a wait for a slot. */
-export class VerificationStillWaiting extends Refusal {}
-const waitLine = /^waiting\b|^graphyard: .*\bwait(s|ing)\b/;
-const stillWaiting = (pending: Pending) => !pending.executor || waitLine.test(pending.lines.at(-1) ?? '');
 export async function dispatchWorkerVerification<Result extends WorkerVerificationResult | WorkerCheckResult = WorkerVerificationResult>(services: Services, job: Omit<WorkerVerificationJob, 'id'>): Promise<Result> {
   const pending = queue(services), id = randomUUID();
   let timer: NodeJS.Timeout;
   try {
     return await new Promise<Result>((resolve, reject) => {
       const entry: Pending = { job: { ...job, id }, requestedAt: Date.now(), lines: [], resolve: resolve as Pending['resolve'], reject };
-      timer = setTimeout(() => reject(stillWaiting(entry)
-        ? new VerificationStillWaiting('Host worker verification is still waiting for a slot', 504)
-        : new Refusal('Host worker verification timed out', 504)), verificationQueue.waitMs);
+      timer = setTimeout(() => reject(new Refusal('Host worker verification timed out', 504)), verificationQueue.waitMs);
       pending.set(id, entry);
     });
   } finally { clearTimeout(timer!); pending.delete(id); }
@@ -51,7 +45,7 @@ export function restartWorkerVerifications(services: Services, actor: Principal,
   for (const [id, pending] of queue(services)) {
     if (pending.job.host !== host || pending.executor !== actor.id) continue;
     queue(services).delete(id);
-    pending.reject(new Refusal(`Verification interrupted by coordinator restart; retry complete for ${pending.job.work.key} with the same head ${pending.job.input.head} and lease epoch ${pending.job.input.epoch}`, 409));
+    pending.reject(new Refusal(`Verification interrupted by coordinator restart; retry verify for ${pending.job.work.key} with the same head ${pending.job.input.head} and lease epoch ${pending.job.input.epoch}`, 409));
     interrupted++;
   }
   return { interrupted };

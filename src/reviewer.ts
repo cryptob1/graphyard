@@ -15,7 +15,9 @@ import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, readSessionScreen, screenDigest, sessionWords, settlementDue, settlementReason, type PromptDelivery, type StartBounds, type RequestDelivery } from './master/launch.js';
 import { accountLaunch, profileAccount, recordObservedExhaustion, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
-import { allocateManagedCheckout, settleCheckout, shareDependencies } from './master/worktrees.js';
+import { allocateManagedCheckout, lockfiles, settleCheckout, shareDependencies } from './master/worktrees.js';
+import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
+import { installArgv, packageManager } from './package-manager.js';
 import { loadMasterConfig, loadStoredMasterConfig, } from './master/config.js';
 import { autonomousSession } from './master/dispatch.js';
 import { closeHerdrPane, type HerdrAgent } from './master/herdr.js';
@@ -1099,7 +1101,12 @@ export async function launchReview(root: string, work: Work, profileName: string
                 const git = dependencies.run ?? defaultChildRun;
                 await git('git', ['-C', root, 'worktree', 'add', '--detach', checkout.worktree, binding.sha]);
                 // GY-3575: the checkout resolves the repository's declared dependencies (its compatible shared install) before the command starts.
-                await shareDependencies(root, checkout.worktree);
+                // GY-3579: a head the shared install cannot answer for (its lockfile differs) installs its own, the frozen contained install a worker's worktree gets.
+                if ((await shareDependencies(root, checkout.worktree)).skipped.length && lockfiles.some(name => existsSync(join(checkout.worktree, name)))) {
+                  const argv = installArgv(packageManager(checkout.worktree)), install = containedInstall(checkout.worktree, argv);
+                  try { await git(install.command, install.args, { cwd: checkout.worktree, env: npmCiEnvironment(), timeoutMs: 600_000 }); }
+                  catch (error: any) { throw new Error(`${argv.join(' ')} failed in the review checkout of ${binding.sha.slice(0, 12)}: ${`${error.stdout ?? ''}${error.stderr ?? ''}`.trim().slice(-1500) || error.message}`); }
+                }
                 const served = serveHead(checkout.worktree, commandApplication(declared), { sha: binding.sha, env: runEnvironment(process.env), budgetMs: (declared.readySeconds + 60) * 1000, scratch: join(checkout.directory, '.graphyard', 'scratch'), log: () => {} });
                 try { serving = { url: await served.ready, close: () => served.close().catch(() => {}) }; }
                 catch (error) { await served.close().catch(() => {}); throw error; }

@@ -48,7 +48,7 @@ test('integration:placed — private container and unnested namespaces', () => {
 
 // Exercise the shipped route and host-loop wiring, with the client under the
 // ordinary worker mount/socket boundary. The HTTP server has no usable repo path.
-test('integration:worker-verification-placement — confined verify/complete cross HTTP to the host runner', { timeout: 180_000 }, async t => {
+test('integration:worker-verification-placement — confined verify crosses HTTP to the host runner', { timeout: 180_000 }, async t => {
   const [{ withDatabase }, { Engine }, { server }, { daemonEffects },
     { readOnlyMountWrapper }, { defaultChildRun }, { randomUUID }] = await Promise.all([
     import('./helpers/postgres.js'), import('../src/engine.js'), import('../src/server.js'),
@@ -135,8 +135,8 @@ try {
   assert.equal(passing.record.ran[0].executed, 1);
   assert.deepEqual(JSON.parse(await readFile(join(repository, '.graphyard', 'verify', `${work.key}.json`), 'utf8')), passing.record);
   await writeFile(join(repository, 'tests/placed.test.ts'), source(true)); git('add', '.'); git('commit', '-qm', 'failing');
-  const failing = await invoke('complete');
-  assert.match(failing.error, /complete refused: required proofs failed/);
+  const failing = await invoke('verify');
+  assert.equal(failing.record.ran[0].result, 'fail');
   const records = (await store.events(work.id)).filter(event => event.kind === 'work.self-verified');
   assert.equal(records.length, 2);
   // Events read newest first: pick the failing head's record by its head, not position.

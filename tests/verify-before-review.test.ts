@@ -152,22 +152,22 @@ test('integration:worker-self-verifies — graphyard verify runs exactly the aut
     assert.match(verified.output.outstanding[0].reason, /manual proof is judged by an independent producer/);
     assert.equal(verified.output.head, execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository.root, encoding: 'utf8' }).trim());
 
-    // Complete repeats verification and refuses the still-failing required proof.
+    // A failing optional result is reported, but the merge trial decides the submitted head.
     const completed = await cli(repository.root, control.url, 'complete', 'GY-7', '1');
-    assert.equal(completed.code, 1);
-    assert.match(completed.output.error, /complete refused: required proofs failed/);
-    assert.deepEqual(control.submitted, []);
+    assert.equal(completed.code, 0);
+    assert.equal(completed.output.selfVerification.state, 'failing');
+    assert.equal(control.submitted.length, 1);
 
-    // Fixed and re-verified, the report passes; complete also verifies a newer head.
+    // Fixed and re-verified, the report passes; complete reports an optional verification without refreshing it.
     await repository.commit({ 'tests/item.test.ts': suite(passing('unit:vbr-parse — parses one'), passing('integration:vbr-flow — flows'), failing('manual:vbr-docs — never run here')) }, 'fix');
     assert.equal((await cli(repository.root, control.url, 'verify', 'GY-7')).code, 0);
     assert.equal((await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output.selfVerification.state, 'passing');
     await repository.commit({ 'README.md': 'later\n' }, 'after verification');
     const refreshed = (await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output;
-    assert.equal(refreshed.selfVerification.state, 'passing');
+    assert.equal(refreshed.selfVerification.state, 'stale');
     assert.equal(refreshed.submission.head, execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository.root, encoding: 'utf8' }).trim());
-    // A missing local record is recreated by the remote verification.
+    // A missing optional record does not prevent submission.
     await rm(join(repository.root, '.graphyard'), { recursive: true });
-    assert.equal((await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output.selfVerification.state, 'passing');
+    assert.equal((await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output.selfVerification.state, 'not-run');
   } finally { await control.close(); await rm(repository.root, { recursive: true, force: true }); }
 });

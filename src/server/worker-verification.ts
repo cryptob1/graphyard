@@ -4,11 +4,11 @@ import { lockedWork } from '../store/locked-read.js';
 import { save } from '../store.js';
 import { maskSecrets } from '../redaction.js';
 import type { Services } from './routes.js';
-import { dispatchWorkerVerification, VerificationStillWaiting } from './worker-verification-queue.js';
+import { dispatchWorkerVerification } from './worker-verification-queue.js';
 import type { WorkerCheckResult } from '../merge-writer/worker-check.js';
 
 const schema = z.object({ head: z.string().regex(/^[a-f0-9]{40}$/), epoch: z.number().int().positive(),
-  mode: z.enum(['verify', 'complete', 'check']), preserves: z.array(z.string()).max(1000).optional(),
+  mode: z.enum(['verify', 'check']), preserves: z.array(z.string()).max(1000).optional(),
   check: z.string().min(1).max(200).optional() }).strict().refine(input => (input.mode === 'check') === !!input.check, 'A check request names exactly one check');
 
 /** The lease holder requests only its recorded criteria, never arbitrary host commands. */
@@ -31,14 +31,6 @@ export async function workerVerification(services: Services, actor: Principal, i
   let result;
   try { result = await dispatchWorkerVerification(services, job); }
   catch (error) {
-    // GY-3537: complete's verification still waits for a slot when the request's time runs out: the
-    // head is recorded as finished and queued, the worker's attempt ends with no blocker, and the
-    // loop runs the verification and submits the head once a slot frees.
-    if (error instanceof VerificationStillWaiting) {
-      if (input.mode !== 'complete') throw error;
-      await services.engine.execute(actor, 'queue', work.id, { epoch: input.epoch, head: input.head }, `queue:${work.id}:${input.epoch}:${input.head}`);
-      return { queued: true };
-    }
     const reason = maskSecrets(error instanceof Error ? error.message : String(error)).slice(0, 8000);
     await services.engine.store.transaction(async (db, now) => {
       const current = (await lockedWork(db, [id])).find(entry => entry.id === work.id);
