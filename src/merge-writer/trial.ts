@@ -1436,9 +1436,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const transport = hosts.length ? shardSshSession(run) : undefined;
     const readings = hosts.length ? await (input.remote?.read ?? ((named, shared) => readShardHosts(named, run, cores, shared)))(hosts, transport!) : [];
     const remoteLanes = readings.slice(1).filter(underHeatLimit).reduce((sum, reading) => sum + Math.floor(realFreeCores(reading)), 0);
-    // GY-3419: test files naming Docker or the network are local-only — a remote shard runs
-    // with no network or Docker socket, so they would fail there as red verdicts that
-    // measure nothing. Each pool is cut into its own shards, so a local-only file never pins a whole
+    // GY-3419: test files naming the database, Docker, nested confinement or a browser are local-only —
+    // a remote shard has none, so they would fail there as red verdicts that measure nothing. Each pool is cut into its own shards, so a local-only file never pins a whole
     // shared shard to this machine, and placement keeps the local-only shards here (runShardsOnHosts
     // `pinned`) while the others may go to any host.
     const split = await splitLocalOnlyTests(files, file => readFile(join(worktree, file), 'utf8'));
