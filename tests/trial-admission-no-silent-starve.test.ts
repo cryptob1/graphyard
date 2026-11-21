@@ -118,7 +118,7 @@ test(`${proof} — a start whose load wait passes its bound fails as a trial-hos
   } finally { await host.close(); }
 });
 
-test(`${proof} — a verification start that must wait prints the reason through complete's output within seconds and keeps waiting its turn (GY-3390)`, { timeout: 120_000 }, async t => {
+test(`${proof} — a verification start that must wait prints the reason through verify's output within seconds and keeps waiting its turn (GY-3390)`, { timeout: 120_000 }, async t => {
   const host = await machine('starve-complete');
   const store = await withDatabase('starve-complete');
   await store.init(); t.after(() => store.close());
@@ -154,12 +154,12 @@ test(`${proof} — a verification start that must wait prints the reason through
   const saved = { url: process.env.GRAPHYARD_URL, token: process.env.GRAPHYARD_TOKEN, file: process.env.GRAPHYARD_TOKEN_FILE };
   process.env.GRAPHYARD_URL = url; process.env.GRAPHYARD_TOKEN = worker.token; delete process.env.GRAPHYARD_TOKEN_FILE;
   try {
-    const context = await createContext('complete', work.key, ['1'], false);
+    const context = await createContext('verify', work.key, [], false);
     context.repositoryRoot = () => root;
     const at = Date.now();
-    const answer = requestWorkerVerification(context, work, { mode: 'complete', epoch: 1 }).then(() => null, (error: unknown) => error);
+    const answer = requestWorkerVerification(context, work, { mode: 'verify', epoch: 1 }).then(() => null, (error: unknown) => error);
     for (let tries = 0; tries < 100 && !taken; tries++) { await pump(); if (!taken) await new Promise(resolve => setTimeout(resolve, 50)); }
-    await host.until(() => shown.some(entry => entry.line.includes('waiting: the machine-wide cap of 1 trial containers is reached')), 'complete prints why the start waits', 10_000);
+    await host.until(() => shown.some(entry => entry.line.includes('waiting: the machine-wide cap of 1 trial containers is reached')), 'verify prints why the start waits', 10_000);
     const waiting = shown.find(entry => entry.line.includes('waiting: '))!;
     assert.ok(waiting.at - at < 6_000, `within seconds, not at the bound: ${waiting.at - at} ms`);
     const failed = await answer;
