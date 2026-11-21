@@ -30,7 +30,7 @@ function ready(key = 'GY-1', updatedAt = new Date(start).toISOString()): Work {
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['e2e:fixture'] }], dependencies: [], evidence: [], gates: [], workspaces: [], sessions: [], createdAt: updatedAt, updatedAt } as unknown as Work;
 }
 
-async function fixture(options: { work?: Work[]; launches?: boolean; dispatchTick?: () => Promise<void>; celsius?: number; pressure?: string; registry?: Pick<AgentRegistry, 'accounts' | 'roles'>; serving?: string } = {}) {
+async function fixture(options: { work?: Work[]; launches?: boolean; dispatchTick?: () => Promise<void>; pressure?: string; registry?: Pick<AgentRegistry, 'accounts' | 'roles'>; serving?: string } = {}) {
   const directory = await temporaryDirectory('stall-alarm');
   const profile = { name: 'w1', principal: 'worker-a', agentName: 'agent-w1', mode: 'launch', kind: 'claude', credentialFile: '/outside/w1.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
   const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', repository: 'owner/stall', credentialFile: join(directory, 'coordinator.token'),
@@ -53,7 +53,7 @@ async function fixture(options: { work?: Work[]; launches?: boolean; dispatchTic
       return { pane: 'p1', epoch: 1 };
     },
     ...(options.dispatchTick ? { dispatchTick: options.dispatchTick } : {}),
-    ...(options.celsius !== undefined || options.pressure !== undefined ? { cpuPressure: async () => ({ pressure: options.pressure ?? null, stat: null, celsius: options.celsius ?? null }) } : {}),
+    ...(options.pressure !== undefined ? { cpuPressure: async () => ({ pressure: options.pressure ?? null, stat: null, celsius: null }) } : {}),
     ...(registry ? { registry: async () => registry } : {}),
     servingCommit: () => options.serving ?? null,
     masterSession: { wake: async (_target, text) => { prompts.push(text); }, launch: async () => ({ agentName: 'master', pane: 'pM', runtime: 'codex', account: 'a', session: 's' }) },
