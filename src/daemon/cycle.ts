@@ -46,7 +46,7 @@ import { actionStallDelay, actionStallThreshold } from '../model/action-progress
 import { syncProjectMemory } from '../project-memory.js';
 import { reconcileMasterMemory } from '../model/project-memory.js';
 import { diskHeadroomStep } from './disk-headroom.js';
-import { cpuPressureStep, cpuWaiting, implementationWaiting, sessionUsageStep } from './cpu-pressure.js';
+import { cpuPressureStep, cpuWaiting, heatClear, implementationWaiting, sessionUsageStep } from './cpu-pressure.js';
 import { causeCleared, environmentCause } from './environment-blockers.js';
 import { batchGateRunning } from './trial-slots.js';
 import { leftoversStep, tallyLeftovers } from './leftovers.js';
@@ -533,7 +533,7 @@ async function environmentBlockersStep(cycle: Cycle) {
     return cause ? [{ item, cause }] : [];
   });
   if (!blocked.length) return;
-  const readings = { ...await effects.environmentReadings(), heatClear: cpuWaiting(state) === null };
+  const readings = { ...await effects.environmentReadings(), heatClear: heatClear(state) };
   for (const { item, cause } of blocked) {
     const key = `environment-unblock:${item.id}:${item.blockedAt ?? item.revision}`;
     if (state.actions[key]?.state === 'done' || !await causeCleared(cause, item, readings)) continue;
@@ -686,10 +686,10 @@ async function dispatchStep(cycle: Cycle) {
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     launcher.submit(key, [], async sink => { await resubmitFinishedHead(cycle, item, finished, sink); });
   }
-  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) or too hot (GY-3373) no new worker,
+  // GY-3348: while the host's CPU is saturated (avg60 above the one ceiling) no new worker,
   // reviewer or trial starts: one status line names the figure, and running sessions are never
-  // stopped. The first cycle below it launches again on its own. GY-3437: from 80C only new
-  // workers wait, so the reviews and trials that finish work drain the heat.
+  // stopped. The first cycle below it launches again on its own. GY-3501: a hot CPU sensor holds
+  // no launch — only the trials and checks that make the heat wait on it.
   const cpuWaitingLine = cpuWaiting(state) ?? undefined;
   // GY-3122: below the disk floor no new worker starts; master status names the shortage.
   // GY-3444: while a batch gate runs no implementation session starts, so the gate's checks finish

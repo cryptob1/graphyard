@@ -1,0 +1,16 @@
+{
+  "id": "cpu-heat-never-holds-workers",
+  "title": "A hot CPU sensor never holds new workers: only the trials and checks that make the heat wait",
+  "description": "GY-3501: a loop whose sensor reads 95C and whose PSI avg60 is 20 has one ready item and a free worker slot: the worker launches in the first cycle, master status shows no launches-waiting line, and the merge writer's trial cap halves while the trial container still waits on its own heat limit until the reading falls. Above the PSI ceiling every launch still waits.",
+  "tags": ["dispatch"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "a hot sensor launches workers while the trial guard waits",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/heat-never-holds-workers.test.ts",
+      "timeoutSeconds": 300
+    }
+  ]
+}
