@@ -39,6 +39,7 @@ export async function workerVerification(services: Services, actor: Principal, i
       await services.engine.store.transaction(async (db, now) => {
         const current = (await lockedWork(db, [id])).find(entry => entry.id === work.id);
         if (!current) return;
+        activeLease(current, actor, input.epoch, now);
         await save(db, current, actor.id, 'work.self-verification-failed', now, { epoch: input.epoch, head: input.head, mode: input.mode, error: reason });
       }).catch(() => {});
       throw error;
