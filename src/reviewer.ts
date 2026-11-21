@@ -17,7 +17,7 @@ import { acknowledgeLaunch, acknowledgementMs, deliverPrompt, markReprompted, re
 import { accountLaunch, profileAccount, recordObservedExhaustion, agentLaunchPlan, onSelectedSession, registrySessionOf, selectAccount, sharedGitDirectory } from './master/environments.js';
 import { allocateManagedCheckout, lockfiles, settleCheckout, shareDependencies } from './master/worktrees.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
-import { installArgv, packageManager } from './package-manager.js';
+import { buildArgv, installArgv, packageManager } from './package-manager.js';
 import { loadMasterConfig, loadStoredMasterConfig, } from './master/config.js';
 import { autonomousSession } from './master/dispatch.js';
 import { closeHerdrPane, type HerdrAgent } from './master/herdr.js';
@@ -1106,6 +1106,13 @@ export async function launchReview(root: string, work: Work, profileName: string
                   const argv = installArgv(packageManager(checkout.worktree)), install = containedInstall(checkout.worktree, argv);
                   try { await git(install.command, install.args, { cwd: checkout.worktree, env: npmCiEnvironment(), timeoutMs: 600_000 }); }
                   catch (error: any) { throw new Error(`${argv.join(' ')} failed in the review checkout of ${binding.sha.slice(0, 12)}: ${`${error.stdout ?? ''}${error.stderr ?? ''}`.trim().slice(-1500) || error.message}`); }
+                }
+                // GY-3581: the repository's own build step runs before the command, as the merge trial's does, so a dashboard served from dist/ answers.
+                const manager = packageManager(checkout.worktree), build = buildArgv(manager, null);
+                const scripts = await readFile(join(checkout.worktree, 'package.json'), 'utf8').then(text => JSON.parse(text)?.scripts, () => undefined);
+                if (build && (scripts?.build || (manager.name === 'pnpm' && manager.workspace))) {
+                  try { await git(build[0]!, build.slice(1), { cwd: checkout.worktree, env: runEnvironment(process.env), timeoutMs: 1_200_000 }); }
+                  catch (error: any) { throw new Error(`${build.join(' ')} failed in the review checkout of ${binding.sha.slice(0, 12)}: ${`${error.stdout ?? ''}${error.stderr ?? ''}`.trim().slice(-1500) || error.message}`); }
                 }
                 const served = serveHead(checkout.worktree, commandApplication(declared), { sha: binding.sha, env: runEnvironment(process.env), budgetMs: (declared.readySeconds + 60) * 1000, scratch: join(checkout.directory, '.graphyard', 'scratch'), log: () => {} });
                 try { serving = { url: await served.ready, close: () => served.close().catch(() => {}) }; }
