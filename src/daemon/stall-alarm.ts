@@ -21,6 +21,8 @@ export interface StallReadings {
   freeSlots: number;
   /** GY-3473: what holds every implementation launch this cycle — disk, CPU pressure, an untrusted checkout, a running batch gate — as dispatch itself decided it. */
   holds?: readonly string[];
+  /** GY-3502: the dispatch gate refusing each ready item this cycle, by key, as `KEY waits: why`. */
+  gates?: ReadonlyMap<string, string>;
   state: Pick<DaemonState, 'actions' | 'stepFailures' | 'launchBackoff' | 'cpuPressure' | 'release' | 'lock' | 'mergeWriter'>;
   registry: Pick<AgentRegistry, 'accounts' | 'roles'> | null;
   /** The commit the deploy unit serves, null when none is recorded. */
@@ -50,11 +52,14 @@ export function lastLaunchAt(state: StallReadings['state'], work: readonly Work[
 /**
  * Why nothing launches now, from what the loop already read, most direct first: dispatch's own
  * holds this cycle, then a failing dispatch step or a launch refusal still backing off — an expired
- * backoff is history, not a cause (GY-3473). The item with no actor only when nothing else explains it.
+ * backoff, or one for a done item, is history, not a cause (GY-3473, GY-3502). Else the dispatch gate
+ * refusing each of the first five ready items; an item with no actor only when no gate explains it.
  */
-export function stallCauses({ now, ready, holds = [], state, registry, serving }: StallReadings): string[] {
+export function stallCauses({ now, open, ready, holds = [], gates, state, registry, serving }: StallReadings): string[] {
   const causes = [...holds];
-  const launchFailure = Object.values(state.launchBackoff).filter(entry => Date.parse(entry.until) > now).sort((a, b) => Date.parse(b.until) - Date.parse(a.until))[0];
+  // GY-3502: a launch failure counts only while its back-off runs and its item is open.
+  const openIds = new Set(open.map(item => item.id));
+  const launchFailure = Object.entries(state.launchBackoff).filter(([key, entry]) => Date.parse(entry.until) > now && openIds.has(key.slice(key.indexOf(':') + 1))).map(([, entry]) => entry).sort((a, b) => Date.parse(b.until) - Date.parse(a.until))[0];
   const dispatchError = state.stepFailures.dispatch?.reason ?? (launchFailure && `${launchFailure.reason} (launches back off until ${launchFailure.until})`);
   if (dispatchError) causes.push(`last dispatch error: ${dispatchError}`);
   const names = registry?.roles.find(role => role.name === 'worker')?.accounts ?? [];
@@ -63,7 +68,7 @@ export function stallCauses({ now, ready, holds = [], state, registry, serving }
   if (spent.length && spent.every(([, evidence]) => evidence)) causes.push(`every worker account is out of quota: ${spent.map(([name, evidence]) => `${name} (${evidence})`).join(', ')}`);
   const loaded = state.release?.commit ?? null;
   if (serving && loaded && serving !== loaded) causes.push(`the loop runs ${loaded.slice(0, 12)}, older than the served ${serving.slice(0, 12)}; restart it with graphyard master restart`);
-  if (!causes.length && ready.length) causes.push(`${ready[0]!.key} has no actor: ready, with no lease and no session`);
+  if (!causes.length) causes.push(...ready.slice(0, 5).map(item => gates?.get(item.key) ?? `${item.key} has no actor: ready, with no lease and no session`));
   return causes;
 }
 
@@ -74,12 +79,13 @@ export function stallAlarm(readings: StallReadings): string | null {
   // Idle since the last launch, or since the longest-waiting ready item last changed, whichever is later.
   const last = lastLaunchAt(state, open), waiting = Math.min(...ready.map(item => Date.parse(item.updatedAt)).filter(Number.isFinite));
   const since = last === null ? waiting : Math.max(last, waiting);
-  if (ready.length && freeSlots > 0 && Number.isFinite(since) && now - since >= stallIdleMs)
+  const stalled = ready.length > 0 && freeSlots > 0 && Number.isFinite(since) && now - since >= stallIdleMs;
+  if (stalled)
     lines.push(`${ready.length} ready item(s) (${ready.slice(0, 5).map(item => item.key).join(', ')}) and ${freeSlots} free worker slot(s), but no launch since ${iso(since)}. Cause: ${stallCauses(readings).join('; ')}`);
   const merging = new Set([...state.mergeWriter.queue.map(entry => entry.key), ...(state.mergeWriter.inFlights ?? []).map(entry => entry.key), ...(state.mergeWriter.inFlight ? [state.mergeWriter.inFlight.key] : [])]);
   const idle = open.filter(item => item.ready && item.stage !== 'done' && !item.blocker && !item.hold && !parkedOnHuman(item) && !live(item, now) && !merging.has(item.key)
-    && now - Date.parse(item.updatedAt) >= noActorMs);
-  for (const item of idle.slice(0, 5)) lines.push(`${item.key} has no actor: at ${item.stage} with no lease and no session, unchanged since ${item.updatedAt}`);
+    && !(stalled && ready.includes(item)) && now - Date.parse(item.updatedAt) >= noActorMs);
+  for (const item of idle.slice(0, 5)) lines.push(item.stage === 'ready' && readings.gates?.get(item.key) || `${item.key} has no actor: at ${item.stage} with no lease and no session, unchanged since ${item.updatedAt}`);
   return lines.length ? `Stall: ${lines.join(' ')}` : null;
 }
 

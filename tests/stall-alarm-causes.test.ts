@@ -124,10 +124,10 @@ test(`${proof} — the loop running older code than the serving commit is the na
   assert.match(alarm, new RegExp(`the loop runs ${loaded.slice(0, 12)}, older than the served ${served.slice(0, 12)}`));
 });
 
-test(`${proof} — with no other cause, the ready item with no actor is named; a launch clears the alarm`, async () => {
+test(`${proof} — with no other cause, the gate refusing the ready item is named; a launch clears the alarm`, async () => {
   const f = await fixture();
   const alarm = await stalled(f);
-  assert.match(alarm, /Cause: GY-1 has no actor: ready, with no lease and no session/);
+  assert.match(alarm, /Cause: GY-1 waits: no free worker account/);
   f.allow();
   await f.cycle();
   assert.deepEqual(f.dispatched, ['GY-1']);
