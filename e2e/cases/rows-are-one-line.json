@@ -1,0 +1,11 @@
+{
+  "id": "rows-are-one-line",
+  "title": "A work row is a title and one short line; a Needs you row leads with the question to answer",
+  "description": "Against a real control plane and isolated Postgres, seeds items with 900-character descriptions (with and without summary) and a Needs you human request with a 900-character description, opens the Work page in a browser at 1280 and 390 px, and asserts every row shows at most one line of at most 110 characters under the title, is at most 120 px tall at 1280 px, the full description appears only on the item page, and the Needs you row shows title, then the asked decision in normal text colour and size, then waiting time and Decide without summary or description and with no horizontal scroll at 390 px.",
+  "tags": ["dashboard", "work-rows", "needs-you"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "work rows stay one short line and Needs you leads with the decision at 1280 and 390 px", "run": "npm run test:browser -- browser-tests/rows-are-one-line.spec.ts", "timeoutSeconds": 360 }
+  ]
+}
