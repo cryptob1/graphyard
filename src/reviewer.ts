@@ -8,7 +8,6 @@ import { postDeployReviewSection, singleCaseReviewSection, criteriaVerdictRule }
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -25,7 +24,7 @@ import { prepareSessionHarness } from './master/harness.js';
 import { profileConcurrency, reviewerProfileSchema, selectReviewerProfile, sessionAgentName, type MasterConfig, type ReviewerProfile } from './master/profiles.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { launcherCoordinatorRoot, sessionConfinement } from './master/launch.js';
-import { credentialMaskFor, insideMasterConfinement, type CredentialMask } from './master/confinement.js';
+import { credentialMaskFor, insideMasterConfinement, reviewerCredentialDirectory, type CredentialMask } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
 import { moveOffLoggedOutAccount } from './master/logged-out.js';
 import { underTestRunner } from './runtime-environment.js';
@@ -334,11 +333,6 @@ export function vanishedSettledSession(handle: Pick<SessionHandle, 'id' | 'pane'
   return records.some(record => record.state !== 'pending' && record.requestId === handle.id && record.agentName === handle.agentName);
 }
 
-// Reviewer session bindings live beside the coordinator credential, outside every worktree.
-export function reviewerCredentialDirectory(config?: Pick<MasterConfig, 'credentialFile'>, input?: string) {
-  if (input) return resolve(input);
-  return config ? resolve(config.credentialFile, '../..', 'reviewers') : resolve(process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'reviewers');
-}
 export async function saveReviewerProfile(root: string, profileInput: unknown) {
   const profile = reviewerProfileSchema.parse(profileInput);
   const config = await loadStoredMasterConfig(root);
