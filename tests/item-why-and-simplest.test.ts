@@ -52,7 +52,7 @@ test('item-why-and-simplest: every built-in creator supplies both sentences, and
   const delivered = workFixture({ key: 'GY-7', title: 'Delivered', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['e2e:create-work-item'] }] });
   const filed = {
     // The planner was deleted in GY-2875; the master files planned items itself, from its prompt below.
-    'batch gate flaky/known-red filer': gateFiledItem({ title: 'Flaky test', description: 'd', key: 'flake:test:tests/a.test.ts' }, 'main'),
+    'batch gate flaky/known-red filer': gateFiledItem({ title: 'Flaky test', description: 'd', key: 'flake:test:tests/a.test.ts' }, 'main', 'cryptob1/graphyard'),
     'control-plane fault (reporter create upstream)': controlPlaneUpgradeItem({ failedStep: 'build', verified: 'a'.repeat(40) } as never),
     'stalled step filing': stepStallItem('dispatch', 'owner/project'),
     'trial host filing': trialHostFaultItem('registry.npmjs.org', 'owner/project'),

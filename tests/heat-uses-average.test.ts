@@ -8,7 +8,8 @@ import { masterConfigSchema } from '../src/master.js';
 
 // GY-3532: short turbo spikes are normal on a CPU with a 105C limit. The heat rule compares the
 // mean of the package samples over the last 120 s (at least 4 of them) with the 85C limit, not the
-// latest sample; with fewer than 4 samples the latest still decides.
+// latest sample; with fewer than 4 samples the latest still decides. Since GY-3501 the rule halves
+// trials and holds no launch.
 
 const config = masterConfigSchema.parse({ version: 1, url: 'http://127.0.0.1:9', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
   repository: 'owner/heat', baseBranch: 'main', githubAppId: 1234, hostId: 'heat-host', masterAgentName: 'graphyard-master-heat', workers: [] });
@@ -25,7 +26,7 @@ async function cycles(celsius: number[]): Promise<DaemonState> {
   return state;
 }
 
-test('unit:heat-uses-average — one 95C sample among 58C samples holds nothing; two minutes of 90C holds; with fewer than 4 samples the latest sample decides', async () => {
+test('unit:heat-uses-average — one 95C sample among 58C samples holds nothing; two minutes of 90C halves trials; with fewer than 4 samples the latest sample decides', async () => {
   // A turbo spike as the latest sample among two minutes of 58C.
   let state = await cycles([...Array(12).fill(58), 95]);
   assert.equal(cpuWaiting(state), null, 'one 95C spike holds no launch');
@@ -33,15 +34,15 @@ test('unit:heat-uses-average — one 95C sample among 58C samples holds nothing;
   assert.equal(trialCapNow(state, 4), 4, 'and sets no trial cap');
   assert.equal(state.cpuPressure?.celsius, 61, 'the heat rule reads the 120 s mean');
 
-  // Two minutes at 90C: the mean is at the limit, so launches wait and trials halve exactly as today.
+  // Two minutes at 90C: the mean is at the limit, so trials halve and no launch waits, exactly as today.
   state = await cycles(Array(13).fill(90));
-  assert.equal(cpuWaiting(state), 'launches waiting: CPU averages 90C over 2 min; limit 85C');
+  assert.equal(cpuWaiting(state), null, 'a 90C mean holds no launch (GY-3501)');
   assert.equal(trialCapNow(state, 4), 2);
   assert.equal(state.cpuPressure!.samples.length, 12, 'samples older than 120 s drop out');
 
   // Fewer than 4 samples: the latest sample decides, as before.
   state = await cycles([58, 58, 95]);
-  assert.equal(cpuWaiting(state), 'launches waiting: CPU 95C');
+  assert.equal(cpuWaiting(state), null, 'a 95C sample holds no launch either');
   assert.equal(trialCapNow(state, 4), 2);
 
   // The strict heavy-job cap reads the same rule.

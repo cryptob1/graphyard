@@ -27,8 +27,9 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 // GY-3416: a laptop's heat limit. The guard once compared each CPU sensor to its own critical
 // minus 3 — 102C on a machine whose critical is 105C — so a host at 95-98C was never throttled: no
 // launch waited, the host cooked, and other installs on it asked Graphyard to slow down. Now the
-// limit is min(85C, crit-3): launches wait at the limit, the trial cap halves from 5C under it, and
-// both restore on their own once the reading holds below it. The reading is the hottest package or
+// limit is min(85C, crit-3): the trial cap halves from 5C under it and both restore on their own
+// once the reading holds below it. GY-3501: the limit no longer holds launches — a hot sensor
+// governs only the trials and checks that make the heat. The reading is the hottest package or
 // core sensor, so what master status shows matches the hottest sensor. Driven through the loop's
 // own cycle against a temporary control plane, with an injected /sys/class/hwmon tree (the
 // operator's laptop: package 95C, core 16 at 96C, critical 105C) read by the production reader.
@@ -101,7 +102,7 @@ async function status(config: MasterConfig, state: DaemonState) {
   return masterStatusReport(root, config, coordinationSnapshot as () => Promise<any>, run);
 }
 
-test(`${proof} — with crit-105C sensors the limit is 85C: at 96C (the hottest package/core reading) launches wait with the halved trial cap; at 85C they still wait; at 81C only the cap stays halved; below it sustained, the full cap and the launches return`, async () => {
+test(`${proof} — with crit-105C sensors the limit is 85C: at 96C (the hottest package/core reading) the worker launches with the halved trial cap; at 85C and 81C the cap stays halved; below it sustained, the full cap returns`, async () => {
   credentialsDirectory = await temporaryDirectory('heat-limit-min-credentials');
   const config = makeConfig();
   const state = emptyDaemonState(config);
@@ -129,41 +130,39 @@ test(`${proof} — with crit-105C sensors the limit is 85C: at 96C (the hottest 
     mergeWriter: { ...ports, parallel: 4, cores: 24 } as MergeWriterReads,
     persist: async () => {},
   };
-  // GY-3426: the guard averages the last 60 s, so each cycle here reads a minute after the last.
+  // The guard averages the last 120 s, so each cycle here reads a minute after the last.
   let clock = Date.now();
   const cycle = async () => { clock += 61_000; await runCycle(config, state, daemon, () => clock); await mergeWriterIdle(state); };
 
   // The operator's reading: package 95C, core 96C — over the 85C limit, under the old 102C one.
   await cycle();
-  assert.deepEqual(dispatched, [], 'a CPU at 96C launches no worker');
-  assert.deepEqual(ticks, ['launches waiting: CPU 96C'], 'one waiting line names the temperature');
+  assert.deepEqual(dispatched, [readyItem.key], 'a CPU at 96C launches the worker: heat holds no launch (GY-3501)');
+  assert.deepEqual(ticks, [undefined], 'no waiting line names the temperature');
   assert.equal(state.cpuPressure?.celsius, 96, 'the reading is the hottest package or core sensor; the hotter nvme one is ignored');
   assert.deepEqual(state.cpuPressure?.trialCap, { now: 2, full: 4 }, 'the trial cap is halved at 96C');
   let report = await status(config, state);
   assert.equal(report.cpuPressure?.celsius, 96);
-  assert.equal(report.cpuPressure?.waiting, 'launches waiting: CPU 96C', 'master status shows the hot reading and the launches waiting');
+  assert.equal(report.cpuPressure?.waiting, null, 'master status shows the hot reading and no launch held');
   assert.deepEqual(report.cpuPressure?.trialCap, { now: 2, full: 4 }, 'master status shows the halved trial cap');
 
   // Exactly the limit: 85C against a 105C critical — the old guard's 102C never reached this.
   await heat(sensors, 85, 84);
   await cycle();
-  assert.deepEqual(dispatched, [], 'a CPU at the 85C limit still launches no worker');
-  assert.deepEqual(ticks, ['launches waiting: CPU 96C', 'launches waiting: CPU 85C'], 'launches wait at the limit itself');
+  assert.deepEqual(ticks, [undefined, undefined], 'at the limit itself no launch waits either');
 
-  // 81C: reviews and trials return (GY-3437: implementation still waits), and the trial cap stays halved until the reading drops under 80C.
+  // 81C: the trial cap stays halved until the reading drops under 80C.
   await heat(sensors, 81, 80);
   await cycle();
-  assert.deepEqual(dispatched, [], 'at 81C no implementation session starts yet');
-  assert.deepEqual(ticks.at(-1), undefined, 'no waiting line holds reviews below the limit');
+  assert.deepEqual(dispatched, [readyItem.key], 'the reading changes nothing the launches do');
+  assert.deepEqual(ticks.at(-1), undefined, 'no waiting line stands at 81C');
   assert.deepEqual(state.cpuPressure?.trialCap, { now: 2, full: 4 }, 'at 81C the trial cap is half');
   report = await status(config, state);
-  assert.equal(report.cpuPressure?.waiting, 'implementation launches waiting: CPU 81C; reviews and trials go on');
+  assert.equal(report.cpuPressure?.waiting, null);
 
-  // Below it sustained: two cycles at 79C give the full cap back, and the ready item launches.
+  // Below it sustained: two cycles at 79C give the full cap back.
   await heat(sensors, 79, 78);
   await cycle();
   await cycle();
-  assert.deepEqual(dispatched, [readyItem.key], 'the ready item launches once the reading holds below 80C');
   assert.deepEqual(state.cpuPressure?.trialCap, { now: 4, full: 4 }, 'the full cap returns once the reading holds below the limit');
   assert.deepEqual(ticks.slice(-2), [undefined, undefined], 'nothing holds the launches');
   report = await status(config, state);
